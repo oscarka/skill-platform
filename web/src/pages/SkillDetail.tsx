@@ -424,23 +424,65 @@ export default function SkillDetail() {
                   </div>
                 )}
 
-                {/* Transcript 完整对话记录（仿 OpenClaw JSONL Transcript） */}
+                {/* Transcript 完整对话记录（OpenClaw 风格双份 transcript） */}
                 {(st.transcript?.length > 0 || st.trace?.length > 0) && (
                   <div>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setShowTrace(!showTrace)}>
-                      {showTrace ? '▲ 收起' : `▼ 查看完整对话记录（${st.transcript?.length || st.trace?.length} 条）`}
-                    </button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setShowTrace(!showTrace)}>
+                        {showTrace ? '▲ 收起' : `▼ 查看对话记录（${st.transcript?.length || st.trace?.length} 条）`}
+                      </button>
+                      {/* 查看 GCS 完整版按钮 */}
+                      {st.transcript_gcs && (
+                        <button className="btn btn-ghost btn-sm" style={{ fontSize: '.75rem', color: 'var(--primary)' }}
+                          onClick={async () => {
+                            try {
+                              const r = await fetch(`${(window as any).__API_BASE || ''}/api/skills/${skill.id}/transcript/full`);
+                              const data = await r.json();
+                              if (data.entries?.length) {
+                                alert(`完整版 transcript：${data.entries.length} 条\n摘要：${JSON.stringify(data.summary, null, 2)}\n\n（完整版已存储在 GCS，当前显示截断版）`);
+                              } else {
+                                alert(data.message || '无完整版 transcript');
+                              }
+                            } catch { alert('读取失败'); }
+                          }}>
+                          📂 查看完整版（GCS）
+                        </button>
+                      )}
+                    </div>
                     {showTrace && (
                       <div style={{ marginTop: 8, borderLeft: '3px solid var(--gray-200)', paddingLeft: 12, maxHeight: 600, overflow: 'auto' }}>
                         {(st.transcript || st.trace || []).map((t: any, i: number) => (
                           <div key={i} style={{ marginBottom: 12 }}>
+                            {/* 条目头 */}
                             <div style={{
                               fontSize: '.78rem', fontWeight: 600, marginBottom: 4,
-                              color: t.role === 'assistant' ? 'var(--primary)' : t.role === 'tool' ? 'var(--success)' : 'var(--gray-500)'
+                              color: t.role === 'assistant' ? 'var(--primary)'
+                                : t.role === 'tool' ? 'var(--success)'
+                                : t.type === 'event' ? '#e67700'
+                                : 'var(--gray-500)'
                             }}>
-                              {t.role === 'assistant' ? `🤖 AI 回复（轮 ${t.turn}）` : t.role === 'tool' ? `🔧 ${t.tool || '工具'}` : `轮 ${t.round || t.turn}`}
+                              {t.type === 'event' ? `⚡ ${t.event || '事件'}`
+                                : t.role === 'assistant' ? `🤖 AI 回复（轮 ${t.turn}）`
+                                : t.role === 'tool' ? `🔧 ${t.tool || '工具'}`
+                                : `轮 ${t.round || t.turn}`}
                               {t.ts && <span style={{ fontWeight: 400, color: 'var(--gray-400)', marginLeft: 8 }}>{t.ts.slice(11,19)}</span>}
+                              {/* 截断标记 */}
+                              {t.is_truncated && (
+                                <span style={{ marginLeft: 8, fontSize: '.7rem', color: '#e67700', background: '#fff3e0', padding: '1px 6px', borderRadius: 3 }}>
+                                  ✂️ 已截断{t.original_length ? ` (原 ${(t.original_length/1024).toFixed(1)}KB)` : ''}
+                                </span>
+                              )}
+                              {/* Spill 文件标记 */}
+                              {t.spill_path && (
+                                <span style={{ marginLeft: 8, fontSize: '.7rem', color: '#1a6fab', background: '#e8f4fd', padding: '1px 6px', borderRadius: 3 }}>
+                                  💾 大文件已落盘
+                                </span>
+                              )}
                             </div>
+                            {/* 事件详情 */}
+                            {t.type === 'event' && t.detail && (
+                              <div style={{ fontSize: '.8rem', color: 'var(--gray-600)' }}>{t.detail}</div>
+                            )}
                             {/* AI 回复内容 */}
                             {t.role === 'assistant' && t.content && (
                               <pre style={{ background: '#f0f4ff', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>{t.content}</pre>
@@ -454,16 +496,20 @@ export default function SkillDetail() {
                                 </pre>
                               </div>
                             )}
-                            {/* Tool 输出（完整，不截断） */}
+                            {/* Tool 输出 */}
                             {t.role === 'tool' && t.output && (
                               <div>
-                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>输出：</div>
+                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>
+                                  输出{t.is_truncated ? '（截断版）' : ''}：
+                                </div>
                                 <pre style={{ background: '#fff8f0', borderRadius: 4, padding: '6px 8px', fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>{t.output}</pre>
                               </div>
                             )}
-                            {/* 旧 trace 兼容 */}
-                            {t.content && t.role !== 'assistant' && t.role !== 'tool' && (
-                              <pre style={{ background: '#f8f9fa', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', margin: 0 }}>{t.content}</pre>
+                            {/* Tool calls 列表 */}
+                            {t.role === 'assistant' && t.tool_calls?.length > 0 && (
+                              <div style={{ marginTop: 4, fontSize: '.75rem', color: 'var(--gray-500)' }}>
+                                🔧 调用工具：{t.tool_calls.map((tc: any) => tc.name).join(', ')}
+                              </div>
                             )}
                           </div>
                         ))}
@@ -471,6 +517,7 @@ export default function SkillDetail() {
                     )}
                   </div>
                 )}
+
 
                 {/* 人工批准操作 */}
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--gray-200)', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
