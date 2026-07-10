@@ -53,6 +53,8 @@ export const api = {
       if (!res.ok && res.status !== 202) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     },
+    sandboxCancel: (id: string) =>
+      request<any>(`/skills/${id}/sandbox-cancel`, { method: 'POST' }),
     install: (id: string) =>
       request<any>(`/skills/${id}/install`, { method: 'POST' }),
     uploadScripts: async (id: string, file: File): Promise<any> => {

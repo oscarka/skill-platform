@@ -219,6 +219,20 @@ export default function SkillDetail() {
             title="在 AI 沙箱中测试这个技能的 ReAct 循环">
             {skill.sandbox_status === 'running' ? '🔄 测试运行中…' : '🐳 沙箱测试'}
           </button>
+          {skill.sandbox_status === 'running' && (
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={async () => {
+                try {
+                  await api.skills.sandboxCancel(id!);
+                  flash('success', '已停止沙箱测试');
+                  load();
+                } catch (e: any) { flash('error', e.message); }
+              }}
+              title="停止当前沙箱测试">
+              ⏹ 停止
+            </button>
+          )}
           {needsGoogleOAuth(skill) && (
             <button
               className="btn btn-sm"
