@@ -544,7 +544,7 @@ export default function SkillDetail() {
                       // Skill 定义
                       lines.push(`## 📋 Skill 定义\n`);
                       lines.push('```yaml');
-                      lines.push(skill.definition || '（无）');
+                      lines.push(skill.prompt_template || skill.code || skill.definition || '（无）');
                       lines.push('```\n');
 
                       // 测试用例输入
@@ -605,8 +605,8 @@ export default function SkillDetail() {
                         lines.push('```\n');
                       }
 
-                      // 对话记录 / Transcript
-                      const transcript = st?.transcript || st?.trace || [];
+                      // 对话记录：优先用 stRaw.transcript（callback 存的原始字段），再回退到 st.transcript/st.trace
+                      const transcript = stRaw?.transcript || st?.transcript || st?.trace || [];
                       if (transcript.length > 0) {
                         lines.push(`## 💬 完整对话记录（${transcript.length} 条）\n`);
                         transcript.forEach((t: any, i: number) => {
@@ -713,7 +713,7 @@ export default function SkillDetail() {
                       lines.push(`\n> Skill: **${skillName}** · 导出时间: ${now}\n`);
                       lines.push(`## 📋 Skill 定义\n`);
                       lines.push('```yaml');
-                      lines.push(skill.definition || '（无）');
+                      lines.push(skill.prompt_template || skill.code || skill.definition || '（无）');
                       lines.push('```\n');
                       if (st?.testInput) {
                         lines.push(`## 📥 测试输入\n`);
