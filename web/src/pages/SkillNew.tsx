@@ -134,21 +134,23 @@ export default function SkillNew() {
               <div className="card" style={{ borderColor: '#7c3aed', borderWidth: 2 }}>
                 <div className="card-title" style={{ color: '#7c3aed' }}>✅ 导入成功！</div>
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: '1rem' }}>{importResult.parsed?.name}</div>
-                  <div style={{ fontSize: '.82rem', color: 'var(--gray-500)' }}>
-                    作者：@{importResult.parsed?.author} · 内容长度：{importResult.parsed?.contentLength} 字符
+                  <div style={{ fontWeight: 700, fontSize: '1rem' }}>
+                    {importResult.clawhub?.name || importResult.skill?.name}
                   </div>
-                  {importResult.parsed?.installCmd && (
+                  <div style={{ fontSize: '.82rem', color: 'var(--gray-500)' }}>
+                    作者：@{importResult.clawhub?.author || importResult.skill?.author_name} · 内容长度：{importResult.clawhub?.contentLength} 字符
+                  </div>
+                  {importResult.clawhub?.slug && (
                     <div style={{ marginTop: 6, fontSize: '.8rem', fontFamily: 'monospace',
                       background: '#f5f3ff', padding: '6px 10px', borderRadius: 6, color: '#7c3aed' }}>
-                      $ {importResult.parsed.installCmd}
+                      $ openclaw skills install @{importResult.clawhub.author}/{importResult.clawhub.slug}
                     </div>
                   )}
                 </div>
                 <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', background: 'var(--gray-50)',
                   padding: 12, borderRadius: 8, fontFamily: 'monospace', lineHeight: 1.6,
                   maxHeight: 200, overflow: 'auto' }}>
-                  {importResult.parsed?.preview}
+                  {importResult.clawhub?.preview}
                 </div>
                 <div style={{ marginTop: 14 }}>
                   <button className="btn btn-primary"
