@@ -152,18 +152,33 @@ export default function SkillDetail() {
   };
 
 
+  // 一次性授权：存 token 到 DB，以后所有测试自动复用
+  const handleAuthorize = async (provider: 'google') => {
+    flash('success', `请在弹窗中完成 ${provider === 'google' ? 'Google' : provider} 授权…`);
+    try {
+      let token: string | null = null;
+      if (provider === 'google') token = await getGoogleToken();
+      if (!token) { flash('error', '授权取消或失败'); return; }
+      // 存入 DB
+      await fetch('/api/oauth/mcp-tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          mcp_name: provider === 'google' ? 'stitch-mcp-auto' : undefined,
+          access_token: token,
+          expires_in: 3600,
+        }),
+      });
+      flash('success', `✅ ${provider === 'google' ? 'Google' : provider} 已授权并保存，下次「🐳 沙箱测试」将自动使用`);
+    } catch (e: any) { flash('error', e.message); }
+  };
+
   const handleSandboxTest = async (withOAuth = false) => {
     setSandboxing(true);
     try {
-      let oauthTokens: string | undefined;
-      if (withOAuth) {
-        flash('success', '请在弹窗中完成 Google 授权…');
-        const token = await getGoogleToken();
-        if (!token) { flash('error', 'Google 授权取消或失败'); return; }
-        oauthTokens = JSON.stringify({ google: { access_token: token }, stitch: { access_token: token } });
-      }
-      await api.skills.sandboxTest(id!, oauthTokens);
-      flash('success', withOAuth ? '✅ 已授权，沙箱测试已启动（Google token 已注入）' : '沙箱测试已启动，AI 正在运行 ReAct 循环…');
+      await api.skills.sandboxTest(id!);
+      flash('success', '沙箱测试已启动，AI 正在运行 ReAct 循环…');
       load();
     } catch (e: any) { flash('error', e.message); }
     finally { setSandboxing(false); }
@@ -244,10 +259,9 @@ export default function SkillDetail() {
             <button
               className="btn btn-sm"
               style={{ background: '#1a73e8', color: '#fff' }}
-              onClick={() => handleSandboxTest(true)}
-              disabled={sandboxing || skill.sandbox_status === 'running'}
-              title="先完成 Google 授权，再触发沙箱测试（MCP 工具可用）">
-              🔐 授权测试
+              onClick={() => handleAuthorize('google')}
+              title="授权 Google 账号（一次性，之后测试自动复用）">
+              🔗 授权 Google
             </button>
           )}
           <button

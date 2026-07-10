@@ -72,8 +72,8 @@ steps:
       - --cpu=1
       - --min-instances=0
       - --max-instances=3
-      - --set-env-vars=NODE_ENV=production,GCP_PROJECT_ID=gen-lang-client-0884226164,GCP_REGION=asia-east1,DB_SCHEMA=skill_platform,SERVICE_URL=https://skill-platform-yo5337ccva-de.a.run.app,SANDBOX_SECRET=sandbox-secret-2024,SANDBOX_JOB_IMAGE=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
-      - --set-secrets=DATABASE_URL=skill-platform-db-url:latest,DOUBAO_API_KEY=skill-platform-doubao-key:latest,DEEPSEEK_API_KEY=skill-platform-deepseek-key:latest
+      - --set-env-vars=NODE_ENV=production,GCP_PROJECT_ID=gen-lang-client-0884226164,GCP_REGION=asia-east1,DB_SCHEMA=skill_platform,SERVICE_URL=https://skill-platform-yo5337ccva-de.a.run.app,SANDBOX_SECRET=sandbox-secret-2024,SANDBOX_JOB_IMAGE=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest,OAUTH_REDIRECT_URI=https://skill-platform-yo5337ccva-de.a.run.app/oauth-callback.html
+      - --set-secrets=DATABASE_URL=skill-platform-db-url:latest,DOUBAO_API_KEY=skill-platform-doubao-key:latest,DEEPSEEK_API_KEY=skill-platform-deepseek-key:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest
     waitFor: [push]
 
   # ── 更新 Cloud Run Job（sandbox 沙箱，让它用最新的 sandbox:latest 镜像）────────
