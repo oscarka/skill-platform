@@ -180,6 +180,10 @@ print(f"[config] model={AI_MODEL!r} → context={CONTEXT_WINDOW_TOKENS//1000}k t
       f"max_output={MAX_OUTPUT_TOKENS} source={_CURRENT_MODEL_CONFIG['source']}", flush=True)
 
 
+# 设置 mcporter 内部超时（默认 60s 太短，npx 首次下载包 + MCP server 启动可能超 60s）
+os.environ.setdefault("MCPORTER_CALL_TIMEOUT", "180000")  # 180 秒（毫秒）
+print(f"[config] MCPORTER_CALL_TIMEOUT={os.environ['MCPORTER_CALL_TIMEOUT']}ms", flush=True)
+
 def auto_configure_mcp():
     """沙箱启动时自动配置已保存的 MCP 服务"""
     try:
