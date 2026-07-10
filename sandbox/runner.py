@@ -23,26 +23,56 @@ SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 e
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
-OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider: {access_token, refresh_token, ...}}
+OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, token_type, scope, expiry_date, ...}}
 
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
 FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
 
 # ─── 注入 OAuth tokens 到对应的 MCP 工具目录 ─────────────────────────────────
+# 支持任意 MCP server，通过 mcp_name 匹配写入路径
+# 写入格式以各 MCP server 要求的格式为准（不能只写 access_token）
+MCP_TOKEN_PATHS = {
+    # mcp_name → 写入路径（相对 home 目录）
+    "stitch-mcp-auto": ".stitch-mcp-auto/tokens.json",
+    "stitch":          ".stitch-mcp-auto/tokens.json",  # 别名
+}
+
+def _build_token_obj(raw: dict) -> dict:
+    """把存储的 token 数据转成 MCP server 期望的完整格式"""
+    import time
+    obj = {
+        "access_token":  raw.get("access_token", ""),
+        "token_type":    raw.get("token_type", "Bearer"),
+        "scope":         raw.get("scope", "https://www.googleapis.com/auth/cloud-platform"),
+        # expiry_date 是 Google OAuth2 标准字段（unix ms），优先用存储值
+        "expiry_date":   raw.get("expiry_date") or raw.get("expires_at") or (int(time.time() * 1000) + 3600_000),
+    }
+    if raw.get("refresh_token"):
+        obj["refresh_token"] = raw["refresh_token"]
+    return obj
+
 if OAUTH_TOKENS:
     try:
         tokens_map = json.loads(OAUTH_TOKENS)
-        # Stitch MCP: ~/.stitch-mcp-auto/tokens.json
-        if "google" in tokens_map or "stitch" in tokens_map:
-            stitch_dir = os.path.expanduser("~/.stitch-mcp-auto")
-            os.makedirs(stitch_dir, exist_ok=True)
-            token_data = tokens_map.get("stitch") or tokens_map.get("google")
-            with open(os.path.join(stitch_dir, "tokens.json"), "w") as f:
-                json.dump(token_data, f)
-            print(f"[oauth] stitch tokens injected to {stitch_dir}/tokens.json", flush=True)
+        home = os.path.expanduser("~")
+
+        # 按 mcp_name 或 provider 匹配写入
+        for key, rel_path in MCP_TOKEN_PATHS.items():
+            if key in tokens_map:
+                token_obj = _build_token_obj(tokens_map[key])
+                full_path = os.path.join(home, rel_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, "w") as f:
+                    json.dump(token_obj, f, indent=2)
+                print(f"[oauth] {key} token injected → {full_path}", flush=True)
+                print(f"[oauth]   access_token={token_obj['access_token'][:20]}... "
+                      f"scope={token_obj['scope'][:40]}... "
+                      f"expiry={token_obj['expiry_date']}", flush=True)
+                break  # 避免重复写
     except Exception as e:
         print(f"[oauth] token injection failed: {e}", flush=True)
+
 
 
 # ─── 模型配置表（参照 OpenClaw model-context.ts）────────────────────────────

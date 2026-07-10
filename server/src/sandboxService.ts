@@ -50,14 +50,23 @@ export async function runSandboxTest(skillId: string, oauthTokens?: string): Pro
   if (!oauthTokens) {
     try {
       const storedTokens = await db.allAsync<any>(
-        `SELECT provider, mcp_name, access_token FROM mcp_oauth_tokens WHERE expires_at = 0 OR expires_at > $1`,
+        `SELECT provider, mcp_name, access_token, token_data, expires_at FROM mcp_oauth_tokens WHERE expires_at = 0 OR expires_at > $1`,
         [Date.now()]
       );
       if (storedTokens.length > 0) {
         const tokenMap: Record<string, any> = {};
         for (const t of storedTokens) {
-          tokenMap[t.provider] = { access_token: t.access_token };
-          if (t.mcp_name) tokenMap[t.mcp_name] = { access_token: t.access_token };
+          // 优先用完整 token_data（含 token_type, scope, expiry_date）
+          let tokenObj: Record<string, any> = { access_token: t.access_token };
+          if (t.token_data) {
+            try { tokenObj = { ...JSON.parse(t.token_data), access_token: t.access_token }; } catch {}
+          }
+          // 确保 expiry_date 字段存在（stitch-mcp-auto 要求）
+          if (!tokenObj.expiry_date && t.expires_at) {
+            tokenObj.expiry_date = parseInt(t.expires_at);
+          }
+          tokenMap[t.provider] = tokenObj;
+          if (t.mcp_name) tokenMap[t.mcp_name] = tokenObj;
         }
         oauthTokens = JSON.stringify(tokenMap);
       }
