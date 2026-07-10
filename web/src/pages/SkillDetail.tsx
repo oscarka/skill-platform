@@ -296,7 +296,32 @@ export default function SkillDetail() {
 
       {/* Sandbox Test Result */}
       {(() => {
-        const st = skill.sandbox_test ? (() => { try { return JSON.parse(skill.sandbox_test); } catch { return null; } })() : null;
+        const stRaw = skill.sandbox_test ? (() => { try { return JSON.parse(skill.sandbox_test); } catch { return null; } })() : null;
+        // 兼容新旧格式：新格式 output 是 AI 返回的 JSON 字符串，需要二次解析
+        const st = stRaw ? (() => {
+          const parsed = { ...stRaw };
+          // 尝试解析 output 字段（可能是 JSON 字符串）
+          if (typeof parsed.output === 'string') {
+            try {
+              const inner = JSON.parse(parsed.output);
+              parsed.score = inner.score ?? parsed.score;
+              parsed.passed = inner.passed ?? parsed.passed;
+              parsed.comment = inner.output || inner.notes || parsed.comment || parsed.output;
+              parsed.finalOutput = inner.output || parsed.output;
+              parsed.notes = inner.notes;
+              parsed.test_results = inner.test_results;
+              // 如果旧格式没有 strengths/weaknesses，自动生成
+              if (!parsed.strengths && parsed.passed) {
+                parsed.strengths = ['沙箱 AI Agent 执行成功'];
+              }
+            } catch {
+              // output 不是 JSON，直接用
+              parsed.finalOutput = parsed.output;
+              parsed.comment = parsed.output;
+            }
+          }
+          return parsed;
+        })() : null;
         const status = skill.sandbox_status || 'none';
         return (
           <div className="card mb-4">
@@ -375,8 +400,29 @@ export default function SkillDetail() {
                 {/* 最终输出 */}
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: '.8rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 4 }}>📤 最终输出</div>
-                  <pre style={{ background: '#f8f9fa', border: '1px solid var(--gray-200)', borderRadius: 6, padding: '10px 12px', fontSize: '.82rem', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>{st.finalOutput}</pre>
+                  <pre style={{ background: '#f8f9fa', border: '1px solid var(--gray-200)', borderRadius: 6, padding: '10px 12px', fontSize: '.82rem', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>{st.finalOutput}{st.notes ? `\n\n💡 ${st.notes}` : ''}</pre>
                 </div>
+
+                {/* 逐 Test Case 详细结果 */}
+                {st.test_results?.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: '.8rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 8 }}>📊 逐用例测试结果</div>
+                    {st.test_results.map((tr: any, i: number) => (
+                      <div key={i} className="card" style={{ marginBottom: 10, padding: 12 }}>
+                        <div style={{ fontWeight: 600, fontSize: '.85rem', marginBottom: 6 }}>
+                          {tr.response?.startsWith('Error') ? '❌' : '✅'} {tr.case}
+                        </div>
+                        <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginBottom: 4 }}>用户输入：</div>
+                        <pre style={{ background: '#f0f4ff', borderRadius: 4, padding: '6px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto', margin: '0 0 8px' }}>{tr.input}</pre>
+                        <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginBottom: 4 }}>Skill 完整回复：</div>
+                        <pre style={{ background: '#f0fff4', borderRadius: 4, padding: '6px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: '0 0 8px' }}>{tr.response}</pre>
+                        {tr.evaluation && (
+                          <div style={{ fontSize: '.78rem', color: 'var(--gray-600)', fontStyle: 'italic' }}>📝 评价：{tr.evaluation}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Transcript 完整对话记录（仿 OpenClaw JSONL Transcript） */}
                 {(st.transcript?.length > 0 || st.trace?.length > 0) && (
