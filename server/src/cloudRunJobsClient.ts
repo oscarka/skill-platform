@@ -26,6 +26,7 @@ export interface JobSubmitOptions {
   dbSchema?:        string;
   callbackUrl?:     string;
   sandboxSecret?:   string;
+  mcpConfigs?:      string;    // JSON array of saved MCP configs to auto-inject
 }
 
 export interface JobExecution {
@@ -87,6 +88,7 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     { name: 'DB_SCHEMA',           value: opts.dbSchema || process.env.DB_SCHEMA || 'skill_platform' },
     { name: 'CALLBACK_URL',        value: opts.callbackUrl || '' },
     { name: 'SANDBOX_SECRET',      value: opts.sandboxSecret || '' },
+    { name: 'MCP_CONFIGS',         value: opts.mcpConfigs || '[]' },
   ];
 
   const jobParent = `projects/${GCP_PROJECT}/locations/${GCP_REGION}/jobs/${JOB_NAME}`;

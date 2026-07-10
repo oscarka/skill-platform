@@ -166,6 +166,16 @@ export default function SkillDetail() {
             title="在 AI 沙箱中测试这个技能的 ReAct 循环">
             {skill.sandbox_status === 'running' ? '🔄 测试运行中…' : '🐳 沙箱测试'}
           </button>
+          <button
+            className="btn btn-sm"
+            style={{ color: 'var(--danger)' }}
+            onClick={async () => {
+              if (!confirm(`确定要删除 Skill「${skill.name}」吗？此操作不可恢复。`)) return;
+              try { await api.skills.delete(id!); navigate('/skills'); } catch { alert('删除失败'); }
+            }}
+            title="永久删除这个 Skill">
+            🗑️ 删除
+          </button>
           <span className="text-muted text-xs ml-auto">
             创建：{new Date(skill.created_at).toLocaleDateString('zh-CN')}
             {skill.preferred_model && ` · 模型：${skill.preferred_model}`}
