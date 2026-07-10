@@ -602,8 +602,12 @@ skillRouter.post('/:id/sandbox-callback', async (req, res) => {
     }
 
     // ── 最终结果（runner.py 执行完毕 POST 一次）───────────────────────────────
-    const { skillId, passed, output, duration_ms, tested_at } = req.body;
-    const result = { skillId: id, passed, output, durationMs: duration_ms, testedAt: tested_at };
+    const { skillId, passed, output, duration_ms, tested_at, transcript } = req.body;
+    const result = {
+      skillId: id, passed, output,
+      transcript: transcript || [],  // 仿 OpenClaw：完整的 JSONL transcript
+      durationMs: duration_ms, testedAt: tested_at,
+    };
     await db.runAsync(
       `UPDATE skills SET sandbox_test=?, updated_at=? WHERE id=?`,
       [JSON.stringify(result), Date.now(), id]

@@ -378,20 +378,47 @@ export default function SkillDetail() {
                   <pre style={{ background: '#f8f9fa', border: '1px solid var(--gray-200)', borderRadius: 6, padding: '10px 12px', fontSize: '.82rem', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>{st.finalOutput}</pre>
                 </div>
 
-                {/* ReAct Trace 折叠 */}
-                {st.trace?.length > 0 && (
+                {/* Transcript 完整对话记录（仿 OpenClaw JSONL Transcript） */}
+                {(st.transcript?.length > 0 || st.trace?.length > 0) && (
                   <div>
                     <button className="btn btn-ghost btn-sm" onClick={() => setShowTrace(!showTrace)}>
-                      {showTrace ? '▲ 收起' : '▼ 查看 ReAct 详细过程'}
+                      {showTrace ? '▲ 收起' : `▼ 查看完整对话记录（${st.transcript?.length || st.trace?.length} 条）`}
                     </button>
                     {showTrace && (
-                      <div style={{ marginTop: 8, borderLeft: '3px solid var(--gray-200)', paddingLeft: 12 }}>
-                        {st.trace.map((t: any, i: number) => (
-                          <div key={i} style={{ marginBottom: 10 }}>
-                            <div style={{ fontSize: '.78rem', fontWeight: 600, color: t.role === 'act' ? 'var(--primary)' : t.role === 'observe' ? 'var(--success)' : 'var(--gray-500)', marginBottom: 2 }}>
-                              轮 {t.round} · {t.role === 'think' ? '🤔 推理' : t.role === 'act' ? '▶ 执行' : '👁 观察'}
+                      <div style={{ marginTop: 8, borderLeft: '3px solid var(--gray-200)', paddingLeft: 12, maxHeight: 600, overflow: 'auto' }}>
+                        {(st.transcript || st.trace || []).map((t: any, i: number) => (
+                          <div key={i} style={{ marginBottom: 12 }}>
+                            <div style={{
+                              fontSize: '.78rem', fontWeight: 600, marginBottom: 4,
+                              color: t.role === 'assistant' ? 'var(--primary)' : t.role === 'tool' ? 'var(--success)' : 'var(--gray-500)'
+                            }}>
+                              {t.role === 'assistant' ? `🤖 AI 回复（轮 ${t.turn}）` : t.role === 'tool' ? `🔧 ${t.tool || '工具'}` : `轮 ${t.round || t.turn}`}
+                              {t.ts && <span style={{ fontWeight: 400, color: 'var(--gray-400)', marginLeft: 8 }}>{t.ts.slice(11,19)}</span>}
                             </div>
-                            <pre style={{ background: '#f8f9fa', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', margin: 0 }}>{t.content}</pre>
+                            {/* AI 回复内容 */}
+                            {t.role === 'assistant' && t.content && (
+                              <pre style={{ background: '#f0f4ff', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>{t.content}</pre>
+                            )}
+                            {/* Tool 输入 */}
+                            {t.role === 'tool' && t.input && (
+                              <div style={{ marginBottom: 4 }}>
+                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>输入：</div>
+                                <pre style={{ background: '#f0fff4', borderRadius: 4, padding: '6px 8px', fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto', margin: 0 }}>
+                                  {typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                            {/* Tool 输出（完整，不截断） */}
+                            {t.role === 'tool' && t.output && (
+                              <div>
+                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>输出：</div>
+                                <pre style={{ background: '#fff8f0', borderRadius: 4, padding: '6px 8px', fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>{t.output}</pre>
+                              </div>
+                            )}
+                            {/* 旧 trace 兼容 */}
+                            {t.content && t.role !== 'assistant' && t.role !== 'tool' && (
+                              <pre style={{ background: '#f8f9fa', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto', margin: 0 }}>{t.content}</pre>
+                            )}
                           </div>
                         ))}
                       </div>
