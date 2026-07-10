@@ -27,6 +27,7 @@ export interface JobSubmitOptions {
   callbackUrl?:     string;
   sandboxSecret?:   string;
   mcpConfigs?:      string;    // JSON array of saved MCP configs to auto-inject
+  oauthTokens?:     string;    // JSON: {google: {access_token, refresh_token}, stitch: {...}}
 }
 
 export interface JobExecution {
@@ -89,6 +90,7 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     { name: 'CALLBACK_URL',        value: opts.callbackUrl || '' },
     { name: 'SANDBOX_SECRET',      value: opts.sandboxSecret || '' },
     { name: 'MCP_CONFIGS',         value: opts.mcpConfigs || '[]' },
+    { name: 'OAUTH_TOKENS',        value: opts.oauthTokens || '' },
   ];
 
   const jobParent = `projects/${GCP_PROJECT}/locations/${GCP_REGION}/jobs/${JOB_NAME}`;
