@@ -17,6 +17,35 @@ DB_SCHEMA     = os.environ.get("DB_SCHEMA", "skill_platform")
 SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 else ""
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
+MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
+
+# Fallback AI provider
+FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
+FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
+
+
+def auto_configure_mcp():
+    """沙箱启动时自动配置已保存的 MCP 服务"""
+    try:
+        configs = json.loads(MCP_CONFIGS)
+        if not configs:
+            return
+        for cfg in configs:
+            name = cfg.get("name", "")
+            cmd = cfg.get("command", "")
+            args = cfg.get("args", "")
+            if not name or not cmd:
+                continue
+            mcporter_cmd = f"mcporter config add {name} --command {cmd}"
+            if args:
+                mcporter_cmd += f" --args '{args}'"
+            try:
+                subprocess.run(mcporter_cmd, shell=True, timeout=30, capture_output=True)
+                print(f"[MCP] 已配置: {name} ({cmd} {args})", flush=True)
+            except Exception as e:
+                print(f"[MCP] 配置 {name} 失败: {e}", flush=True)
+    except Exception as e:
+        print(f"[MCP] 解析 MCP_CONFIGS 失败: {e}", flush=True)
 
 
 # ─── OpenClaw exec-auto-reviewer（简化版）──────────────────────────────────────
@@ -359,6 +388,9 @@ def save_result(result: dict):
 def main():
     start = time.time()
     progress("启动", f"开始测试 skill_id={SKILL_ID}")
+
+    # 自动配置已保存的 MCP 服务
+    auto_configure_mcp()
 
     if not SKILL_MD:
         progress("错误", "SKILL.md 内容为空，无法测试")

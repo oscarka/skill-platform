@@ -829,6 +829,16 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
   }
 
 
+  // ── 读取已保存的 MCP 配置，注入到沙箱 ──────────────────────────────────────
+  let mcpConfigsJson = '[]';
+  try {
+    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
+    if (mcpRows.length > 0) {
+      mcpConfigsJson = JSON.stringify(mcpRows);
+      console.log(`[SandboxService] Injecting ${mcpRows.length} MCP configs:`, mcpRows.map(r => r.name));
+    }
+  } catch { /* ignore if table doesn't exist yet */ }
+
   // 提交 Cloud Run Job（传主+备用 provider，仿 OpenClaw FailoverError）
   const { executionId, executionName } = await submitSandboxJob({
     skillId,
@@ -841,6 +851,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     fallbackAiBase:   fallbackBase,
     callbackUrl,
     sandboxSecret,
+    mcpConfigs:       mcpConfigsJson,
   });
 
   await appendProgress(skillId, {
@@ -872,6 +883,31 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
   }
 
   await appendProgress(skillId, { step: 'finished', detail: finalStatus });
+
+  // ── 自动保存沙箱中发现的 MCP 配置 ────────────────────────────────────────
+  try {
+    const progRow = await db.getAsync<any>('SELECT sandbox_progress FROM skills WHERE id=?', [skillId]);
+    if (progRow?.sandbox_progress) {
+      const events = JSON.parse(progRow.sandbox_progress);
+      for (const e of events) {
+        const m = (e.detail || '').match(
+          /mcporter\s+config\s+add\s+(\S+)\s+--command\s+(\S+)(?:\s+--args\s+'([^']*)')?/
+        );
+        if (m) {
+          const [, name, command, args = ''] = m;
+          const { randomUUID } = await import('crypto');
+          try {
+            await db.runAsync(
+              `INSERT INTO mcp_configs (id, name, command, args) VALUES (?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET command=excluded.command, args=excluded.args`,
+              [randomUUID(), name, command, args]
+            );
+            console.log(`[SandboxService] Auto-saved MCP config: ${name}`);
+          } catch { /* ignore */ }
+        }
+      }
+    }
+  } catch { /* ignore */ }
 
   // 读取 callback 写入的结果（runner.py 已 POST 到 /sandbox-callback）
   const row = await db.getAsync<any>('SELECT sandbox_test FROM skills WHERE id=?', [skillId]);
