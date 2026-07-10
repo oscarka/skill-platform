@@ -857,3 +857,22 @@ skillRouter.post('/:id/preview/chat', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── POST /api/skills/:id/sandbox-cancel ─────────────────────────────────────
+// 管理员手动停止沙箱测试：把状态标为 cancelled（Job 本身已超时或结束）
+skillRouter.post('/:id/sandbox-cancel', async (req, res) => {
+  try {
+    const skill = await db.getAsync<any>('SELECT id, sandbox_status FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+    if (skill.sandbox_status !== 'running') {
+      return res.json({ ok: true, message: 'not running' });
+    }
+    await db.runAsync(
+      `UPDATE skills SET sandbox_status='cancelled', updated_at=? WHERE id=?`,
+      [Date.now(), skill.id]
+    );
+    res.json({ ok: true, message: 'cancelled' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
