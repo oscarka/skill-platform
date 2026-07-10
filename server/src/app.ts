@@ -11,14 +11,17 @@ import { h5Router } from './routes/h5Routes';
 import { resultRouter } from './routes/resultRoutes';
 import { testRouter } from './routes/testRoutes';
 import { mcpRouter } from './routes/mcpRoutes';
+import { oauthRouter } from './routes/oauthRoutes';
+import cookieParser from 'cookie-parser';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3100', 10);
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // ─── Static: H5 client pages ─────────────────────────────────────────────────
 const H5_DIR = path.resolve(__dirname, '..', '..', '..', 'h5');
@@ -33,6 +36,7 @@ app.use('/api/h5', h5Router);
 app.use('/api/results', resultRouter);
 app.use('/api/test', testRouter);
 app.use('/api/mcp-configs', mcpRouter);
+app.use('/', oauthRouter);  // OAuth routes: /auth/google/start, /auth/google/callback, /api/oauth/*
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
