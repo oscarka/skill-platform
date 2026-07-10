@@ -31,6 +31,8 @@ export interface SandboxTestResult {
   strengths: string[];
   weaknesses: string[];
   trace: ReActTrace[];        // 每轮 ReAct 的详细记录
+  transcript?: any[];         // 对话记录（Cloud Run Job callback 保留）
+  test_results?: any[];       // 每个测试用例的详细结果
   durationMs: number;
   testedAt: number;
   model: string;
@@ -936,6 +938,9 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     strengths: passed ? (aiEval?.strengths ?? ['沙箱 AI Agent 执行成功']) : [],
     weaknesses: passed ? (aiEval?.weaknesses ?? []) : [`Job ${finalStatus}`],
     trace: [],
+    // 保留 transcript 和 test_results（从 callback 结果中获取）
+    transcript: callbackResult?.transcript || [],
+    test_results: aiEval?.test_results || callbackResult?.test_results || [],
     durationMs: Date.now() - t0,
     testedAt: Date.now(),
     model,
