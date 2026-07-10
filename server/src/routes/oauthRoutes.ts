@@ -33,7 +33,7 @@ function ensureSessionId(req: any, res: any): string {
 
 // ─── GET /api/oauth/google/config ────────────────────────────────────────────
 // 返回 Google OAuth 配置状态（供前端判断是否已配置）
-oauthRouter.get('/google/config', (req, res) => {
+oauthRouter.get('/api/oauth/google/config', (req, res) => {
   if (!GOOGLE_CLIENT_ID) {
     return res.json({ configured: false });
   }
@@ -185,7 +185,7 @@ oauthRouter.get('/api/oauth/token-for-skill', async (req, res) => {
 // ─── POST /api/oauth/mcp-tokens ──────────────────────────────────────────────
 // 管理员授权后存储 MCP OAuth token（持久化，所有测试复用）
 // body: { provider, mcp_name?, access_token, refresh_token?, expires_in?, token_data? }
-oauthRouter.post('/mcp-tokens', async (req, res) => {
+oauthRouter.post('/api/oauth/mcp-tokens', async (req, res) => {
   try {
     const { provider, mcp_name, access_token, refresh_token, expires_in, token_data } = req.body;
     if (!provider || !access_token) return res.status(400).json({ error: 'provider and access_token required' });
@@ -207,7 +207,7 @@ oauthRouter.post('/mcp-tokens', async (req, res) => {
 
 // ─── GET /api/oauth/mcp-tokens ───────────────────────────────────────────────
 // 列出所有已存储的 MCP OAuth token（不返回 token 明文，只返回状态）
-oauthRouter.get('/mcp-tokens', async (req, res) => {
+oauthRouter.get('/api/oauth/mcp-tokens', async (req, res) => {
   try {
     const rows = await db.allAsync<any>(
       `SELECT id, provider, mcp_name, expires_at, updated_at,
@@ -220,7 +220,7 @@ oauthRouter.get('/mcp-tokens', async (req, res) => {
 });
 
 // ─── DELETE /api/oauth/mcp-tokens/:id ────────────────────────────────────────
-oauthRouter.delete('/mcp-tokens/:id', async (req, res) => {
+oauthRouter.delete('/api/oauth/mcp-tokens/:id', async (req, res) => {
   try {
     await db.runAsync(`DELETE FROM mcp_oauth_tokens WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
