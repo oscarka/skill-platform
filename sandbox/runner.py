@@ -213,6 +213,35 @@ def tool_read(path: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+# ─── 工具：invoke_skill（子 Agent 调用）──────────────────────────────────────
+def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dict:
+    """
+    以 Skill 身份回答一条用户消息。
+    类似 OpenClaw promptTemplate 注入——AI 就是那个 Skill 在运行。
+    用于测试 prompt-only Skill：不需要写代码，直接 AI-to-AI 调用。
+    """
+    system = skill_system_prompt or SKILL_MD
+    if not system:
+        return {"ok": False, "error": "SKILL_MD 为空，无法调用 Skill"}
+    print(f"[invoke_skill] user_message={user_message[:80]!r}", flush=True)
+    try:
+        resp = _do_ai_call(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_message},
+            ],
+            tools=None,
+            timeout=120,
+        )
+        choice = resp.get("choices", [{}])[0]
+        reply = choice.get("message", {}).get("content", "")
+        usage = resp.get("usage", {})
+        print(f"[invoke_skill] reply={reply[:120]!r} tokens={usage}", flush=True)
+        return {"ok": True, "response": reply, "usage": usage}
+    except Exception as e:
+        print(f"[invoke_skill] error: {e}", flush=True)
+        return {"ok": False, "error": str(e)}
+
 # ─── 进度上报（stdout + HTTP POST 到平台，实时写入 DB 供前端展示）──────────────
 def _post_progress(msg: dict):
     if not CALLBACK_URL:
@@ -273,6 +302,31 @@ TOOLS = [
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "invoke_skill",
+            "description": (
+                "以 Skill 的 system prompt 身份，向 AI 发送一条用户消息，返回 Skill 的回复。"
+                " 用于测试 prompt-only Skill：把 SKILL.md 正文作为 system，测试用例作为 user。"
+                " 也可用于 script Skill 的 warm-up 检测（看 AI 对 Skill 指令的理解）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_message": {
+                        "type": "string",
+                        "description": "发给 Skill 的用户消息（即一条测试用例的内容）"
+                    },
+                    "skill_system_prompt": {
+                        "type": "string",
+                        "description": "可选：指定 Skill 的 system prompt。留空则自动使用当前 SKILL.md 全文。"
+                    }
+                },
+                "required": ["user_message"]
             }
         }
     },
@@ -516,6 +570,12 @@ def dispatch_tool(name: str, args: dict) -> str:
     elif name == "read_file":
         r = tool_read(args["path"])
         return json.dumps(r, ensure_ascii=False)
+    elif name == "invoke_skill":
+        r = tool_invoke_skill(
+            user_message=args["user_message"],
+            skill_system_prompt=args.get("skill_system_prompt"),
+        )
+        return json.dumps(r, ensure_ascii=False)
     return json.dumps({"error": f"unknown tool: {name}"})
 
 # ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
@@ -654,58 +714,45 @@ def main():
         sys.exit(1)
 
     system_prompt = textwrap.dedent(f"""
-        你是一个在 Linux 沙箱里运行的 AI 执行引擎。
-        你会收到一个 Skill 的说明文档（SKILL.md）和测试输入数据，需要：
-        1. 判断 Skill 类型（脚本型 or 纯提示词型）
-        2. 用测试输入数据进行实际测试（不要跳过测试数据！）
-        3. 验证功能是否正常工作
-        4. 给出最终评测结果（JSON 格式）
+        你是一个专业的 Skill 测试 Agent，运行在 Linux 沙箱里。
+        你负责对 Skill 进行三阶段测试：
 
-        ⚡ 效率要求：尽量在 6 轮内完成测试。
+        ═══════════════════════════════════════════════════════
+        📋 阶段 1：分析 & 生成测试输入
+        ═══════════════════════════════════════════════════════
+        - 阅读 SKILL.md，理解 Skill 的功能、类型和预期行为
+        - 判断 Skill 类型：
+            * 纯提示词型（Prompt Skill）：SKILL.md 只有描述和 prompt，没有脚本代码
+            * 脚本型（Script Skill）：SKILL.md 有 scripts/ 或需要执行命令
+        - 如果系统提供了预生成的测试输入，直接使用；否则自己生成 2-3 个测试用例
 
-        🚫 禁止行为（违反会浪费轮次）：
-        - 禁止创建虚拟环境（python3 -m venv / virtualenv）
-        - 禁止安装已预装的包（见下方列表）
-        - 直接用 python3 运行脚本，无需激活任何环境
+        ═══════════════════════════════════════════════════════
+        🚀 阶段 2：执行 Skill（子 Agent 模式）
+        ═══════════════════════════════════════════════════════
+        对 prompt-only Skill：
+        - 使用 invoke_skill 工具，把 SKILL.md 全文作为 skill_system_prompt，
+          把每个测试用例作为 user_message，直接调用 Skill
+        - invoke_skill 会以 Skill 的身份回答，返回真实的 Skill 输出
+        - 每个测试用例调用一次 invoke_skill
 
-        📦 沙箱已预装（无需 pip install）：
-        - Python 系统库：requests, httpx, PyPDF2, pdfplumber, python-docx, python-pptx
-        - Pillow, pytesseract, pandas, numpy, openai
-        - 系统工具：tesseract-ocr（含中文支持）, curl, wget, jq, git, nodejs, npm
+        对 script Skill：
+        - 用 exec 工具执行 Skill 的脚本
+        - 把测试输入传给脚本，收集输出
 
         🔌 MCP 工具支持（mcporter 已预装）：
-        - 如果 SKILL.md 里有 `requires.bins: ["mcporter"]`，可以用 exec 调用 mcporter
-        - 配置 MCP 服务器：exec("mcporter config add <name> --command npx --args '-y <pkg>'")
-        - 调用 MCP 工具：exec("mcporter call <server>.<tool> key=value ...")
-        - 示例（Stitch UI）：
-            exec("mcporter config add stitch --command npx --args '-y stitch-mcp-auto'")
-            exec("mcporter call stitch.generate_screen_from_text prompt='design a login page'")
+        - 如果 SKILL.md 有 `requires.bins: ["mcporter"]`，用 exec 调用
+        - 配置：exec("mcporter config add <name> --command npx --args '-y <pkg>'")
+        - 调用：exec("mcporter call <server>.<tool> key=value ...")
 
-        🤖 纯提示词 Skill 测试方法（如果 SKILL.md 没有可执行代码/脚本）：
-        - 用 openai 库模拟真实用户调用，AI_API_KEY 和 AI_BASE_URL 环境变量已设置
-        - 把 SKILL.md 的正文作为 system_prompt，把测试输入中的每个测试用例作为 user_message
-        - 用 Python 脚本调用 API，评估返回内容的质量
-        ⚠️ 重要：AI_BASE_URL 已包含完整路径（如 https://ark.xx.com/api/v3），
-           openai 库直接用，不要手动拼接 /v1/！curl 请用 AI_CHAT_URL 环境变量。
-        - 示例：
-            import openai, os
-            client = openai.OpenAI(api_key=os.environ["AI_API_KEY"], base_url=os.environ["AI_BASE_URL"])
-            resp = client.chat.completions.create(
-                model=os.environ.get("AI_MODEL","doubao-seed-1-6-250615"),
-                messages=[
-                    {{"role":"system","content":"<SKILL.md 正文>"}},
-                    {{"role":"user","content":"<测试用例>"}}
-                ],
-                timeout=30
-            )
-            print(resp.choices[0].message.content)
-        - curl 示例（用预置的 AI_CHAT_URL，不要自己拼路径）：
-            curl -s -X POST "$AI_CHAT_URL" \\
-              -H "Authorization: Bearer $AI_API_KEY" \\
-              -H "Content-Type: application/json" \\
-              -d '{{"model":"'"$AI_MODEL"'","messages":[{{"role":"user","content":"test"}}]}}'
-
-        结果格式（最后一轮直接输出此 JSON）：
+        ═══════════════════════════════════════════════════════
+        🏆 阶段 3：评估 & 输出结果
+        ═══════════════════════════════════════════════════════
+        - 对每个测试用例的回复，评估：
+            * 是否符合 Skill 的描述和预期功能
+            * 回复质量（准确性、完整性、有用性）
+            * 是否遵守了 SKILL.md 里的约束条件
+        - 给出综合评分和总结
+        - 最后一轮直接输出 JSON 结果（不要用代码块包裹）：
         {{
           "passed": true/false,
           "score": 0-100,
@@ -715,22 +762,29 @@ def main():
             {{
               "case": "test_case_1",
               "input": "用户的原始输入",
-              "response": "Skill/AI 给出的完整回复内容（不要截断，保留原文）",
+              "response": "Skill 给出的完整回复原文（不要截断）",
               "evaluation": "对这条回复的评价"
             }}
           ]
         }}
-        ⚠️ 重要：test_results 里的 response 字段必须包含 Skill 实际输出的**完整原文**，不要摘要，不要截断。
-        这是给平台管理员审核用的，必须看到 Skill 真正输出了什么。
+
+        🚫 禁止行为：
+        - 禁止用 bash/shell 脚本构造 JSON 请求体来调用 AI API（极易出错）
+        - 禁止创建虚拟环境（python3 -m venv / virtualenv）
+        - 禁止安装已预装的包
+
+        📦 沙箱已预装（无需 pip install）：
+        - requests, httpx, PyPDF2, pdfplumber, python-docx, python-pptx
+        - Pillow, pytesseract, pandas, numpy, openai
+        - 系统工具：curl, wget, jq, git, nodejs, npm, tesseract-ocr
 
         📊 评分准则：
-        - 90-100：功能完全验证通过（AI 实际调用成功且响应质量高）
+        - 90-100：所有测试用例通过，回复质量高
         - 70-89：主流程工作，有小问题
-        - 60-69：外部服务/API 不可访问（auth 失败、网络限制）但 skill 逻辑正确 → passed=true
+        - 60-69：外部服务不可用但 Skill 逻辑正确 → passed=true
         - 40-59：部分功能工作
-        - 0-39：skill 逻辑本身有缺陷（不是环境问题）
-        ⚠️ 重要：如果失败是因为「需要认证」「外部服务不可用」「网络限制」，给 60-69 分并 passed=true，
-           不要因为环境限制就给 0 分。
+        - 0-39：Skill 逻辑本身有缺陷
+        ⚠️ 如果失败是「需要认证」「外部服务不可用」等环境问题，给 60-69 分并 passed=true。
     """).strip()
 
     user_msg = f"""
