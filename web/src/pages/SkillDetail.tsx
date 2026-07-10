@@ -590,7 +590,7 @@ export default function SkillDetail() {
                     ✅ 批准发布
                   </button>
                   <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 打回</button>
-                  <button className="btn btn-ghost btn-sm" onClick={handleSandboxTest} style={{ marginLeft: 'auto' }}>🔄 重新测试</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleSandboxTest(false)} style={{ marginLeft: 'auto' }}>🔄 重新测试</button>
                   {/* 下载完整上下文 MD */}
                   <button
                     className="btn btn-ghost btn-sm"
