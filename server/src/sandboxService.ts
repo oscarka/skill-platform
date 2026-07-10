@@ -922,10 +922,13 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
       const events = JSON.parse(progRow.sandbox_progress);
       for (const e of events) {
         const m = (e.detail || '').match(
-          /mcporter\s+config\s+add\s+(\S+)\s+--command\s+(\S+)(?:\s+--args\s+'([^']*)')?/
+          /mcporter\s+config\s+add\s+(\S+)\s+--command\s+(\S+)(?:\s+--args\s+(?:'([^']*)'|"([^"]*)"))?/
         );
         if (m) {
-          const [, name, command, args = ''] = m;
+          const [, name, rawCommand, argsSingle, argsDouble] = m;
+          // strip surrounding quotes from command (e.g. "npx" → npx, 'npx' → npx)
+          const command = rawCommand.replace(/^["']|["']$/g, '');
+          const args = argsSingle ?? argsDouble ?? '';
           const { randomUUID } = await import('crypto');
           try {
             await db.runAsync(
@@ -933,7 +936,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
                ON CONFLICT(name) DO UPDATE SET command=excluded.command, args=excluded.args`,
               [randomUUID(), name, command, args]
             );
-            console.log(`[SandboxService] Auto-saved MCP config: ${name}`);
+            console.log(`[SandboxService] Auto-saved MCP config: ${name} (command=${command}, args=${args})`);
           } catch { /* ignore */ }
         }
       }
