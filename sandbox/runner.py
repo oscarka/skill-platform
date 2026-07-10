@@ -308,11 +308,15 @@ def dispatch_tool(name: str, args: dict) -> str:
     return json.dumps({"error": f"unknown tool: {name}"})
 
 # ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
-def react_loop(system_prompt: str, user_msg: str) -> str:
+def react_loop(system_prompt: str, user_msg: str) -> dict:
+    """返回 {"output": str, "transcript": list} — transcript 是完整的 messages 数组（仿 OpenClaw JSONL transcript）"""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_msg},
     ]
+    # transcript: 存每一轮的完整记录（不截断），仿 OpenClaw 的 JSONL append-only 模式
+    transcript = []
+
     for turn in range(12):
         # OpenClaw-style context pruning before each AI call
         messages = prune_context(messages)
@@ -335,16 +339,24 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
         msg = choice["message"]
         messages.append(msg)
 
-        # 没有 tool_call → AI 给出最终答案（处理空响应）
+        # 记录 AI 回复到 transcript
+        transcript.append({
+            "turn": turn + 1,
+            "role": "assistant",
+            "content": msg.get("content", ""),
+            "tool_calls": [{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in (msg.get("tool_calls") or [])],
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # 没有 tool_call → AI 给出最终答案
         tool_calls = msg.get("tool_calls") or []
         content_text = msg.get("content") or ""
         if not tool_calls:
             if not content_text.strip():
-                # 空响应（既无 content 也无 tool_calls）→ 当作正常完成
                 progress("完成", "AI 返回空响应，视为测试结束")
-                return "测试完成。"
+                return {"output": "测试完成。", "transcript": transcript}
             progress("完成", "AI 已给出测试结论")
-            return content_text
+            return {"output": content_text, "transcript": transcript}
 
         # 有 tool_call → 执行工具
         for tc in msg["tool_calls"]:
@@ -353,7 +365,22 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
             tool_label = {"exec": "执行命令", "read_file": "读取文件", "write_file": "写入文件", "http_get": "HTTP请求"}.get(name, name)
             progress(f"工具:{tool_label}", args.get("command", args.get("path", args.get("url", "")))[:80])
             result_str = dispatch_tool(name, args)
-            # 截断过大的工具输出（防止上下文超限）
+
+            # 记录工具输出到 transcript（完整保留，不截断 — 仿 OpenClaw 8MB 上限）
+            transcript.append({
+                "turn": turn + 1,
+                "role": "tool",
+                "tool": name,
+                "input": args,
+                "output": result_str[:8000],  # 单条最大 8KB
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+
+            # 把工具执行结果也发回进度（让前端能看到完整输出）
+            if name == "exec" and len(result_str) > 10:
+                progress(f"输出:{tool_label}", result_str[:4000])
+
+            # 截断过大的工具输出（防止 AI 上下文超限）
             if len(result_str) > 2000:
                 result_str = result_str[:2000] + "...[truncated]"
             messages.append({
@@ -361,7 +388,7 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
                 "tool_call_id": tc["id"],
                 "content": result_str,
             })
-    return "已达最大轮次上限"
+    return {"output": "已达最大轮次上限", "transcript": transcript}
 
 # ─── 结果写回 Supabase ────────────────────────────────────────────────────────
 def save_result(result: dict):
@@ -449,7 +476,22 @@ def main():
               -d '{{"model":"'"$AI_MODEL"'","messages":[{{"role":"user","content":"test"}}]}}'
 
         结果格式（最后一轮直接输出此 JSON）：
-        {{"passed": true/false, "score": 0-100, "output": "测试结果摘要", "notes": "详细说明"}}
+        {{
+          "passed": true/false,
+          "score": 0-100,
+          "output": "整体评测摘要",
+          "notes": "详细说明",
+          "test_results": [
+            {{
+              "case": "test_case_1",
+              "input": "用户的原始输入",
+              "response": "Skill/AI 给出的完整回复内容（不要截断，保留原文）",
+              "evaluation": "对这条回复的评价"
+            }}
+          ]
+        }}
+        ⚠️ 重要：test_results 里的 response 字段必须包含 Skill 实际输出的**完整原文**，不要摘要，不要截断。
+        这是给平台管理员审核用的，必须看到 Skill 真正输出了什么。
 
         📊 评分准则：
         - 90-100：功能完全验证通过（AI 实际调用成功且响应质量高）
@@ -472,12 +514,15 @@ def main():
     """.strip()
 
     try:
-        output = react_loop(system_prompt, user_msg)
+        loop_result = react_loop(system_prompt, user_msg)
+        output = loop_result["output"]
+        transcript = loop_result.get("transcript", [])
         duration_ms = int((time.time() - start) * 1000)
         result = {
             "skill_id": SKILL_ID,
             "passed": True,
             "output": output,
+            "transcript": transcript,  # 仿 OpenClaw：完整的 JSONL transcript
             "duration_ms": duration_ms,
             "tested_at": datetime.now(timezone.utc).isoformat(),
         }
