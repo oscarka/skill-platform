@@ -528,6 +528,142 @@ export default function SkillDetail() {
                   </button>
                   <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 打回</button>
                   <button className="btn btn-ghost btn-sm" onClick={handleSandboxTest} style={{ marginLeft: 'auto' }}>🔄 重新测试</button>
+                  {/* 下载完整上下文 MD */}
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="下载完整测试上下文（请求+输出+对话记录）"
+                    onClick={() => {
+                      // 生成 Markdown 文档
+                      const lines: string[] = [];
+                      const now = new Date().toLocaleString('zh-CN');
+                      const skillName = skill.name || skill.id;
+
+                      lines.push(`# 沙箱测试完整上下文`);
+                      lines.push(`\n> Skill: **${skillName}** · 导出时间: ${now}\n`);
+
+                      // Skill 定义
+                      lines.push(`## 📋 Skill 定义\n`);
+                      lines.push('```yaml');
+                      lines.push(skill.definition || '（无）');
+                      lines.push('```\n');
+
+                      // 测试用例输入
+                      if (st?.testInput) {
+                        lines.push(`## 📥 测试输入（AI 生成）\n`);
+                        lines.push('```json');
+                        lines.push(st.testInput);
+                        lines.push('```\n');
+                      }
+
+                      // AI 评测结论
+                      if (st?.comment) {
+                        lines.push(`## 🏆 AI 评测结论\n`);
+                        lines.push(`**综合评价：** ${st.comment}\n`);
+                        if (st.score !== undefined) lines.push(`**评分：** ${st.score}/100\n`);
+                        if (st.strengths?.length) {
+                          lines.push(`### ✅ 优点\n`);
+                          st.strengths.forEach((s: string) => lines.push(`- ${s}`));
+                          lines.push('');
+                        }
+                        if (st.weaknesses?.length) {
+                          lines.push(`### ⚠️ 不足\n`);
+                          st.weaknesses.forEach((s: string) => lines.push(`- ${s}`));
+                          lines.push('');
+                        }
+                      }
+
+                      // 逐用例测试结果
+                      if (st?.test_results?.length) {
+                        lines.push(`## 📊 逐用例测试结果\n`);
+                        st.test_results.forEach((tr: any, i: number) => {
+                          const ok = !tr.response?.startsWith('Error');
+                          lines.push(`### ${ok ? '✅' : '❌'} 用例 ${i + 1}：${tr.case || ''}\n`);
+                          if (tr.input) {
+                            lines.push(`**用户输入：**\n`);
+                            lines.push('```');
+                            lines.push(tr.input);
+                            lines.push('```\n');
+                          }
+                          if (tr.response) {
+                            lines.push(`**Skill 完整回复：**\n`);
+                            lines.push('```');
+                            lines.push(tr.response);
+                            lines.push('```\n');
+                          }
+                          if (tr.evaluation) {
+                            lines.push(`**评价：** ${tr.evaluation}\n`);
+                          }
+                        });
+                      }
+
+                      // 最终输出
+                      if (st?.finalOutput) {
+                        lines.push(`## 📤 最终输出\n`);
+                        lines.push('```');
+                        lines.push(st.finalOutput);
+                        if (st.notes) lines.push(`\n💡 ${st.notes}`);
+                        lines.push('```\n');
+                      }
+
+                      // 对话记录 / Transcript
+                      const transcript = st?.transcript || st?.trace || [];
+                      if (transcript.length > 0) {
+                        lines.push(`## 💬 完整对话记录（${transcript.length} 条）\n`);
+                        transcript.forEach((t: any, i: number) => {
+                          const time = t.ts ? t.ts.slice(11, 19) : '';
+                          if (t.type === 'event') {
+                            lines.push(`### ⚡ 事件: ${t.event || ''}  ${time}`);
+                            if (t.detail) lines.push(`\n${t.detail}\n`);
+                          } else if (t.role === 'assistant') {
+                            lines.push(`### 🤖 AI 回复（轮 ${t.turn ?? i}）  ${time}`);
+                            if (t.is_truncated) lines.push(`\n> ✂️ 已截断（原始长度 ${t.original_length ?? '?'} 字符）\n`);
+                            if (t.content) {
+                              lines.push('\n' + t.content + '\n');
+                            }
+                            if (t.tool_calls?.length) {
+                              lines.push(`\n🔧 调用工具: ${t.tool_calls.map((tc: any) => tc.name).join(', ')}\n`);
+                            }
+                          } else if (t.role === 'tool') {
+                            lines.push(`### 🔧 工具: ${t.tool || ''}  ${time}`);
+                            if (t.is_truncated) lines.push(`\n> ✂️ 输出已截断（原始 ${t.original_length ?? '?'} 字符）`);
+                            if (t.spill_path) lines.push(`\n> 💾 大文件已落盘: ${t.spill_path}`);
+                            if (t.input) {
+                              lines.push('\n**输入：**\n');
+                              lines.push('```');
+                              lines.push(typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2));
+                              lines.push('```\n');
+                            }
+                            if (t.output) {
+                              lines.push('**输出：**\n');
+                              lines.push('```');
+                              lines.push(t.output);
+                              lines.push('```\n');
+                            }
+                          }
+                        });
+                      }
+
+                      // GCS 信息
+                      if (st?.transcript_gcs) {
+                        lines.push(`## ☁️ GCS 完整版\n`);
+                        lines.push('```json');
+                        lines.push(JSON.stringify(st.transcript_gcs, null, 2));
+                        lines.push('```\n');
+                      }
+
+                      // 下载
+                      const md = lines.join('\n');
+                      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `sandbox-${skillName.replace(/\s+/g, '-')}-${Date.now()}.md`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    ⬇️ 下载完整上下文
+                  </button>
                   {/* Bundle 安装按钮 */}
                   <button
                     className="btn btn-sm"
@@ -565,6 +701,64 @@ export default function SkillDetail() {
                     {uploadingScripts ? '上传中…' : '📦 上传 scripts.zip'}
                     <input type="file" accept=".zip,.tar.gz" style={{ display: 'none' }} onChange={handleUploadScripts} disabled={uploadingScripts} />
                   </label>
+                  {/* FAILED 状态也提供下载，便于排查 */}
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    title="下载测试上下文（含错误信息）"
+                    onClick={() => {
+                      const lines: string[] = [];
+                      const now = new Date().toLocaleString('zh-CN');
+                      const skillName = skill.name || skill.id;
+                      lines.push(`# 沙箱测试上下文（FAILED）`);
+                      lines.push(`\n> Skill: **${skillName}** · 导出时间: ${now}\n`);
+                      lines.push(`## 📋 Skill 定义\n`);
+                      lines.push('```yaml');
+                      lines.push(skill.definition || '（无）');
+                      lines.push('```\n');
+                      if (st?.testInput) {
+                        lines.push(`## 📥 测试输入\n`);
+                        lines.push('```json');
+                        lines.push(st.testInput);
+                        lines.push('```\n');
+                      }
+                      lines.push(`## ❌ 错误信息\n`);
+                      lines.push(st?.comment || st?.error || 'Job FAILED');
+                      lines.push('');
+                      if (st?.finalOutput) {
+                        lines.push(`## 📤 最终输出\n`);
+                        lines.push('```');
+                        lines.push(st.finalOutput);
+                        lines.push('```\n');
+                      }
+                      // 对话记录
+                      const transcript = st?.transcript || st?.trace || [];
+                      if (transcript.length > 0) {
+                        lines.push(`## 💬 对话记录（${transcript.length} 条）\n`);
+                        transcript.forEach((t: any, i: number) => {
+                          const time = t.ts ? t.ts.slice(11, 19) : '';
+                          if (t.role === 'assistant') {
+                            lines.push(`### 🤖 AI（轮 ${t.turn ?? i}）${time}\n`);
+                            if (t.content) lines.push(t.content + '\n');
+                          } else if (t.role === 'tool') {
+                            lines.push(`### 🔧 工具: ${t.tool || ''}  ${time}\n`);
+                            if (t.output) { lines.push('```'); lines.push(t.output); lines.push('```\n'); }
+                          } else if (t.type === 'event') {
+                            lines.push(`### ⚡ ${t.event || ''} ${time}: ${t.detail || ''}\n`);
+                          }
+                        });
+                      }
+                      const md = lines.join('\n');
+                      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `sandbox-failed-${skillName.replace(/\s+/g, '-')}-${Date.now()}.md`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    ⬇️ 下载上下文
+                  </button>
                 </div>
               </div>
             )}
