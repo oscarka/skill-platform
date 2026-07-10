@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+# ─── Skill Sandbox Image ──────────────────────────────────────────────────────
+# 用于 Cloud Run Job 沙箱执行 Plugin Skill
+# 参考 OpenClaw Dockerfile.sandbox 设计
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash curl wget jq git ca-certificates gnupg \
+    python3 python3-pip python3-venv \
+    nodejs npm \
+    unzip \
+    tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
+    libmagic1 file \
+  && rm -rf /var/lib/apt/lists/*
+
+# 预装 mcporter（MCP CLI，让 AI 可以调用 MCP 服务如 Stitch）
+RUN npm install -g mcporter
+
+# 预装常用 Python 库（简历解析、PDF、HTTP、OCR等）
+RUN pip3 install --no-cache-dir --break-system-packages \
+    requests httpx \
+    PyPDF2 pdfplumber \
+    python-docx python-pptx \
+    Pillow pytesseract \
+    pandas numpy \
+    openai
+
+# 创建沙箱用户
+RUN useradd --create-home --shell /bin/bash sandbox
+WORKDIR /home/sandbox
+
+# 复制 runner 脚本
+COPY sandbox/runner.py /runner.py
+COPY sandbox/requirements.txt /requirements.txt
+
+USER sandbox
+
+CMD ["python3", "/runner.py"]

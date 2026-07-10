@@ -1,0 +1,50 @@
+# .gcloudignore — 排除不需要上传到 Cloud Build 的文件
+
+# Node modules（Cloud Build 自己会 npm install）
+node_modules/
+**/node_modules/
+
+# 本地构建产物
+server/dist/
+web/dist/
+**/*.js.map
+
+# 本地数据库
+server/skill-platform.db
+server/*.db
+
+# 本地运行时目录
+uploads/
+reports/
+server/logs/
+
+# 测试脚本
+test_matrix.sh
+/tmp/
+
+# 大文件
+*.zip
+*.tar.gz
+*.tgz
+
+# 本地 Docker sandbox 相关（非 Cloud Run 需要的）
+# 保留 server/sandbox/Dockerfile（Cloud Build 会用到）
+
+# 环境变量（安全）
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Git
+.git/
+.gitignore
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 测试日志
+/tmp/matrix_*.log
