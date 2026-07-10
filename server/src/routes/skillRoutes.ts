@@ -640,11 +640,18 @@ skillRouter.post('/:id/sandbox-callback', async (req, res) => {
     }
 
     // ── 最终结果（runner.py 执行完毕 POST 一次）───────────────────────────────
-    const { skillId, passed, output, duration_ms, tested_at, transcript } = req.body;
+    const body = req.body;
+    const { passed, output, duration_ms, tested_at, transcript, transcript_gcs, testInput, model } = body;
     const result = {
-      skillId: id, passed, output,
-      transcript: transcript || [],  // 仿 OpenClaw：完整的 JSONL transcript
-      durationMs: duration_ms, testedAt: tested_at,
+      skillId: id,
+      passed,
+      output,
+      transcript: transcript || [],        // 截断版对话记录（给前端展示）
+      transcript_gcs: transcript_gcs || null,  // GCS 完整版路径
+      testInput: testInput || null,        // AI 生成的测试输入
+      model: model || null,               // 使用的模型名
+      durationMs: duration_ms,
+      testedAt: tested_at,
     };
     await db.runAsync(
       `UPDATE skills SET sandbox_test=?, updated_at=? WHERE id=?`,

@@ -29,6 +29,92 @@ FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
 FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
 
 
+# ─── 模型配置表（参照 OpenClaw model-context.ts）────────────────────────────
+# context_window: 模型实际上下文窗口（tokens）
+# max_output:     最大输出 tokens（影响 max_tokens 参数）
+# max_input:      最大输入 tokens（实际可用输入空间）
+# provider:       doubao / deepseek / openai
+#
+# 数据来源：各厂商 API 文档 + 截图里的模型详情页
+_MODEL_CONFIGS: dict = {
+    # ── Doubao Seed 系列（字节跳动）────────────────────────────────────────
+    "doubao-seed-1-8-250715":       {"context_window": 256_000, "max_output": 96_000,  "max_input": 224_000, "provider": "doubao"},
+    "doubao-seed-1-8-251228":       {"context_window": 256_000, "max_output": 96_000,  "max_input": 224_000, "provider": "doubao"},
+    "doubao-seed-1-8":              {"context_window": 256_000, "max_output": 96_000,  "max_input": 224_000, "provider": "doubao"},
+    "doubao-seed-1-6-250615":       {"context_window": 128_000, "max_output": 16_000,  "max_input": 112_000, "provider": "doubao"},
+    "doubao-seed-1-6":              {"context_window": 128_000, "max_output": 16_000,  "max_input": 112_000, "provider": "doubao"},
+    "doubao-pro-256k":              {"context_window": 256_000, "max_output": 4_096,   "max_input": 252_000, "provider": "doubao"},
+    "doubao-pro-128k":              {"context_window": 128_000, "max_output": 4_096,   "max_input": 124_000, "provider": "doubao"},
+    "doubao-pro-32k":               {"context_window": 32_000,  "max_output": 4_096,   "max_input": 28_000,  "provider": "doubao"},
+    "doubao-lite-128k":             {"context_window": 128_000, "max_output": 4_096,   "max_input": 124_000, "provider": "doubao"},
+    "doubao-lite-32k":              {"context_window": 32_000,  "max_output": 4_096,   "max_input": 28_000,  "provider": "doubao"},
+    # ── DeepSeek 系列 ────────────────────────────────────────────────────
+    "deepseek-chat":                {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
+    "deepseek-coder":               {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
+    "deepseek-reasoner":            {"context_window": 64_000,  "max_output": 16_000,  "max_input": 56_000,  "provider": "deepseek"},
+    # ── Gemini 系列（如有）─────────────────────────────────────────────────
+    "gemini-2.0-flash":             {"context_window": 1_048_576, "max_output": 8_192, "max_input": 1_040_000, "provider": "google"},
+    "gemini-1.5-pro":               {"context_window": 2_097_152, "max_output": 8_192, "max_input": 2_090_000, "provider": "google"},
+    # ── 默认（未知模型）─────────────────────────────────────────────────────
+    "_default":                     {"context_window": 128_000, "max_output": 4_096,   "max_input": 112_000, "provider": "unknown"},
+}
+
+
+def resolve_model_config(model: str = None) -> dict:
+    """
+    根据模型名称返回模型配置。
+    优先级：
+      1. 环境变量 CONTEXT_WINDOW_OVERRIDE（手动覆盖，用于测试或新模型）
+      2. 精确匹配模型名
+      3. 前缀模糊匹配（如 doubao-seed-1-8-xxx → doubao-seed-1-8）
+      4. 默认值 128k
+    """
+    model = (model or AI_MODEL or "").strip().lower()
+
+    # 1. 环境变量强制覆盖
+    override = os.environ.get("CONTEXT_WINDOW_OVERRIDE", "")
+    if override:
+        try:
+            ctx = int(override)
+            return {**_MODEL_CONFIGS["_default"], "context_window": ctx,
+                    "max_input": int(ctx * 0.875), "source": "env_override"}
+        except ValueError:
+            pass
+
+    # 2. 精确匹配
+    if model in _MODEL_CONFIGS:
+        return {**_MODEL_CONFIGS[model], "source": "exact_match", "model": model}
+
+    # 3. 前缀匹配（从最长 key 开始）
+    sorted_keys = sorted(_MODEL_CONFIGS.keys(), key=len, reverse=True)
+    for key in sorted_keys:
+        if key != "_default" and model.startswith(key):
+            return {**_MODEL_CONFIGS[key], "source": "prefix_match", "model": model, "matched_key": key}
+
+    # 4. 从名称猜测（doubao-xxx-256k 这种带 context size 的命名）
+    import re
+    m = re.search(r'(\d+)k', model)
+    if m:
+        ctx = int(m.group(1)) * 1000
+        if 8_000 <= ctx <= 2_000_000:
+            return {**_MODEL_CONFIGS["_default"], "context_window": ctx,
+                    "max_input": int(ctx * 0.875), "source": "name_infer", "model": model}
+
+    # 5. 默认
+    cfg = _MODEL_CONFIGS["_default"].copy()
+    cfg["source"] = "default"
+    cfg["model"] = model
+    return cfg
+
+
+# 在模块加载时解析并缓存当前模型配置
+_CURRENT_MODEL_CONFIG = resolve_model_config(AI_MODEL)
+CONTEXT_WINDOW_TOKENS = _CURRENT_MODEL_CONFIG["context_window"]
+MAX_OUTPUT_TOKENS     = min(_CURRENT_MODEL_CONFIG["max_output"], 16_000)  # 沙箱场景下 16k 足够
+print(f"[config] model={AI_MODEL!r} → context={CONTEXT_WINDOW_TOKENS//1000}k tokens "
+      f"max_output={MAX_OUTPUT_TOKENS} source={_CURRENT_MODEL_CONFIG['source']}", flush=True)
+
+
 def auto_configure_mcp():
     """沙箱启动时自动配置已保存的 MCP 服务"""
     try:
@@ -253,7 +339,8 @@ def _find_first_user_index(messages: list) -> int:
     return len(messages)
 
 
-def prune_context(messages: list, context_window_tokens: int = 128_000) -> list:
+def prune_context(messages: list, context_window_tokens: int = None) -> list:
+    context_window_tokens = context_window_tokens or CONTEXT_WINDOW_TOKENS
     """
     参照 OpenClaw pruneContextMessages (412 行)：
     
@@ -368,7 +455,7 @@ def _do_ai_call(messages: list, tools=None, timeout=180,
     import urllib.request, urllib.error
     key  = api_key  or AI_API_KEY
     base = base_url or AI_BASE_URL
-    body = {"model": AI_MODEL, "messages": messages, "max_tokens": 2048}
+    body = {"model": AI_MODEL, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -442,17 +529,17 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
     tm = TranscriptManager(
         work_dir="/tmp/transcript",
         skill_id=SKILL_ID,
-        context_tokens=128_000,
+        context_tokens=CONTEXT_WINDOW_TOKENS,
     )
     tm.append_event("start", f"开始测试 skill_id={SKILL_ID}")
 
     for turn in range(12):
         # OpenClaw-style context pressure check + pruning
         from truncation import context_pressure_check, truncate_messages_recovery
-        pressure = context_pressure_check(messages, context_window_tokens=128_000)
+        pressure = context_pressure_check(messages, context_window_tokens=CONTEXT_WINDOW_TOKENS)
         if pressure["critical"]:
             # 紧急恢复模式：激进截断
-            messages = truncate_messages_recovery(messages, context_window_tokens=128_000)
+            messages = truncate_messages_recovery(messages, context_window_tokens=CONTEXT_WINDOW_TOKENS)
             tm.append_event("recovery", f"context pressure {pressure['pressure_ratio']} — 触发 recovery 截断")
             progress("上下文压力", f"已达 {int(pressure['pressure_ratio']*100)}%，触发 recovery 截断")
         elif pressure["warning"]:
@@ -518,7 +605,7 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
                 progress(f"输出:{tool_label}", result_str[:4000])
 
             # OpenClaw 风格智能截断 — 保留头+尾，不丢错误信息
-            max_chars = calculate_max_chars(128_000)
+            max_chars = calculate_max_chars(CONTEXT_WINDOW_TOKENS)
             truncated = truncate_tool_result(result_str, max_chars)
             messages.append({
                 "role": "tool",
@@ -527,7 +614,7 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
             })
 
         # 每轮后做聚合截断（防止总 tool output 超 context 50%）
-        messages = truncate_messages_aggregate(messages, context_window_tokens=128_000)
+        messages = truncate_messages_aggregate(messages, context_window_tokens=CONTEXT_WINDOW_TOKENS)
 
     return {"output": "已达最大轮次上限", "tm": tm}
 
@@ -670,6 +757,8 @@ def main():
             "passed": True,
             "output": output,
             "transcript": display_transcript,  # 截断版给 callback
+            "testInput": json.dumps(USER_INPUTS, ensure_ascii=False),  # 原始测试输入
+            "model": AI_MODEL,                  # 使用的模型
             "duration_ms": duration_ms,
             "tested_at": datetime.now(timezone.utc).isoformat(),
         }
