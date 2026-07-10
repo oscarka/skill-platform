@@ -24,6 +24,7 @@ const NAV = [
   {
     section: '系统',
     items: [
+      { to: '/mcp-configs', label: 'MCP 配置', icon: '🔌' },
       { to: '/settings', label: '平台设置', icon: '⚙️' },
     ],
   },
