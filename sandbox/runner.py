@@ -193,54 +193,173 @@ TOOLS = [
 ]
 
 
-# ─── OpenClaw 风格上下文压缩 ──────────────────────────────────────────────────
-KEEP_LAST_TURNS = 3          # 最近3轮保持完整
+# ─── OpenClaw 风格上下文压缩（参照 pruner.ts pruneContextMessages）───────────
+# 阈值参照 OpenClaw EffectiveContextPruningSettings
+KEEP_LAST_ASSISTANTS = 3     # 保留最近3个 assistant 消息（及其 tool results）
+SOFT_TRIM_RATIO = 0.6        # context 占比 > 60% 开始 soft trim
+HARD_CLEAR_RATIO = 0.85      # context 占比 > 85% 做 hard clear
 SOFT_TRIM_HEAD  = 1500       # soft trim: 保留头部字符数
 SOFT_TRIM_TAIL  = 1500       # soft trim: 保留尾部字符数
-SOFT_TRIM_MAX   = 4000       # soft trim: 单条 tool 结果上限
-HARD_CLEAR_MSG  = "[Old tool result content cleared]"
+SOFT_TRIM_MAX   = 4000       # soft trim 触发阈值
+MIN_PRUNABLE_TOOL_CHARS = 1000  # 可裁剪 tool 至少这么大才值得处理
+HARD_CLEAR_PLACEHOLDER = "[tool output cleared to save context space]"
+CHARS_PER_TOKEN = 4          # 粗略换算
+
+# 不可裁剪的工具（系统关键输出）
+NON_PRUNABLE_TOOLS = {"write_file"}
+
 
 def estimate_chars(messages: list) -> int:
-    """估算消息列表的总字符数"""
-    return sum(len(str(m)) for m in messages)
+    """
+    参照 OpenClaw estimateContextChars：
+    估算消息数组的总字符数（包括 content + tool_calls arguments）
+    """
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and "text" in block:
+                    total += len(block["text"])
+        # tool_calls arguments
+        for tc in msg.get("tool_calls", []):
+            fn = tc.get("function", {})
+            total += len(fn.get("arguments", ""))
+    return total
 
-def prune_context(messages: list) -> list:
+
+def _find_assistant_cutoff(messages: list, keep_last: int) -> int:
     """
-    仿 OpenClaw pruneContextMessages:
-    - 保留最近 KEEP_LAST_TURNS 轮的 assistant+tool 消息
-    - 对更早的 tool 消息做 soft trim (head+tail)
-    - 如果还是太大，做 hard clear
+    参照 OpenClaw findAssistantCutoffIndex：
+    找到从哪个 index 开始之后的 assistant 消息需要保留。
     """
-    # 找最近 N 个 assistant 消息的起始位置
     assistant_indices = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
-    if len(assistant_indices) <= KEEP_LAST_TURNS:
-        return messages  # 不需要裁剪
+    if len(assistant_indices) <= keep_last:
+        return 0  # 不够 keep_last 个，全部保留
+    return assistant_indices[-keep_last]
 
-    cutoff_idx = assistant_indices[-KEEP_LAST_TURNS]  # 这个 index 之前的消息可以裁剪
 
+def _find_first_user_index(messages: list) -> int:
+    """
+    参照 OpenClaw findFirstUserIndex：
+    Bootstrap 保护——不裁剪第一个 user message 之前的内容。
+    保护 system prompt + identity 读取。
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") == "user":
+            return i
+    return len(messages)
+
+
+def prune_context(messages: list, context_window_tokens: int = 128_000) -> list:
+    """
+    参照 OpenClaw pruneContextMessages (412 行)：
+    
+    三阶段裁剪策略：
+    1. 检测 ratio（context 占比）→ < softTrimRatio 不裁剪
+    2. Soft trim：对 cutoff 之前的 tool results 做 head+tail 裁剪
+    3. Hard clear：如果 soft trim 后 ratio 还是 > hardClearRatio，
+       完全清空最旧的 tool results
+    
+    保护规则：
+    - Bootstrap：不裁剪第一个 user message 之前的内容
+    - 保留最近 KEEP_LAST_ASSISTANTS 个 assistant 及其 tool results
+    - write_file 等关键工具不裁剪
+    """
+    char_window = context_window_tokens * CHARS_PER_TOKEN
+    if char_window <= 0:
+        return messages
+
+    # 找到 cutoff index
+    cutoff_idx = _find_assistant_cutoff(messages, KEEP_LAST_ASSISTANTS)
+    if cutoff_idx == 0:
+        return messages
+
+    # Bootstrap 保护
+    first_user_idx = _find_first_user_index(messages)
+    prune_start = max(1, first_user_idx)  # 至少保留 system prompt (index 0)
+
+    # 检测 ratio
+    total_chars = estimate_chars(messages)
+    ratio = total_chars / char_window
+    if ratio < SOFT_TRIM_RATIO:
+        return messages
+
+    # ─── Phase 1: Soft trim ───────────────────────────────────────────────
     result = list(messages)
-    for i in range(1, cutoff_idx):  # 从第1条开始（保留 system prompt）
+    prunable_tool_indices = []
+
+    for i in range(prune_start, cutoff_idx):
         msg = result[i]
         if msg.get("role") != "tool":
             continue
-        content = msg.get("content", "")
-        if len(content) <= SOFT_TRIM_MAX:
-            continue
-        # Soft trim: head + "...[pruned]..." + tail
-        head = content[:SOFT_TRIM_HEAD]
-        tail = content[-SOFT_TRIM_TAIL:]
-        result[i] = {**msg, "content": head + f"\n...[{len(content)-SOFT_TRIM_HEAD-SOFT_TRIM_TAIL} chars pruned]...\n" + tail}
 
-    # 如果 soft trim 后还是很大，hard clear 更早的消息
-    total = estimate_chars(result)
-    if total > 60_000:
-        hard_cutoff = assistant_indices[-KEEP_LAST_TURNS] if len(assistant_indices) > KEEP_LAST_TURNS else 0
-        for i in range(1, hard_cutoff):
-            msg = result[i]
-            if msg.get("role") == "tool":
-                result[i] = {**msg, "content": HARD_CLEAR_MSG}
+        # 检查是否可裁剪（有些工具不能裁剪）
+        # 尝试从 tool_calls 匹配 tool name
+        tool_name = _resolve_tool_name(messages, msg.get("tool_call_id", ""))
+        if tool_name in NON_PRUNABLE_TOOLS:
+            continue
+
+        prunable_tool_indices.append(i)
+
+        content = msg.get("content", "")
+        if not isinstance(content, str) or len(content) <= SOFT_TRIM_MAX:
+            continue
+
+        # Soft trim: 使用 truncation 模块的智能截断
+        from truncation import truncate_tool_result
+        trimmed = truncate_tool_result(content, SOFT_TRIM_MAX, min_keep=SOFT_TRIM_HEAD)
+        before_chars = len(content)
+        after_chars = len(trimmed)
+        total_chars += (after_chars - before_chars)
+        result[i] = {**msg, "content": trimmed}
+
+    # ─── Phase 2: 检查 soft trim 后的 ratio ──────────────────────────────
+    ratio = total_chars / char_window
+    if ratio < HARD_CLEAR_RATIO:
+        return result
+
+    # ─── Phase 3: Hard clear ──────────────────────────────────────────────
+    # 检查可裁剪的 tool chars 是否足够值得 hard clear
+    prunable_chars = sum(
+        len(result[i].get("content", ""))
+        for i in prunable_tool_indices
+        if isinstance(result[i].get("content"), str)
+    )
+    if prunable_chars < MIN_PRUNABLE_TOOL_CHARS:
+        return result
+
+    for i in prunable_tool_indices:
+        if ratio < HARD_CLEAR_RATIO:
+            break
+        msg = result[i]
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            continue
+
+        before_chars = len(content)
+        result[i] = {**msg, "content": HARD_CLEAR_PLACEHOLDER}
+        after_chars = len(HARD_CLEAR_PLACEHOLDER)
+        total_chars += (after_chars - before_chars)
+        ratio = total_chars / char_window
 
     return result
+
+
+def _resolve_tool_name(messages: list, tool_call_id: str) -> str:
+    """从 assistant 消息的 tool_calls 反查工具名称"""
+    if not tool_call_id:
+        return ""
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []):
+            if tc.get("id") == tool_call_id:
+                return tc.get("function", {}).get("name", "")
+    return ""
+
 
 # ─── AI 调用（OpenAI 兼容接口，仿 OpenClaw FailoverError 多 provider）───────
 def _do_ai_call(messages: list, tools=None, timeout=180,
