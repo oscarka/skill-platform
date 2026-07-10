@@ -31,8 +31,11 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN useradd --create-home --shell /bin/bash sandbox
 WORKDIR /home/sandbox
 
-# 复制 runner 脚本
+# 复制 runner 脚本及依赖模块
 COPY sandbox/runner.py /runner.py
+COPY sandbox/transcript.py /transcript.py
+COPY sandbox/truncation.py /truncation.py
+COPY sandbox/redact.py /redact.py
 COPY sandbox/requirements.txt /requirements.txt
 
 USER sandbox
