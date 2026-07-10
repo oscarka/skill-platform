@@ -2,7 +2,7 @@
 sandbox/runner.py  — AI Agent sandbox runner
 参考 OpenClaw bash-tools 设计，AI 读 SKILL.md 然后用 exec 工具执行任务
 """
-import os, sys, json, subprocess, time, textwrap, base64
+import os, sys, json, subprocess, time, textwrap, base64, re, shlex
 from datetime import datetime, timezone
 
 # OpenClaw 风格模块
@@ -278,6 +278,34 @@ def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -
     if review:
         print(f"[exec-blocked] {command[:80]}", flush=True)
         return {"stdout": review, "stderr": "", "exit_code": 0, "_blocked": True}
+
+    # ── 拦截 mcporter config add：修正 args 分割问题 ──
+    # mcporter config add 的 --args 把多个参数合成一个字符串，导致 npx 收到错误参数
+    # 我们直接写 mcporter.json，确保 args 被正确拆分为数组
+    mcp_match = re.match(
+        r"mcporter\s+config\s+add\s+(\S+)\s+--command\s+['\"]?(\S+?)['\"]?"
+        r"(?:\s+--args\s+['\"](.+?)['\"])?\s*$",
+        command.strip()
+    )
+    if mcp_match:
+        name, cmd, args_str = mcp_match.groups()
+        cmd = cmd.strip("'\"")
+        import shlex
+        args_list = shlex.split(args_str) if args_str else []
+        config_path = os.path.join(os.path.expanduser("~"), "config", "mcporter.json")
+        # 读取现有配置并合并
+        existing = {}
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                existing = json.load(f).get("mcpServers", {})
+        existing[name] = {"command": cmd, "args": args_list}
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump({"mcpServers": existing}, f, indent=2)
+        msg = f"Added '{name}' to {config_path}\n"
+        print(f"[exec] mcporter config add intercepted: {name} (cmd={cmd} args={args_list})", flush=True)
+        return {"stdout": msg, "stderr": "", "exit_code": 0}
+
     # 智能超时：MCP 命令自动加长
     effective = _effective_timeout(command, timeout)
     if effective != timeout:
