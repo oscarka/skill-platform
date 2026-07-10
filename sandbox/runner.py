@@ -185,27 +185,43 @@ os.environ.setdefault("MCPORTER_CALL_TIMEOUT", "180000")  # 180 秒（毫秒）
 print(f"[config] MCPORTER_CALL_TIMEOUT={os.environ['MCPORTER_CALL_TIMEOUT']}ms", flush=True)
 
 def auto_configure_mcp():
-    """沙箱启动时自动配置已保存的 MCP 服务"""
+    """沙箱启动时自动配置已保存的 MCP 服务。
+    直接写 mcporter.json 而不是用 `mcporter config add`，
+    因为后者把 --args 的值合成单个字符串（如 ["-y pkg"]），
+    但 npx 需要分开的参数（如 ["-y", "pkg"]）。
+    """
     try:
         configs = json.loads(MCP_CONFIGS)
         if not configs:
             return
+        mcp_servers = {}
         for cfg in configs:
             name = cfg.get("name", "")
-            cmd = cfg.get("command", "")
+            cmd = cfg.get("command", "").strip('"').strip("'")
             args = cfg.get("args", "")
             if not name or not cmd:
                 continue
-            mcporter_cmd = f"mcporter config add {name} --command {cmd}"
-            if args:
-                mcporter_cmd += f" --args '{args}'"
-            try:
-                subprocess.run(mcporter_cmd, shell=True, timeout=30, capture_output=True)
-                print(f"[MCP] 已配置: {name} ({cmd} {args})", flush=True)
-            except Exception as e:
-                print(f"[MCP] 配置 {name} 失败: {e}", flush=True)
+            # 把 args 字符串拆成数组（如 "-y stitch-mcp-auto" → ["-y", "stitch-mcp-auto"]）
+            if isinstance(args, str) and args.strip():
+                import shlex
+                args_list = shlex.split(args)
+            elif isinstance(args, list):
+                args_list = args
+            else:
+                args_list = []
+            mcp_servers[name] = {"command": cmd, "args": args_list}
+            print(f"[MCP] 已配置: {name} (command={cmd} args={args_list})", flush=True)
+
+        if mcp_servers:
+            config_dir = os.path.join(HOME, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            config_path = os.path.join(config_dir, "mcporter.json")
+            with open(config_path, "w") as f:
+                json.dump({"mcpServers": mcp_servers}, f, indent=2)
+            print(f"[MCP] 写入 {config_path}（{len(mcp_servers)} 个服务）", flush=True)
     except Exception as e:
         print(f"[MCP] 解析 MCP_CONFIGS 失败: {e}", flush=True)
+
 
 
 # ─── OpenClaw exec-auto-reviewer（简化版）──────────────────────────────────────
