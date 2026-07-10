@@ -168,6 +168,13 @@ export default function SkillDetail() {
           </button>
           <button
             className="btn btn-sm"
+            style={{ background: '#7c3aed', color: '#fff' }}
+            onClick={() => window.open(`/preview/${skill.id}`, '_blank')}
+            title="管理员预览：无需发布即可与 Skill 对话测试">
+            🔗 预览测试
+          </button>
+          <button
+            className="btn btn-sm"
             style={{ color: 'var(--danger)' }}
             onClick={async () => {
               if (!confirm(`确定要删除 Skill「${skill.name}」吗？此操作不可恢复。`)) return;

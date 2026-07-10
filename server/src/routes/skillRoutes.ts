@@ -781,3 +781,75 @@ skillRouter.get('/:id/transcript/spill/:spillPath', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── GET /api/skills/:id/preview ─────────────────────────────────────────────
+// 管理员 staging 预览：返回 skill 的 prompt + 配置（无需审核通过）
+skillRouter.get('/:id/preview', async (req, res) => {
+  try {
+    const skill = await db.getAsync<any>('SELECT * FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+    res.json({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      skill_type: skill.skill_type,
+      type: skill.type,
+      status: skill.status,
+      prompt_template: skill.prompt_template || '',
+      plugin_config: skill.plugin_config ? JSON.parse(skill.plugin_config) : null,
+      requires: null,  // from SKILL.md frontmatter if parsed
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/skills/:id/preview/chat ───────────────────────────────────────
+// 管理员 staging 预览：用 SKILL.md 作 system prompt，转发聊天消息给 AI
+skillRouter.post('/:id/preview/chat', async (req, res) => {
+  try {
+    const skill = await db.getAsync<any>(
+      'SELECT id, name, prompt_template, preferred_model FROM skills WHERE id=?',
+      [req.params.id]
+    );
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+
+    const { messages = [], user_message } = req.body;
+    if (!user_message && messages.length === 0) {
+      return res.status(400).json({ error: 'messages or user_message required' });
+    }
+
+    // 从 settings 表拿 AI 配置
+    const getSetting = (k: string) =>
+      db.getAsync<{value: string}>('SELECT value FROM settings WHERE key=?', [k]).then(r => r?.value || '');
+    const [apiKey, baseUrl, model] = await Promise.all([
+      getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+      getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+      Promise.resolve(skill.preferred_model || ''),
+    ]);
+    const defaultModel = await getSetting('default_model');
+    const targetModel = model || defaultModel || 'doubao-seed-1-8-251228';
+
+    const systemPrompt = skill.prompt_template || `You are ${skill.name}.`;
+    const chatMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages,
+      ...(user_message ? [{ role: 'user', content: user_message }] : []),
+    ];
+
+    const aiRes = await fetch(`${baseUrl || 'https://ark.cn-beijing.volces.com/api/v3'}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: targetModel, messages: chatMessages }),
+    });
+    if (!aiRes.ok) {
+      const err = await aiRes.text();
+      return res.status(502).json({ error: `AI API error: ${err.slice(0, 200)}` });
+    }
+    const aiData = await aiRes.json() as any;
+    const reply = aiData.choices?.[0]?.message?.content || '';
+    res.json({ reply, model: targetModel });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
