@@ -78,6 +78,8 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     { name: 'AI_MODEL',            value: opts.model },
     { name: 'AI_API_KEY',          value: opts.aiKey },
     { name: 'AI_BASE_URL',         value: opts.aiBaseUrl || '' },
+    // AI_CHAT_URL = AI_BASE_URL + /chat/completions，供 curl 直接用，防止 AI 自己拼错路径
+    { name: 'AI_CHAT_URL',         value: opts.aiBaseUrl ? `${opts.aiBaseUrl}/chat/completions` : '' },
     // Fallback provider（仿 OpenClaw FailoverError 多 provider 切换）
     { name: 'FALLBACK_AI_API_KEY', value: opts.fallbackAiKey || '' },
     { name: 'FALLBACK_AI_BASE_URL',value: opts.fallbackAiBase || '' },
