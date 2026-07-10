@@ -17,7 +17,7 @@ import time
 import uuid
 from typing import Optional, List, Any
 from truncation import truncate_tool_result, calculate_max_chars, MIN_KEEP_CHARS
-from redact import redact_message, redact_secrets
+from redact import redact_message, redact_secrets, redact_message_full
 
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
 # 参照 OpenClaw SESSION_MANAGER_APPEND_MAX_BYTES = 8MB
@@ -85,7 +85,7 @@ class TranscriptManager:
             "ts": _now_iso(),
         }
         # 完整版：脱敏但不截断（除非极端大）
-        full_entry = redact_message(entry)
+        full_entry = redact_message_full(entry)
         if len(full_entry.get("content", "")) > FULL_CONTENT_MAX_CHARS:
             full_entry["content"] = full_entry["content"][:FULL_CONTENT_MAX_CHARS] + "...[full truncated]"
 
@@ -121,7 +121,7 @@ class TranscriptManager:
             if len(tool_output) > FULL_CONTENT_MAX_CHARS:
                 full_output += f"\n...[{len(tool_output) - FULL_CONTENT_MAX_CHARS} chars spilled to {spill_path}]"
 
-        full_entry = redact_message({
+        full_entry = redact_message_full({
             "type": "message",
             "id": entry_id,
             "turn": turn,
@@ -143,7 +143,7 @@ class TranscriptManager:
             min(max_chars, DISPLAY_OUTPUT_MAX_CHARS),
         )
 
-        display_entry = redact_message({
+        display_entry = redact_message_full({
             "type": "message",
             "id": entry_id,
             "turn": turn,
@@ -296,3 +296,225 @@ def _now_iso() -> str:
 
 def _gen_id() -> str:
     return str(uuid.uuid4())
+
+
+# ─── Transcript 重写（参照 OpenClaw rewriteTranscriptEntriesInSessionManager）─
+def rewrite_transcript_entries(
+    entries: list,
+    max_tool_output_chars: int = 2000,
+    max_ai_content_chars: int = 4000,
+) -> list:
+    """
+    参照 OpenClaw rewriteTranscriptEntriesInState：
+    对已有 transcript 条目进行原地重写——截断旧的 tool output 和 AI 回复。
+    用于 transcript 文件变得太大时的清理操作。
+    不创建新条目，只修改现有条目的 content/output 字段。
+    """
+    from truncation import truncate_tool_result
+
+    rewritten = []
+    rewrite_count = 0
+
+    for entry in entries:
+        e = dict(entry)
+
+        if e.get("role") == "tool" and isinstance(e.get("output"), str):
+            output = e["output"]
+            if len(output) > max_tool_output_chars:
+                e["output"] = truncate_tool_result(output, max_tool_output_chars)
+                e["is_truncated"] = True
+                e["original_length"] = len(output)
+                rewrite_count += 1
+
+        if e.get("role") == "assistant" and isinstance(e.get("content"), str):
+            content = e["content"]
+            if len(content) > max_ai_content_chars:
+                e["content"] = content[:max_ai_content_chars] + "...[rewritten]"
+                e["is_truncated"] = True
+                e["original_length"] = len(content)
+                rewrite_count += 1
+
+        rewritten.append(e)
+
+    if rewrite_count > 0:
+        print(f"[transcript] rewrote {rewrite_count} entries", flush=True)
+
+    return rewritten
+
+
+# ─── Compaction（参照 OpenClaw compactEmbeddedAgentSessionDirect）──────────────
+def compact_transcript(
+    entries: list,
+    target_entries: int = 50,
+) -> list:
+    """
+    参照 OpenClaw compact：
+    当 transcript 条目太多时，对早期内容做压缩：
+    1. 保留 header
+    2. 保留最后 target_entries 条
+    3. 中间的合并成一条 compaction summary
+    """
+    if len(entries) <= target_entries:
+        return entries
+
+    # header 永远保留
+    header_entries = [e for e in entries if e.get("type") == "header"]
+    message_entries = [e for e in entries if e.get("type") != "header"]
+
+    if len(message_entries) <= target_entries:
+        return entries
+
+    # 保留最后 target_entries 条
+    keep = message_entries[-target_entries:]
+    dropped = message_entries[:-target_entries]
+
+    # 生成压缩摘要
+    tool_count = sum(1 for e in dropped if e.get("role") == "tool")
+    assistant_count = sum(1 for e in dropped if e.get("role") == "assistant")
+    event_count = sum(1 for e in dropped if e.get("type") == "event")
+
+    first_ts = dropped[0].get("ts", "") if dropped else ""
+    last_ts = dropped[-1].get("ts", "") if dropped else ""
+
+    compaction_entry = {
+        "type": "event",
+        "id": _gen_id(),
+        "event": "compaction",
+        "detail": (
+            f"Compacted {len(dropped)} entries ({assistant_count} AI, "
+            f"{tool_count} tool, {event_count} event) from {first_ts} to {last_ts}"
+        ),
+        "compacted_count": len(dropped),
+        "ts": _now_iso(),
+    }
+
+    return header_entries + [compaction_entry] + keep
+
+
+# ─── Transcript 统计（参照 OpenClaw summarizeCompactionMessages）──────────────
+def transcript_stats(entries: list) -> dict:
+    """
+    对 transcript 条目进行统计分析。
+    """
+    total = len(entries)
+    by_type = {}
+    by_role = {}
+    by_tool = {}
+    total_chars = 0
+    truncated_count = 0
+    spill_count = 0
+    max_output_len = 0
+    turns = set()
+
+    for e in entries:
+        # 按类型
+        t = e.get("type", "unknown")
+        by_type[t] = by_type.get(t, 0) + 1
+
+        # 按角色
+        r = e.get("role", "")
+        if r:
+            by_role[r] = by_role.get(r, 0) + 1
+
+        # 按工具名
+        tool = e.get("tool", "")
+        if tool:
+            by_tool[tool] = by_tool.get(tool, 0) + 1
+
+        # 内容大小
+        for field in ("content", "output", "input"):
+            val = e.get(field, "")
+            if isinstance(val, str):
+                total_chars += len(val)
+
+        # 输出大小
+        output = e.get("output", "")
+        if isinstance(output, str):
+            max_output_len = max(max_output_len, len(output))
+
+        # 标记
+        if e.get("is_truncated"):
+            truncated_count += 1
+        if e.get("spill_path"):
+            spill_count += 1
+
+        # 轮次
+        turn = e.get("turn")
+        if turn is not None:
+            turns.add(turn)
+
+    # 时间范围
+    timestamps = [e.get("ts") for e in entries if e.get("ts")]
+    duration_s = None
+    if len(timestamps) >= 2:
+        try:
+            from datetime import datetime
+            t0 = datetime.fromisoformat(timestamps[0].replace('Z', '+00:00'))
+            t1 = datetime.fromisoformat(timestamps[-1].replace('Z', '+00:00'))
+            duration_s = round((t1 - t0).total_seconds(), 1)
+        except Exception:
+            pass
+
+    return {
+        "total_entries": total,
+        "by_type": by_type,
+        "by_role": by_role,
+        "by_tool": by_tool,
+        "total_chars": total_chars,
+        "max_output_chars": max_output_len,
+        "truncated_count": truncated_count,
+        "spill_count": spill_count,
+        "turns": len(turns),
+        "duration_seconds": duration_s,
+    }
+
+
+# ─── Transcript 搜索（参照 OpenClaw searchCells / readSessionMessageByIdAsync）
+def search_transcript(entries: list, query: str) -> list:
+    """在 transcript 条目中搜索包含 query 的条目"""
+    query_lower = query.lower()
+    results = []
+    for i, e in enumerate(entries):
+        for field in ("content", "output", "input", "detail"):
+            val = e.get(field, "")
+            if isinstance(val, str) and query_lower in val.lower():
+                results.append({
+                    "index": i,
+                    "entry_id": e.get("id", ""),
+                    "field": field,
+                    "snippet": _extract_snippet(val, query_lower, context=100),
+                    "ts": e.get("ts", ""),
+                })
+                break
+    return results
+
+
+def _extract_snippet(text: str, query: str, context: int = 100) -> str:
+    """提取搜索结果的上下文片段"""
+    idx = text.lower().find(query)
+    if idx == -1:
+        return text[:200]
+    start = max(0, idx - context)
+    end = min(len(text), idx + len(query) + context)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return snippet
+
+
+# ─── 从本地 JSONL 文件恢复 TranscriptManager（参照 OpenClaw readSessionEntry）──
+def load_transcript_from_jsonl(jsonl_path: str) -> list:
+    """从 JSONL 文件加载 transcript 条目"""
+    entries = []
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+    except Exception as e:
+        print(f"[transcript] load error: {e}", flush=True)
+    return entries
+

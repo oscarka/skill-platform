@@ -156,36 +156,264 @@ def truncate_messages_aggregate(
 ) -> list:
     """
     参照 OpenClaw truncateOversizedToolResultsInMessages：
-    1. 先对单条超标的 tool result 做截断
-    2. 再检查总量是否超 aggregate budget，如果超了从最旧的开始 elide
+    两阶段截断计划：
+    1. buildOversizedToolResultReplacements — 单条超标的先截断
+    2. buildAggregateToolResultReplacements — 总量超标的从旧到新 elide
+    保护最近的 tool result 不被 elide（OpenClaw getTrailingToolResultEntryIds）
     """
     per_max = calculate_max_chars(context_window_tokens)
     agg_max = calculate_aggregate_max_chars(context_window_tokens)
 
-    result = []
-    total_tool_chars = 0
-
+    # ─── Phase 1: 单条超标截断 ────────────────────────────────────────────
+    phase1 = []
+    oversized_count = 0
     for msg in messages:
         if msg.get("role") == "tool":
             content = msg.get("content", "")
             if isinstance(content, str) and len(content) > per_max:
-                # 单条截断
                 content = truncate_tool_result(content, per_max)
-            total_tool_chars += len(content) if isinstance(content, str) else 0
+                oversized_count += 1
+            phase1.append({**msg, "content": content})
+        else:
+            phase1.append(msg)
+
+    # ─── Phase 2: 聚合预算检查 ────────────────────────────────────────────
+    total_tool_chars = sum(
+        len(m.get("content", "")) for m in phase1
+        if m.get("role") == "tool" and isinstance(m.get("content"), str)
+    )
+
+    if total_tool_chars <= agg_max:
+        return phase1
+
+    # 找到最后一批连续的 tool results（保护它们不被 elide）
+    protected_indices = _get_trailing_tool_indices(phase1)
+
+    # 按从旧到新的顺序尝试截断
+    excess = total_tool_chars - agg_max
+    aggregate_count = 0
+
+    # Pass 2a: 先截断非保护的 tool results
+    for i, msg in enumerate(phase1):
+        if excess <= 0:
+            break
+        if msg.get("role") != "tool" or i in protected_indices:
+            continue
+        content = msg.get("content", "")
+        if not isinstance(content, str) or len(content) <= MIN_KEEP_CHARS:
+            continue
+
+        # 尝试截断到 MIN_KEEP_CHARS
+        old_len = len(content)
+        target = max(MIN_KEEP_CHARS, old_len - excess)
+        if target < old_len:
+            new_content = truncate_tool_result(content, target)
+            actual_reduction = old_len - len(new_content)
+            if actual_reduction > 0:
+                phase1[i] = {**msg, "content": new_content}
+                excess -= actual_reduction
+                aggregate_count += 1
+
+    # Pass 2b: 如果还不够，完全 elide 最旧的（仍跳过保护的）
+    if excess > 0:
+        for i, msg in enumerate(phase1):
+            if excess <= 0:
+                break
+            if msg.get("role") != "tool" or i in protected_indices:
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            old_len = len(content)
+            if old_len <= len(AGGREGATE_ELISION_MARKER):
+                continue
+
+            # 带 spill 路径的用特殊 marker
+            spill = msg.get("_spill_path")
+            if spill:
+                marker = f"[tool result elided: full output at {spill}; read it if needed]"
+            else:
+                marker = AGGREGATE_ELISION_MARKER
+
+            phase1[i] = {**msg, "content": marker}
+            excess -= (old_len - len(marker))
+            aggregate_count += 1
+
+    # Pass 2c: 万不得已，连保护的也截断（但不完全 elide）
+    if excess > 0:
+        for i in sorted(protected_indices):
+            if excess <= 0:
+                break
+            msg = phase1[i]
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > MIN_KEEP_CHARS:
+                old_len = len(content)
+                target = max(MIN_KEEP_CHARS, old_len - excess)
+                new_content = truncate_tool_result(content, target)
+                actual_reduction = old_len - len(new_content)
+                if actual_reduction > 0:
+                    phase1[i] = {**msg, "content": new_content}
+                    excess -= actual_reduction
+
+    return phase1
+
+
+def _get_trailing_tool_indices(messages: list) -> set:
+    """
+    参照 OpenClaw getTrailingToolResultEntryIds：
+    找到消息数组末尾连续的 tool result 索引集合。
+    这些是最新的工具调用结果，应该优先保护。
+    """
+    indices = set()
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") == "tool":
+            indices.add(i)
+        elif msg.get("role") == "assistant":
+            # assistant 和其 tool results 是一组，继续向前找
+            continue
+        else:
+            break
+    return indices
+
+
+# ─── 估算截断潜力（诊断用）─────────────────────────────────────────────────
+def estimate_reduction_potential(
+    messages: list,
+    context_window_tokens: int = 128_000,
+) -> dict:
+    """
+    参照 OpenClaw estimateToolResultReductionPotential：
+    估算如果做截断能释放多少空间，用于诊断和日志。
+    """
+    per_max = calculate_max_chars(context_window_tokens)
+    agg_max = calculate_aggregate_max_chars(context_window_tokens)
+
+    total_tool_chars = 0
+    oversized_reducible = 0
+    tool_count = 0
+
+    for msg in messages:
+        if msg.get("role") == "tool":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                length = len(content)
+                total_tool_chars += length
+                tool_count += 1
+                if length > per_max:
+                    oversized_reducible += (length - per_max)
+
+    aggregate_excess = max(0, total_tool_chars - agg_max)
+
+    return {
+        "total_tool_chars": total_tool_chars,
+        "tool_count": tool_count,
+        "per_max_chars": per_max,
+        "aggregate_max_chars": agg_max,
+        "oversized_reducible_chars": oversized_reducible,
+        "aggregate_excess_chars": aggregate_excess,
+        "total_reducible_chars": oversized_reducible + aggregate_excess,
+        "needs_truncation": oversized_reducible > 0 or aggregate_excess > 0,
+    }
+
+
+# ─── Compact Recovery 模式（上下文溢出时的激进截断）──────────────────────────
+COMPACT_RECOVERY_SUFFIX = lambda chars: f"[... {max(1, chars)} chars truncated; narrow args]"
+
+
+def truncate_for_recovery(
+    text: str,
+    max_chars: int,
+) -> str:
+    """
+    参照 OpenClaw recovery 模式：
+    比普通截断更激进 — min_keep_chars=0，使用更短的后缀。
+    用于 context window 溢出后的紧急恢复。
+    """
+    return truncate_tool_result(
+        text,
+        max_chars,
+        min_keep=0,
+        suffix_fn=COMPACT_RECOVERY_SUFFIX,
+    )
+
+
+def truncate_messages_recovery(
+    messages: list,
+    context_window_tokens: int = 128_000,
+) -> list:
+    """
+    参照 OpenClaw compact_then_truncate 策略：
+    溢出恢复模式 — 用更激进的截断参数。
+    """
+    per_max = calculate_max_chars(context_window_tokens) // 2  # 恢复时预算减半
+    agg_max = calculate_aggregate_max_chars(context_window_tokens) // 2
+
+    result = []
+    for msg in messages:
+        if msg.get("role") == "tool":
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > per_max:
+                content = truncate_for_recovery(content, per_max)
             result.append({**msg, "content": content})
         else:
             result.append(msg)
 
-    # 如果总量超标，从最旧的 tool result 开始 elide
-    if total_tool_chars > agg_max:
-        excess = total_tool_chars - agg_max
+    # 聚合截断（保护尾部）
+    total = sum(len(m.get("content", "")) for m in result if m.get("role") == "tool" and isinstance(m.get("content"), str))
+    if total > agg_max:
+        protected = _get_trailing_tool_indices(result)
+        excess = total - agg_max
         for i, msg in enumerate(result):
             if excess <= 0:
                 break
-            if msg.get("role") == "tool":
-                old_len = len(msg.get("content", ""))
-                if old_len > MIN_KEEP_CHARS:
+            if msg.get("role") == "tool" and i not in protected:
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > 0:
                     result[i] = {**msg, "content": AGGREGATE_ELISION_MARKER}
-                    excess -= (old_len - len(AGGREGATE_ELISION_MARKER))
+                    excess -= (len(content) - len(AGGREGATE_ELISION_MARKER))
 
     return result
+
+
+# ─── 上下文大小估算 ────────────────────────────────────────────────────────
+def estimate_context_chars(messages: list) -> int:
+    """估算整个 messages 数组的总字符数"""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        # tool_calls 里的 arguments 也算
+        for tc in msg.get("tool_calls", []):
+            fn = tc.get("function", {})
+            total += len(fn.get("arguments", ""))
+    return total
+
+
+def context_pressure_check(
+    messages: list,
+    context_window_tokens: int = 128_000,
+) -> dict:
+    """
+    参照 OpenClaw precheck recovery：
+    检测当前 context 是否接近上限，返回压力信息。
+    """
+    total_chars = estimate_context_chars(messages)
+    # 粗略：4 chars ≈ 1 token
+    estimated_tokens = total_chars // 4
+    pressure_ratio = estimated_tokens / context_window_tokens if context_window_tokens > 0 else 0
+
+    return {
+        "total_chars": total_chars,
+        "estimated_tokens": estimated_tokens,
+        "context_window_tokens": context_window_tokens,
+        "pressure_ratio": round(pressure_ratio, 3),
+        "warning": pressure_ratio > 0.7,
+        "critical": pressure_ratio > 0.9,
+        "action": (
+            "recovery" if pressure_ratio > 0.9
+            else "truncate" if pressure_ratio > 0.7
+            else "none"
+        ),
+    }

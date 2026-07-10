@@ -328,8 +328,19 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
     tm.append_event("start", f"开始测试 skill_id={SKILL_ID}")
 
     for turn in range(12):
-        # OpenClaw-style context pruning before each AI call
-        messages = prune_context(messages)
+        # OpenClaw-style context pressure check + pruning
+        from truncation import context_pressure_check, truncate_messages_recovery
+        pressure = context_pressure_check(messages, context_window_tokens=128_000)
+        if pressure["critical"]:
+            # 紧急恢复模式：激进截断
+            messages = truncate_messages_recovery(messages, context_window_tokens=128_000)
+            tm.append_event("recovery", f"context pressure {pressure['pressure_ratio']} — 触发 recovery 截断")
+            progress("上下文压力", f"已达 {int(pressure['pressure_ratio']*100)}%，触发 recovery 截断")
+        elif pressure["warning"]:
+            messages = prune_context(messages)
+            tm.append_event("prune", f"context pressure {pressure['pressure_ratio']} — 触发 prune")
+        else:
+            messages = prune_context(messages)
 
         # 后 4 轮：注入强制完成指令，停止传工具
         if turn >= 8:
