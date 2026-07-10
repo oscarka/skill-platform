@@ -397,16 +397,30 @@ def save_result(result: dict):
         return
     try:
         import urllib.request
-        # 调用主服务的 callback API 写结果（避免在 Job 里直接连 PG）
+        # 压缩 transcript（callback body 不能太大，否则超时/被截断）
+        if "transcript" in result:
+            compressed = []
+            for entry in result["transcript"]:
+                e = dict(entry)
+                # tool output 截断到 2KB（避免 doubao reasoning 几十 KB）
+                if e.get("output") and len(str(e["output"])) > 2000:
+                    e["output"] = str(e["output"])[:2000] + "...[truncated]"
+                # AI content 截断到 4KB
+                if e.get("content") and len(str(e["content"])) > 4000:
+                    e["content"] = str(e["content"])[:4000] + "...[truncated]"
+                compressed.append(e)
+            result["transcript"] = compressed
+
         callback_url = os.environ.get("CALLBACK_URL", "")
         if callback_url:
-            data = json.dumps(result).encode()
+            data = json.dumps(result, ensure_ascii=False).encode("utf-8")
+            print(f"[save] callback body size: {len(data)} bytes", flush=True)
             req = urllib.request.Request(
                 callback_url, data=data,
                 headers={"Content-Type": "application/json", "X-Sandbox-Secret": os.environ.get("SANDBOX_SECRET","")},
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=10)
+            urllib.request.urlopen(req, timeout=30)
             print("[save] result sent via callback", flush=True)
     except Exception as e:
         print(f"[save] error: {e}", flush=True)
