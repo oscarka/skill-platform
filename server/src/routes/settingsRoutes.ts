@@ -68,6 +68,10 @@ settingsRouter.put('/', async (req, res) => {
       if (!ALLOWED_KEYS.includes(key)) {
         return res.status(400).json({ error: `Unknown setting key: "${key}"` });
       }
+      // 防止掩码值被写回 DB（GET 接口返回 ****xxxx，前端可能原样提交）
+      if (key.includes('api_key') && value.startsWith('****')) {
+        continue; // 跳过掩码值，保留 DB 中的真实 key
+      }
       await db.runAsync(
         'INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)',
         [key, value, Date.now()]

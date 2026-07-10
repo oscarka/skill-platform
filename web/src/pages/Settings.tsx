@@ -30,7 +30,8 @@ export default function Settings() {
   const handleSave = async () => {
     const toSave: Record<string, string> = {};
     for (const [k, v] of Object.entries(edits)) {
-      if (v && v !== '••••') toSave[k] = v;
+      // 过滤空值、占位符、掩码值（防止 ****xxxx 被写回 DB）
+      if (v && v !== '••••' && !v.startsWith('****')) toSave[k] = v;
     }
     if (!Object.keys(toSave).length) return;
     setSaving(true);
