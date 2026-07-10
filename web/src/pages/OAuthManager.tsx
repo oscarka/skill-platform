@@ -63,10 +63,13 @@ export default function OAuthManager() {
     if (!result) { alert('授权取消或失败'); return; }
     const params = new URLSearchParams(result.hash.replace(/^#/, ''));
     const access_token = params.get('access_token');
-    const expires_in = params.get('expires_in');
+    const token_type = params.get('token_type') || 'Bearer';
+    const scope = params.get('scope') || 'https://www.googleapis.com/auth/cloud-platform';
+    const expires_in_val = params.get('expires_in');
     if (!access_token) { alert('未获取到 token'); return; }
 
-    // 存入 mcp_oauth_tokens
+    // 存入 mcp_oauth_tokens（含完整 token_data，runner.py 需要 token_type/scope/expiry_date）
+    const expires_in_num = expires_in_val ? parseInt(expires_in_val) : 3600;
     const saveRes = await fetch('/api/oauth/mcp-tokens', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -74,7 +77,13 @@ export default function OAuthManager() {
         provider,
         mcp_name: provider === 'google' ? 'stitch-mcp-auto' : undefined,
         access_token,
-        expires_in: expires_in ? parseInt(expires_in) : 3600,
+        expires_in: expires_in_num,
+        token_data: {
+          access_token,
+          token_type,
+          scope,
+          expiry_date: Date.now() + expires_in_num * 1000,
+        },
       }),
     });
     if (saveRes.ok) {

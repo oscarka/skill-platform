@@ -159,7 +159,8 @@ export default function SkillDetail() {
       let token: string | null = null;
       if (provider === 'google') token = await getGoogleToken();
       if (!token) { flash('error', '授权取消或失败'); return; }
-      // 存入 DB
+      // 存入 DB（含完整 token_data，runner.py 需要 token_type/scope/expiry_date）
+      const expiresIn = 3600;
       await fetch('/api/oauth/mcp-tokens', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -167,7 +168,13 @@ export default function SkillDetail() {
           provider,
           mcp_name: provider === 'google' ? 'stitch-mcp-auto' : undefined,
           access_token: token,
-          expires_in: 3600,
+          expires_in: expiresIn,
+          token_data: {
+            access_token: token,
+            token_type: 'Bearer',
+            scope: 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email',
+            expiry_date: Date.now() + expiresIn * 1000,
+          },
         }),
       });
       flash('success', `✅ ${provider === 'google' ? 'Google' : provider} 已授权并保存，下次「🐳 沙箱测试」将自动使用`);
