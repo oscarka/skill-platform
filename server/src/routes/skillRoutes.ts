@@ -654,8 +654,8 @@ skillRouter.post('/:id/sandbox-callback', async (req, res) => {
       testedAt: tested_at,
     };
     await db.runAsync(
-      `UPDATE skills SET sandbox_test=?, updated_at=? WHERE id=?`,
-      [JSON.stringify(result), Date.now(), id]
+      `UPDATE skills SET sandbox_test=?, sandbox_status=?, updated_at=? WHERE id=?`,
+      [JSON.stringify(result), 'done', Date.now(), id]
     );
     res.json({ ok: true });
   } catch (err: any) {
