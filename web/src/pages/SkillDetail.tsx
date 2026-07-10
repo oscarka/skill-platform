@@ -759,7 +759,7 @@ export default function SkillDetail() {
               <div>
                 <div className="alert alert-error" style={{ marginBottom: 10 }}>{st.comment}</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <button className="btn btn-ghost btn-sm" onClick={handleSandboxTest}>🔄 重试</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleSandboxTest(false)}>🔄 重试</button>
                   <label className="btn btn-ghost btn-sm" title="上传 skill zip 包提供 scripts/ 目录" style={{ cursor: 'pointer' }}>
                     {uploadingScripts ? '上传中…' : '📦 上传 scripts.zip'}
                     <input type="file" accept=".zip,.tar.gz" style={{ display: 'none' }} onChange={handleUploadScripts} disabled={uploadingScripts} />
