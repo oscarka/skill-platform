@@ -107,28 +107,42 @@ export default function SkillDetail() {
     return pt.includes('stitch') || pt.includes('gcloud') || pt.includes('google cloud') || pc.source === 'clawhub';
   };
 
-  // Google OAuth 弹窗：使用 stitch-mcp-auto 的内置 client（无需平台配置）
-  const getGoogleToken = (): Promise<string | null> => {
+  // 通用 OAuth 弹窗：打开指定授权 URL，通过 postMessage 接收回调结果
+  const openOAuthPopup = (authUrl: string): Promise<{ hash: string; search: string } | null> => {
     return new Promise((resolve) => {
-      const CLIENT_ID = '764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com';
-      const SCOPE = 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email';
-      const REDIRECT = `${window.location.origin}/oauth-google-callback.html`;
-      const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=token&scope=${encodeURIComponent(SCOPE)}`;
-      const popup = window.open(url, 'google-oauth', 'width=500,height=620');
-      const timer = setInterval(() => {
-        try {
-          if (popup?.location?.hash?.includes('access_token')) {
-            const params = new URLSearchParams(popup.location.hash.slice(1));
-            const token = params.get('access_token');
-            clearInterval(timer);
-            popup.close();
-            resolve(token);
-          }
-          if (popup?.closed) { clearInterval(timer); resolve(null); }
-        } catch { /* cross-origin, keep waiting */ }
-      }, 300);
-      setTimeout(() => { clearInterval(timer); popup?.close(); resolve(null); }, 120000);
+      const popup = window.open(authUrl, 'oauth-popup', 'width=500,height=620');
+      const onMessage = (e: MessageEvent) => {
+        if (e.origin !== window.location.origin) return;
+        if (e.data?.type === 'oauth-callback') {
+          window.removeEventListener('message', onMessage);
+          clearTimeout(timer);
+          resolve({ hash: e.data.hash || '', search: e.data.search || '' });
+        }
+      };
+      window.addEventListener('message', onMessage);
+      // 超时或关闭
+      const timer = setTimeout(() => {
+        window.removeEventListener('message', onMessage);
+        popup?.close();
+        resolve(null);
+      }, 120000);
+      // 用户手动关了弹窗
+      const pollClose = setInterval(() => {
+        if (popup?.closed) { clearInterval(pollClose); clearTimeout(timer); window.removeEventListener('message', onMessage); resolve(null); }
+      }, 500);
     });
+  };
+
+  // Google OAuth（用 stitch-mcp-auto 内置 client，cloud-platform scope）
+  const getGoogleToken = async (): Promise<string | null> => {
+    const REDIRECT = `${window.location.origin}/oauth-callback.html`;
+    const CLIENT_ID = '764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com';
+    const SCOPE = 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email';
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=token&scope=${encodeURIComponent(SCOPE)}`;
+    const result = await openOAuthPopup(url);
+    if (!result) return null;
+    const params = new URLSearchParams(result.hash.replace(/^#/, ''));
+    return params.get('access_token');
   };
 
   const handleSandboxTest = async (withOAuth = false) => {

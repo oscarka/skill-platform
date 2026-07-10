@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head><title>OAuth Callback</title></head>
+<body>
+<script>
+  /**
+   * 通用 OAuth 回调页
+   * 支持两种模式：
+   *   1. Implicit flow：token 在 URL hash (#access_token=xxx)
+   *   2. Auth code flow：code 在 URL query (?code=xxx)
+   * 父窗口通过轮询 window.location 或 postMessage 获取 token/code
+   */
+  var hash = window.location.hash;
+  var search = window.location.search;
+
+  // 尝试通过 postMessage 通知父窗口（更可靠）
+  if (window.opener) {
+    window.opener.postMessage({
+      type: 'oauth-callback',
+      hash: hash,
+      search: search,
+      href: window.location.href,
+    }, window.location.origin);
+  }
+
+  document.body.innerText = '授权完成，正在关闭…';
+  setTimeout(function() { window.close(); }, 1000);
+</script>
+</body>
+</html>
