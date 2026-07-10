@@ -4,6 +4,7 @@ import * as db from '../db';
 import { runAI } from '../aiRunner';
 import { runSandboxTest } from '../sandboxService';
 import { getBundleStatus, buildBundle, markBundleReady, markBundleFailed, getBucketName } from '../bundleService';
+import { readDisplayTranscript, readFullTranscript, readSpillFile, listTranscripts, summarizeTranscript } from '../transcriptService';
 import https from 'https';
 import http from 'http';
 
@@ -733,3 +734,43 @@ skillRouter.post('/:id/upload-scripts', async (req, res) => {
   }
 });
 
+// ─── GET /api/skills/:id/transcripts ──────────────────────────────────────────
+// 列出某个 skill 的所有 transcript 记录
+skillRouter.get('/:id/transcripts', async (req, res) => {
+  try {
+    const list = await listTranscripts(req.params.id);
+    res.json({ transcripts: list });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/skills/:id/transcript/full ──────────────────────────────────────
+// 读取完整版 transcript（从 GCS）
+skillRouter.get('/:id/transcript/full', async (req, res) => {
+  try {
+    const skill = await db.getAsync<any>('SELECT sandbox_test FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'not found' });
+
+    const st = skill.sandbox_test ? JSON.parse(skill.sandbox_test) : null;
+    const gcsInfo = st?.transcript_gcs;
+    if (!gcsInfo) return res.json({ entries: [], message: 'no GCS transcript available' });
+
+    const entries = await readFullTranscript(gcsInfo);
+    const summary = summarizeTranscript(entries);
+    res.json({ entries, summary });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/skills/:id/transcript/spill/:entryId ───────────────────────────
+// 读取 spill 文件（大输出的完整内容）
+skillRouter.get('/:id/transcript/spill/:spillPath', async (req, res) => {
+  try {
+    const content = await readSpillFile(decodeURIComponent(req.params.spillPath));
+    res.json({ content });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});

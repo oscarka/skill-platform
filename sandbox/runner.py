@@ -5,6 +5,11 @@ sandbox/runner.py  — AI Agent sandbox runner
 import os, sys, json, subprocess, time, textwrap, base64
 from datetime import datetime, timezone
 
+# OpenClaw 风格模块
+from transcript import TranscriptManager
+from truncation import truncate_tool_result, calculate_max_chars, truncate_messages_aggregate
+from redact import redact_secrets
+
 # ─── 环境变量 ─────────────────────────────────────────────────────────────────
 SKILL_ID      = os.environ.get("SKILL_ID", "")
 SKILL_MD_B64  = os.environ.get("SKILL_MD", "")          # base64 编码的 SKILL.md
@@ -309,13 +314,18 @@ def dispatch_tool(name: str, args: dict) -> str:
 
 # ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
 def react_loop(system_prompt: str, user_msg: str) -> dict:
-    """返回 {"output": str, "transcript": list} — transcript 是完整的 messages 数组（仿 OpenClaw JSONL transcript）"""
+    """返回 {"output": str, "tm": TranscriptManager} — 使用 OpenClaw 风格的双份 Transcript"""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_msg},
     ]
-    # transcript: 存每一轮的完整记录（不截断），仿 OpenClaw 的 JSONL append-only 模式
-    transcript = []
+    # 创建 TranscriptManager（双份 JSONL：完整版 + 截断版）
+    tm = TranscriptManager(
+        work_dir="/tmp/transcript",
+        skill_id=SKILL_ID,
+        context_tokens=128_000,
+    )
+    tm.append_event("start", f"开始测试 skill_id={SKILL_ID}")
 
     for turn in range(12):
         # OpenClaw-style context pruning before each AI call
@@ -339,14 +349,12 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
         msg = choice["message"]
         messages.append(msg)
 
-        # 记录 AI 回复到 transcript
-        transcript.append({
-            "turn": turn + 1,
-            "role": "assistant",
-            "content": msg.get("content", ""),
-            "tool_calls": [{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in (msg.get("tool_calls") or [])],
-            "ts": datetime.now(timezone.utc).isoformat(),
-        })
+        # 记录 AI 回复到 TranscriptManager（自动脱敏 + 双份存储）
+        tm.append_assistant(
+            turn=turn + 1,
+            content=msg.get("content", ""),
+            tool_calls=[{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in (msg.get("tool_calls") or [])],
+        )
 
         # 没有 tool_call → AI 给出最终答案
         tool_calls = msg.get("tool_calls") or []
@@ -354,9 +362,9 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
         if not tool_calls:
             if not content_text.strip():
                 progress("完成", "AI 返回空响应，视为测试结束")
-                return {"output": "测试完成。", "transcript": transcript}
+                return {"output": "测试完成。", "tm": tm}
             progress("完成", "AI 已给出测试结论")
-            return {"output": content_text, "transcript": transcript}
+            return {"output": content_text, "tm": tm}
 
         # 有 tool_call → 执行工具
         for tc in msg["tool_calls"]:
@@ -366,29 +374,32 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
             progress(f"工具:{tool_label}", args.get("command", args.get("path", args.get("url", "")))[:80])
             result_str = dispatch_tool(name, args)
 
-            # 记录工具输出到 transcript（完整保留，不截断 — 仿 OpenClaw 8MB 上限）
-            transcript.append({
-                "turn": turn + 1,
-                "role": "tool",
-                "tool": name,
-                "input": args,
-                "output": result_str[:8000],  # 单条最大 8KB
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
+            # 记录工具输出到 TranscriptManager（自动落盘大文件 + 智能截断 + 脱敏）
+            tm.append_tool_call(
+                turn=turn + 1,
+                tool_name=name,
+                tool_input=args,
+                tool_output=result_str,
+                tool_call_id=tc["id"],
+            )
 
             # 把工具执行结果也发回进度（让前端能看到完整输出）
             if name == "exec" and len(result_str) > 10:
                 progress(f"输出:{tool_label}", result_str[:4000])
 
-            # 截断过大的工具输出（防止 AI 上下文超限）
-            if len(result_str) > 2000:
-                result_str = result_str[:2000] + "...[truncated]"
+            # OpenClaw 风格智能截断 — 保留头+尾，不丢错误信息
+            max_chars = calculate_max_chars(128_000)
+            truncated = truncate_tool_result(result_str, max_chars)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
-                "content": result_str,
+                "content": truncated,
             })
-    return {"output": "已达最大轮次上限", "transcript": transcript}
+
+        # 每轮后做聚合截断（防止总 tool output 超 context 50%）
+        messages = truncate_messages_aggregate(messages, context_window_tokens=128_000)
+
+    return {"output": "已达最大轮次上限", "tm": tm}
 
 # ─── 结果写回 Supabase ────────────────────────────────────────────────────────
 def save_result(result: dict):
@@ -397,19 +408,7 @@ def save_result(result: dict):
         return
     try:
         import urllib.request
-        # 压缩 transcript（callback body 不能太大，否则超时/被截断）
-        if "transcript" in result:
-            compressed = []
-            for entry in result["transcript"]:
-                e = dict(entry)
-                # tool output 截断到 2KB（避免 doubao reasoning 几十 KB）
-                if e.get("output") and len(str(e["output"])) > 2000:
-                    e["output"] = str(e["output"])[:2000] + "...[truncated]"
-                # AI content 截断到 4KB
-                if e.get("content") and len(str(e["content"])) > 4000:
-                    e["content"] = str(e["content"])[:4000] + "...[truncated]"
-                compressed.append(e)
-            result["transcript"] = compressed
+        # transcript 已经是 TranscriptManager 的截断版，无需再压缩
 
         callback_url = os.environ.get("CALLBACK_URL", "")
         if callback_url:
@@ -530,16 +529,30 @@ def main():
     try:
         loop_result = react_loop(system_prompt, user_msg)
         output = loop_result["output"]
-        transcript = loop_result.get("transcript", [])
+        tm = loop_result.get("tm")  # TranscriptManager instance
         duration_ms = int((time.time() - start) * 1000)
+
+        # 回调用截断版 transcript（小 body，不会超时）
+        display_transcript = tm.get_display_entries() if tm else []
+
         result = {
             "skill_id": SKILL_ID,
             "passed": True,
             "output": output,
-            "transcript": transcript,  # 仿 OpenClaw：完整的 JSONL transcript
+            "transcript": display_transcript,  # 截断版给 callback
             "duration_ms": duration_ms,
             "tested_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        # 上传完整版 transcript 到 GCS（不受 body 大小限制）
+        if tm:
+            try:
+                gcs_paths = tm.upload_to_gcs("skill-platform-bundles-0884226164")
+                result["transcript_gcs"] = gcs_paths
+                print(f"[transcript] uploaded to GCS: {gcs_paths}", flush=True)
+            except Exception as e:
+                print(f"[transcript] GCS upload failed: {e}", flush=True)
+
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
         result = {
