@@ -1,0 +1,8 @@
+requests
+httpx
+PyPDF2
+pdfplumber
+python-docx
+Pillow
+pandas
+openai

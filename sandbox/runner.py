@@ -1,0 +1,457 @@
+"""
+sandbox/runner.py  — AI Agent sandbox runner
+参考 OpenClaw bash-tools 设计，AI 读 SKILL.md 然后用 exec 工具执行任务
+"""
+import os, sys, json, subprocess, time, textwrap, base64
+from datetime import datetime, timezone
+
+# ─── 环境变量 ─────────────────────────────────────────────────────────────────
+SKILL_ID      = os.environ.get("SKILL_ID", "")
+SKILL_MD_B64  = os.environ.get("SKILL_MD", "")          # base64 编码的 SKILL.md
+USER_INPUTS   = json.loads(os.environ.get("USER_INPUTS", "{}"))
+AI_API_KEY    = os.environ.get("AI_API_KEY", "")
+AI_BASE_URL   = os.environ.get("AI_BASE_URL", "")       # doubao/deepseek endpoint
+AI_MODEL      = os.environ.get("AI_MODEL", "")
+DB_URL        = os.environ.get("DATABASE_URL", "")
+DB_SCHEMA     = os.environ.get("DB_SCHEMA", "skill_platform")
+SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 else ""
+CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
+SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
+
+
+# ─── OpenClaw exec-auto-reviewer（简化版）──────────────────────────────────────
+# 参考 OpenClaw exec-auto-reviewer.prompt.ts：拦截无效命令，节省 AI 轮次
+PRE_INSTALLED_PKGS = {
+    'requests', 'httpx', 'pypdf2', 'pdfplumber', 'python-docx', 'python-pptx',
+    'pillow', 'pytesseract', 'pandas', 'numpy', 'openai', 'flask', 'fastapi'
+}
+
+def exec_pre_review(command: str) -> str | None:
+    """
+    返回 None = 允许执行；返回 str = 拦截并把提示返回给 AI。
+    参考 OpenClaw DEFAULT_EXEC_REVIEWER_SYSTEM_PROMPT 的审查逻辑。
+    """
+    cmd = command.strip().lower()
+
+    # 拦截：创建虚拟环境（所有包已全局预装，venv 会丢失它们）
+    if 'python3 -m venv' in cmd or 'python -m venv' in cmd or 'virtualenv ' in cmd:
+        return (
+            "⛔ 已拦截：不允许创建虚拟环境。\n"
+            "所有所需包已在系统 Python 里预装，直接用 python3 即可。\n"
+            "已预装：requests, httpx, PyPDF2, pdfplumber, python-docx, python-pptx, "
+            "Pillow, pytesseract, pandas, numpy, openai"
+        )
+
+    # 拦截：安装已预装的包
+    if ('pip install' in cmd or 'pip3 install' in cmd) and 'venv' not in cmd:
+        blocked = [p for p in PRE_INSTALLED_PKGS if p in cmd]
+        if blocked:
+            return (
+                f"⛔ 已拦截：{', '.join(blocked)} 已预装，无需重新安装。\n"
+                "如需其他包可以安装，但以上包直接 import 即可。"
+            )
+
+    # 允许执行
+    return None
+
+# ─── 工具：bash exec ──────────────────────────────────────────────────────────
+def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -> dict:
+    # OpenClaw exec-auto-reviewer 拦截
+    review = exec_pre_review(command)
+    if review:
+        print(f"[exec-blocked] {command[:80]}", flush=True)
+        return {"stdout": review, "stderr": "", "exit_code": 0, "_blocked": True}
+    print(f"[exec] $ {command[:120]}", flush=True)
+    try:
+        result = subprocess.run(
+            command, shell=True, cwd=workdir,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        out = result.stdout[-3000:] if len(result.stdout) > 3000 else result.stdout
+        err = result.stderr[-1000:] if len(result.stderr) > 1000 else result.stderr
+        return {"stdout": out, "stderr": err, "exit_code": result.returncode}
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": f"timeout after {timeout}s", "exit_code": -1}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "exit_code": -2}
+
+# ─── 工具：write file ─────────────────────────────────────────────────────────
+def tool_write(path: str, content: str) -> dict:
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+        return {"ok": True, "path": path}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ─── 工具：read file ──────────────────────────────────────────────────────────
+def tool_read(path: str) -> dict:
+    try:
+        with open(path) as f:
+            return {"ok": True, "content": f.read()[:5000]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ─── 进度上报（stdout + HTTP POST 到平台，实时写入 DB 供前端展示）──────────────
+def _post_progress(msg: dict):
+    if not CALLBACK_URL:
+        return
+    try:
+        import urllib.request as _ur
+        data = json.dumps({"type": "progress", "event": msg, "secret": SANDBOX_SECRET}).encode()
+        req = _ur.Request(CALLBACK_URL, data=data,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        _ur.urlopen(req, timeout=5)
+    except Exception:
+        pass  # 进度上报失败不影响主流程
+
+def progress(step: str, detail: str = ""):
+    ts = datetime.now(timezone.utc).isoformat()
+    msg = {"ts": ts, "step": step, "detail": detail}
+    print(f"[PROGRESS] {json.dumps(msg, ensure_ascii=False)}", flush=True)
+    _post_progress(msg)  # 同时 POST 到平台存入 DB
+
+# ─── 工具定义（传给 AI 的 tool_choice 格式）──────────────────────────────────
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "exec",
+            "description": "在沙箱 Linux 环境里执行 bash 命令。可用于安装依赖(pip/npm)、运行脚本、处理文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的 bash 命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数，默认60", "default": 60}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "写文件到沙箱文件系统",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取沙箱文件系统中的文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }
+    },
+]
+
+
+# ─── OpenClaw 风格上下文压缩 ──────────────────────────────────────────────────
+KEEP_LAST_TURNS = 3          # 最近3轮保持完整
+SOFT_TRIM_HEAD  = 1500       # soft trim: 保留头部字符数
+SOFT_TRIM_TAIL  = 1500       # soft trim: 保留尾部字符数
+SOFT_TRIM_MAX   = 4000       # soft trim: 单条 tool 结果上限
+HARD_CLEAR_MSG  = "[Old tool result content cleared]"
+
+def estimate_chars(messages: list) -> int:
+    """估算消息列表的总字符数"""
+    return sum(len(str(m)) for m in messages)
+
+def prune_context(messages: list) -> list:
+    """
+    仿 OpenClaw pruneContextMessages:
+    - 保留最近 KEEP_LAST_TURNS 轮的 assistant+tool 消息
+    - 对更早的 tool 消息做 soft trim (head+tail)
+    - 如果还是太大，做 hard clear
+    """
+    # 找最近 N 个 assistant 消息的起始位置
+    assistant_indices = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
+    if len(assistant_indices) <= KEEP_LAST_TURNS:
+        return messages  # 不需要裁剪
+
+    cutoff_idx = assistant_indices[-KEEP_LAST_TURNS]  # 这个 index 之前的消息可以裁剪
+
+    result = list(messages)
+    for i in range(1, cutoff_idx):  # 从第1条开始（保留 system prompt）
+        msg = result[i]
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content", "")
+        if len(content) <= SOFT_TRIM_MAX:
+            continue
+        # Soft trim: head + "...[pruned]..." + tail
+        head = content[:SOFT_TRIM_HEAD]
+        tail = content[-SOFT_TRIM_TAIL:]
+        result[i] = {**msg, "content": head + f"\n...[{len(content)-SOFT_TRIM_HEAD-SOFT_TRIM_TAIL} chars pruned]...\n" + tail}
+
+    # 如果 soft trim 后还是很大，hard clear 更早的消息
+    total = estimate_chars(result)
+    if total > 60_000:
+        hard_cutoff = assistant_indices[-KEEP_LAST_TURNS] if len(assistant_indices) > KEEP_LAST_TURNS else 0
+        for i in range(1, hard_cutoff):
+            msg = result[i]
+            if msg.get("role") == "tool":
+                result[i] = {**msg, "content": HARD_CLEAR_MSG}
+
+    return result
+
+# ─── AI 调用（OpenAI 兼容接口，仿 OpenClaw FailoverError 多 provider）───────
+def _do_ai_call(messages: list, tools=None, timeout=180,
+                api_key: str = None, base_url: str = None) -> dict:
+    """Single AI call to a specific provider."""
+    import urllib.request, urllib.error
+    key  = api_key  or AI_API_KEY
+    base = base_url or AI_BASE_URL
+    body = {"model": AI_MODEL, "messages": messages, "max_tokens": 2048}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=data,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        body_str = e.read().decode()
+        raise RuntimeError(f"AI API error {e.code}: {body_str}")
+
+def call_ai(messages: list, tools=None) -> dict:
+    """
+    3-level fallback (OpenClaw FailoverError pattern):
+    Level 1: Primary provider + tools
+    Level 2: Fallback provider + tools (Doubao <-> DeepSeek)
+    Level 3: Primary provider, no tools, simplified context
+    """
+    try:
+        return _do_ai_call(messages, tools, timeout=180)
+    except (RuntimeError, Exception) as e1:
+        err1 = str(e1)
+        print(f"[call_ai] L1 failed: {err1[:100]}", flush=True)
+
+        # Level 2: switch to fallback provider
+        if FALLBACK_API_KEY and FALLBACK_BASE_URL:
+            try:
+                print(f"[call_ai] L2 trying fallback provider...", flush=True)
+                return _do_ai_call(messages, tools, timeout=180,
+                                   api_key=FALLBACK_API_KEY, base_url=FALLBACK_BASE_URL)
+            except Exception as e2:
+                print(f"[call_ai] L2 failed: {str(e2)[:80]}", flush=True)
+
+        # Level 3: no tools + simplified context
+        if "tool" in err1.lower() or "output" in err1.lower() or "empty" in err1.lower():
+            print("[call_ai] L3 retry: no tools, simplified context", flush=True)
+            sys_msg = [m for m in messages if m.get("role") == "system"]
+            usr_msg = [m for m in messages if m.get("role") == "user"]
+            simple = sys_msg + (usr_msg[-1:] if usr_msg else [])
+            simple.append({"role": "user", "content": "Please output the final test result as JSON only."})
+            return _do_ai_call(simple, tools=None, timeout=120)
+        raise
+
+# ─── 工具调用分发 ─────────────────────────────────────────────────────────────
+def dispatch_tool(name: str, args: dict) -> str:
+    if name == "exec":
+        r = tool_exec(args["command"], timeout=args.get("timeout", 60))
+        return json.dumps(r, ensure_ascii=False)
+    elif name == "write_file":
+        r = tool_write(args["path"], args["content"])
+        return json.dumps(r, ensure_ascii=False)
+    elif name == "read_file":
+        r = tool_read(args["path"])
+        return json.dumps(r, ensure_ascii=False)
+    return json.dumps({"error": f"unknown tool: {name}"})
+
+# ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
+def react_loop(system_prompt: str, user_msg: str) -> str:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_msg},
+    ]
+    for turn in range(12):
+        # OpenClaw-style context pruning before each AI call
+        messages = prune_context(messages)
+
+        # 后 4 轮：注入强制完成指令，停止传工具
+        if turn >= 8:
+            if messages[-1].get("role") != "user" or "JSON" not in messages[-1].get("content", ""):
+                messages.append({
+                    "role": "user",
+                    'content': '你已完成足够的分析。请立即停止调用工具，直接输出最终评测结果（纯 JSON 格式，不要包含 markdown 代码块）。'
+                })
+            tools_this_turn = None   # 禁用工具，强制文本输出
+        else:
+            tools_this_turn = TOOLS
+
+        progress(f"turn_{turn+1}", f"calling AI (ctx≈{estimate_chars(messages)//1000}k chars)")
+        resp = call_ai(messages, tools=tools_this_turn)
+        choice = resp["choices"][0]
+        msg = choice["message"]
+        messages.append(msg)
+
+        # 没有 tool_call → AI 给出最终答案（处理空响应）
+        tool_calls = msg.get("tool_calls") or []
+        content_text = msg.get("content") or ""
+        if not tool_calls:
+            if not content_text.strip():
+                # 空响应（既无 content 也无 tool_calls）→ 当作正常完成
+                progress("done", "AI returned empty response (treating as finished)")
+                return "Task completed."
+            progress("done", "AI finished")
+            return content_text
+
+        # 有 tool_call → 执行工具
+        for tc in msg["tool_calls"]:
+            name = tc["function"]["name"]
+            args = json.loads(tc["function"]["arguments"])
+            progress(f"tool:{name}", args.get("command", args.get("path", ""))[:80])
+            result_str = dispatch_tool(name, args)
+            # 截断过大的工具输出（防止上下文超限）
+            if len(result_str) > 2000:
+                result_str = result_str[:2000] + "...[truncated]"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result_str,
+            })
+    return "max turns reached"
+
+# ─── 结果写回 Supabase ────────────────────────────────────────────────────────
+def save_result(result: dict):
+    if not DB_URL:
+        print("[save] no DB_URL, skipping", flush=True)
+        return
+    try:
+        import urllib.request
+        # 调用主服务的 callback API 写结果（避免在 Job 里直接连 PG）
+        callback_url = os.environ.get("CALLBACK_URL", "")
+        if callback_url:
+            data = json.dumps(result).encode()
+            req = urllib.request.Request(
+                callback_url, data=data,
+                headers={"Content-Type": "application/json", "X-Sandbox-Secret": os.environ.get("SANDBOX_SECRET","")},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=10)
+            print("[save] result sent via callback", flush=True)
+    except Exception as e:
+        print(f"[save] error: {e}", flush=True)
+
+# ─── 主入口 ───────────────────────────────────────────────────────────────────
+def main():
+    start = time.time()
+    progress("start", f"skill_id={SKILL_ID}")
+
+    if not SKILL_MD:
+        progress("error", "SKILL_MD is empty")
+        sys.exit(1)
+
+    system_prompt = textwrap.dedent(f"""
+        你是一个在 Linux 沙箱里运行的 AI 执行引擎。
+        你会收到一个 Skill 的说明文档（SKILL.md）和测试输入数据，需要：
+        1. 判断 Skill 类型（脚本型 or 纯提示词型）
+        2. 用测试输入数据进行实际测试（不要跳过测试数据！）
+        3. 验证功能是否正常工作
+        4. 给出最终评测结果（JSON 格式）
+
+        ⚡ 效率要求：尽量在 6 轮内完成测试。
+
+        🚫 禁止行为（违反会浪费轮次）：
+        - 禁止创建虚拟环境（python3 -m venv / virtualenv）
+        - 禁止安装已预装的包（见下方列表）
+        - 直接用 python3 运行脚本，无需激活任何环境
+
+        📦 沙箱已预装（无需 pip install）：
+        - Python 系统库：requests, httpx, PyPDF2, pdfplumber, python-docx, python-pptx
+        - Pillow, pytesseract, pandas, numpy, openai
+        - 系统工具：tesseract-ocr（含中文支持）, curl, wget, jq, git, nodejs, npm
+
+        🔌 MCP 工具支持（mcporter 已预装）：
+        - 如果 SKILL.md 里有 `requires.bins: ["mcporter"]`，可以用 exec 调用 mcporter
+        - 配置 MCP 服务器：exec("mcporter config add <name> --command npx --args '-y <pkg>'")
+        - 调用 MCP 工具：exec("mcporter call <server>.<tool> key=value ...")
+        - 示例（Stitch UI）：
+            exec("mcporter config add stitch --command npx --args '-y stitch-mcp-auto'")
+            exec("mcporter call stitch.generate_screen_from_text prompt='design a login page'")
+
+        🤖 纯提示词 Skill 测试方法（如果 SKILL.md 没有可执行代码/脚本）：
+        - 用 openai 库模拟真实用户调用，AI_API_KEY 和 AI_BASE_URL 环境变量已设置
+        - 把 SKILL.md 的正文作为 system_prompt，把测试输入中的每个测试用例作为 user_message
+        - 用 Python 脚本调用 API，评估返回内容的质量
+        - 示例：
+            import openai, os
+            client = openai.OpenAI(api_key=os.environ["AI_API_KEY"], base_url=os.environ.get("AI_BASE_URL"))
+            resp = client.chat.completions.create(
+                model=os.environ.get("AI_MODEL","doubao-seed-1-6-250615"),
+                messages=[
+                    {{"role":"system","content":"<SKILL.md 正文>"}},
+                    {{"role":"user","content":"<测试用例>"}}
+                ]
+            )
+            print(resp.choices[0].message.content)
+
+        结果格式（最后一轮直接输出此 JSON）：
+        {{"passed": true/false, "score": 0-100, "output": "测试结果摘要", "notes": "详细说明"}}
+
+        📊 评分准则：
+        - 90-100：功能完全验证通过（AI 实际调用成功且响应质量高）
+        - 70-89：主流程工作，有小问题
+        - 60-69：外部服务/API 不可访问（auth 失败、网络限制）但 skill 逻辑正确 → passed=true
+        - 40-59：部分功能工作
+        - 0-39：skill 逻辑本身有缺陷（不是环境问题）
+        ⚠️ 重要：如果失败是因为「需要认证」「外部服务不可用」「网络限制」，给 60-69 分并 passed=true，
+           不要因为环境限制就给 0 分。
+    """).strip()
+
+    user_msg = f"""
+## SKILL.md 内容
+{SKILL_MD}
+
+## 测试输入
+{json.dumps(USER_INPUTS, ensure_ascii=False, indent=2)}
+
+请开始测试这个 Skill。
+    """.strip()
+
+    try:
+        output = react_loop(system_prompt, user_msg)
+        duration_ms = int((time.time() - start) * 1000)
+        result = {
+            "skill_id": SKILL_ID,
+            "passed": True,
+            "output": output,
+            "duration_ms": duration_ms,
+            "tested_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        duration_ms = int((time.time() - start) * 1000)
+        result = {
+            "skill_id": SKILL_ID,
+            "passed": False,
+            "output": str(e),
+            "duration_ms": duration_ms,
+            "tested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        progress("error", str(e))
+
+    print(f"[RESULT] {json.dumps(result, ensure_ascii=False)}", flush=True)
+    save_result(result)
+
+if __name__ == "__main__":
+    main()

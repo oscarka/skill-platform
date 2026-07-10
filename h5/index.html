@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>信息提交</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif;
+      background: #f7f8fa;
+      color: #1a1a1a;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    .header {
+      background: #fff;
+      padding: 20px 16px 16px;
+      border-bottom: 1px solid #eee;
+      text-align: center;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; color: #111; margin-bottom: 4px; }
+    .header p { font-size: 13px; color: #888; line-height: 1.5; }
+    .container { max-width: 480px; margin: 0 auto; padding: 16px; }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }
+    .card-title {
+      font-size: 14px; font-weight: 600; color: #333;
+      margin-bottom: 14px; padding-bottom: 10px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .form-item { margin-bottom: 14px; }
+    .form-label {
+      display: block; font-size: 13px; font-weight: 500;
+      color: #555; margin-bottom: 5px;
+    }
+    .form-label .req { color: #e53935; }
+    .form-input, .form-select, .form-textarea {
+      width: 100%; padding: 10px 12px;
+      border: 1px solid #ddd; border-radius: 8px;
+      font-size: 15px; font-family: inherit;
+      color: #1a1a1a; background: #fff;
+      outline: none; appearance: none;
+      transition: border-color .2s;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      border-color: #1677ff;
+      box-shadow: 0 0 0 2px rgba(22,119,255,.15);
+    }
+    .form-textarea { resize: vertical; min-height: 88px; }
+    .upload-area {
+      border: 2px dashed #d0d0d0; border-radius: 10px;
+      padding: 24px 16px; text-align: center;
+      cursor: pointer; transition: border-color .2s, background .2s;
+    }
+    .upload-area:hover, .upload-area.drag-over {
+      border-color: #1677ff; background: #f0f6ff;
+    }
+    .upload-icon { font-size: 32px; margin-bottom: 8px; }
+    .upload-hint { font-size: 13px; color: #999; line-height: 1.6; }
+    .upload-hint strong { color: #1677ff; }
+    .file-list { margin-top: 12px; }
+    .file-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; background: #f5f7fa;
+      border-radius: 8px; margin-bottom: 6px; font-size: 13px;
+    }
+    .file-item .file-icon { font-size: 18px; flex-shrink: 0; }
+    .file-item .file-name { flex: 1; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-item .file-size { color: #aaa; font-size: 11px; flex-shrink: 0; }
+    .file-item .remove-btn {
+      background: none; border: none; color: #ccc;
+      cursor: pointer; font-size: 16px; padding: 0 4px; flex-shrink: 0;
+    }
+    .file-item .remove-btn:hover { color: #e53935; }
+    .btn-submit {
+      width: 100%; padding: 14px;
+      background: #1677ff; color: #fff;
+      border: none; border-radius: 10px;
+      font-size: 16px; font-weight: 600;
+      cursor: pointer; transition: background .2s, opacity .2s;
+    }
+    .btn-submit:hover { background: #0958d9; }
+    .btn-submit:disabled { background: #aaa; cursor: not-allowed; }
+    .state-screen {
+      text-align: center; padding: 60px 20px;
+    }
+    .state-icon { font-size: 56px; margin-bottom: 16px; }
+    .state-title { font-size: 18px; font-weight: 600; color: #111; margin-bottom: 8px; }
+    .state-desc { font-size: 14px; color: #888; line-height: 1.7; }
+    .return-banner {
+      background: #fff7e6; border: 1px solid #ffd591;
+      border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
+    }
+    .return-banner .return-title { font-size: 13px; font-weight: 600; color: #d46b08; margin-bottom: 4px; }
+    .return-banner .return-reason { font-size: 13px; color: #795500; }
+    .toast {
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.8); color: #fff;
+      padding: 10px 20px; border-radius: 20px;
+      font-size: 14px; z-index: 9999;
+      opacity: 0; transition: opacity .3s;
+      pointer-events: none; white-space: nowrap;
+    }
+    .toast.show { opacity: 1; }
+    .expiry-bar {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: #aaa; margin-top: 8px;
+    }
+    .expiry-bar .dot { width: 6px; height: 6px; border-radius: 50%; background: #52c41a; flex-shrink: 0; }
+    .expiry-bar .dot.warn { background: #faad14; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="toast" id="toast"></div>
+  <input type="file" id="file-input" multiple />
+
+  <script>
+    const app = document.getElementById('app');
+    const toastEl = document.getElementById('toast');
+    const fileInput = document.getElementById('file-input');
+    let selectedFiles = [];
+    let h5Config = null;
+    let ticketId = null;
+    let submitting = false;
+
+    // ── Helpers ──────────────────────────────────────────────────────
+    function toast(msg, dur = 2500) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), dur);
+    }
+
+    function getToken() {
+      return new URLSearchParams(location.search).get('token');
+    }
+
+    function fileIcon(mime) {
+      if (mime && mime.includes('pdf')) return '📄';
+      if (mime && mime.includes('image')) return '🖼️';
+      return '📎';
+    }
+
+    function fmtSize(bytes) {
+      if (bytes < 1024) return bytes + 'B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
+      return (bytes / 1024 / 1024).toFixed(1) + 'MB';
+    }
+
+    function fmtDate(ts) {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    }
+
+    // ── Static screens ───────────────────────────────────────────────
+    function showLoading() {
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">⏳</div><div class="state-title">加载中…</div></div>`;
+    }
+
+    function showError(msg) {
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">❌</div><div class="state-title">链接无效</div><div class="state-desc">${msg}</div></div>`;
+    }
+
+    function showExpired() {
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">⏰</div><div class="state-title">链接已过期</div><div class="state-desc">此链接已超过有效期，如需帮助请联系工作人员。</div></div>`;
+    }
+
+    function showAlreadySubmitted(status) {
+      const labels = { processing: 'AI 处理中，请耐心等待', done: '已处理完成' };
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">✅</div><div class="state-title">已成功提交</div><div class="state-desc">${labels[status] || '您已提交过信息，工作人员将尽快处理。'}</div></div>`;
+    }
+
+    function showSuccess() {
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">🎉</div><div class="state-title">提交成功！</div><div class="state-desc">信息已收到，工作人员将尽快为您处理。<br/>如有疑问请联系工作人员。</div></div>`;
+    }
+
+    // ── Form rendering ───────────────────────────────────────────────
+    function renderFileList() {
+      const list = document.getElementById('file-list');
+      if (!list) return;
+      if (selectedFiles.length === 0) { list.innerHTML = ''; return; }
+      list.innerHTML = selectedFiles.map((f, i) => `
+        <div class="file-item">
+          <span class="file-icon">${fileIcon(f.type)}</span>
+          <span class="file-name">${f.name}</span>
+          <span class="file-size">${fmtSize(f.size)}</span>
+          <button class="remove-btn" onclick="removeFile(${i})">✕</button>
+        </div>`).join('');
+    }
+
+    window.removeFile = function(idx) {
+      selectedFiles.splice(idx, 1);
+      renderFileList();
+    };
+
+    function buildFieldHTML(field) {
+      const req = field.required ? '<span class="req"> *</span>' : '';
+      const label = `<label class="form-label" for="f_${field.key}">${field.label}${req}</label>`;
+      let input = '';
+      if (field.type === 'textarea') {
+        input = `<textarea class="form-textarea" id="f_${field.key}" name="${field.key}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}></textarea>`;
+      } else if (field.type === 'select' && field.options?.length) {
+        const opts = field.options.map(o => `<option value="${o.value ?? o}">${o.label ?? o}</option>`).join('');
+        input = `<select class="form-select" id="f_${field.key}" name="${field.key}" ${field.required ? 'required' : ''}><option value="">请选择…</option>${opts}</select>`;
+      } else {
+        const typeMap = { number: 'number', date: 'date', text: 'text' };
+        input = `<input class="form-input" id="f_${field.key}" name="${field.key}" type="${typeMap[field.type] || 'text'}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''} />`;
+      }
+      return `<div class="form-item">${label}${input}</div>`;
+    }
+
+    function renderForm(data) {
+      const cfg = data.h5_config || {};
+      const fields = cfg.fields || [];
+      const uploads = cfg.uploads;
+      const expiryMs = data.expires_at - Date.now();
+      const daysLeft = Math.ceil(expiryMs / 86400000);
+      const isReturned = data.status === 'returned';
+
+      const fieldsHTML = fields.length
+        ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(buildFieldHTML).join('')}</div>`
+        : '';
+
+      const uploadHTML = uploads ? `
+        <div class="card">
+          <div class="card-title">📎 上传文件</div>
+          <div class="upload-area" id="upload-area">
+            <div class="upload-icon">📤</div>
+            <div class="upload-hint">${uploads.label || '点击或拖拽文件到这里'}<br/><strong>点击选择文件</strong><br/>支持 ${(uploads.accept || []).join('、')} · 最多 ${uploads.maxFiles || 3} 个</div>
+          </div>
+          <div class="file-list" id="file-list"></div>
+        </div>` : '';
+
+      app.innerHTML = `
+        <div class="header">
+          <h1>${cfg.title || data.skill_name || '信息提交'}</h1>
+          ${cfg.description ? `<p>${cfg.description}</p>` : ''}
+          <div class="expiry-bar" style="justify-content:center">
+            <span class="dot${daysLeft <= 1 ? ' warn' : ''}"></span>
+            <span>链接有效期至 ${fmtDate(data.expires_at)}（剩余 ${daysLeft} 天）</span>
+          </div>
+        </div>
+        <div class="container">
+          ${isReturned ? `<div class="return-banner"><div class="return-title">⚠️ 工作人员请您补充信息</div><div class="return-reason">${data.return_reason || '请重新填写并提交。'}</div></div>` : ''}
+          <form id="submit-form" onsubmit="handleSubmit(event)">
+            ${fieldsHTML}${uploadHTML}
+            <button class="btn-submit" type="submit" id="submit-btn">提交信息</button>
+          </form>
+        </div>`;
+
+      // Bind file upload
+      if (uploads) {
+        const area = document.getElementById('upload-area');
+        const maxFiles = uploads.maxFiles || 3;
+        area.onclick = () => { fileInput.accept = (uploads.accept || []).join(','); fileInput.click(); };
+        area.ondragover = e => { e.preventDefault(); area.classList.add('drag-over'); };
+        area.ondragleave = () => area.classList.remove('drag-over');
+        area.ondrop = e => { e.preventDefault(); area.classList.remove('drag-over'); addFiles(e.dataTransfer.files, maxFiles); };
+        fileInput.onchange = () => { addFiles(fileInput.files, maxFiles); fileInput.value = ''; };
+      }
+    }
+
+    function addFiles(fileList, max) {
+      const allowed = h5Config?.uploads?.accept || [];
+      for (const f of fileList) {
+        if (selectedFiles.length >= max) { toast(`最多上传 ${max} 个文件`); break; }
+        if (allowed.length && !allowed.some(a => {
+          if (a.endsWith('/*')) return f.type.startsWith(a.replace('/*', '/'));
+          return f.type === a;
+        })) { toast(`不支持 ${f.name} 的格式`); continue; }
+        selectedFiles.push(f);
+      }
+      renderFileList();
+    }
+
+    // ── Submit ───────────────────────────────────────────────────────
+    window.handleSubmit = async function(e) {
+      e.preventDefault();
+      if (submitting) return;
+      const form = document.getElementById('submit-form');
+      if (!form.checkValidity()) { form.reportValidity(); return; }
+
+      const uploads = h5Config?.uploads;
+      if (uploads && selectedFiles.length === 0 && (h5Config.fields || []).length === 0) {
+        toast('请至少上传一个文件'); return;
+      }
+
+      submitting = true;
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true; btn.textContent = '提交中…';
+
+      try {
+        const token = getToken();
+        const fd = new FormData();
+        // Collect text fields
+        const fields = {};
+        (h5Config?.fields || []).forEach(f => {
+          const el = document.getElementById('f_' + f.key);
+          if (el) fields[f.key] = el.value;
+        });
+        fd.append('fields', JSON.stringify(fields));
+        selectedFiles.forEach(f => fd.append('files', f));
+
+        const res = await fetch(`/api/h5/${token}/submit`, { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '提交失败');
+        showSuccess();
+      } catch (err) {
+        toast('提交失败：' + err.message, 4000);
+        btn.disabled = false; btn.textContent = '提交信息';
+        submitting = false;
+      }
+    };
+
+    // ── Init ─────────────────────────────────────────────────────────
+    async function init() {
+      const token = getToken();
+      if (!token) { showError('链接无效，缺少访问凭证。'); return; }
+      showLoading();
+      try {
+        const res = await fetch(`/api/h5/${token}`);
+        const data = await res.json();
+        if (res.status === 410 || data.code === 'EXPIRED') { showExpired(); return; }
+        if (!res.ok) { showError(data.error || '链接无效'); return; }
+        if (data.already_submitted) { showAlreadySubmitted(data.status); return; }
+        h5Config = data.h5_config;
+        ticketId = data.ticket_id;
+        document.title = data.h5_config?.title || data.skill_name || '信息提交';
+        renderForm(data);
+      } catch (err) {
+        showError('加载失败，请检查网络后刷新重试。');
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
