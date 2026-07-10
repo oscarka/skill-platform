@@ -30,6 +30,20 @@ function ensureSessionId(req: any, res: any): string {
   return sid;
 }
 
+
+// ─── GET /api/oauth/google/config ────────────────────────────────────────────
+// 返回 Google OAuth 配置状态（供前端判断是否已配置）
+oauthRouter.get('/google/config', (req, res) => {
+  if (!GOOGLE_CLIENT_ID) {
+    return res.json({ configured: false });
+  }
+  res.json({
+    configured: true,
+    clientId: GOOGLE_CLIENT_ID,
+    redirectUri: process.env.OAUTH_REDIRECT_URI || '',
+  });
+});
+
 // ─── GET /auth/google/start ──────────────────────────────────────────────────
 // 启动 Google OAuth 授权流程
 oauthRouter.get('/auth/google/start', (req, res) => {

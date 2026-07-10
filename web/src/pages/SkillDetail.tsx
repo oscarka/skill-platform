@@ -133,17 +133,24 @@ export default function SkillDetail() {
     });
   };
 
-  // Google OAuth（用 stitch-mcp-auto 内置 client，cloud-platform scope）
+  // Google OAuth：通过平台服务端 /auth/google/start 流程
+  // Google OAuth：先从服务端拿 client ID，再做 implicit flow 弹窗
   const getGoogleToken = async (): Promise<string | null> => {
+    const configRes = await fetch('/api/oauth/google/config').catch(() => null);
+    const config = await configRes?.json().catch(() => ({}));
+    if (!config?.configured || !config?.clientId) {
+      alert('❌ 平台未配置 Google OAuth Client ID');
+      return null;
+    }
     const REDIRECT = `${window.location.origin}/oauth-callback.html`;
-    const CLIENT_ID = '764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com';
     const SCOPE = 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email';
-    const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=token&scope=${encodeURIComponent(SCOPE)}`;
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${config.clientId}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=token&scope=${encodeURIComponent(SCOPE)}`;
     const result = await openOAuthPopup(url);
     if (!result) return null;
     const params = new URLSearchParams(result.hash.replace(/^#/, ''));
     return params.get('access_token');
   };
+
 
   const handleSandboxTest = async (withOAuth = false) => {
     setSandboxing(true);
