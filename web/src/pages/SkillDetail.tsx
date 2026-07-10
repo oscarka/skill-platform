@@ -99,11 +99,50 @@ export default function SkillDetail() {
     } catch (e: any) { flash('error', e.message); }
   };
 
-  const handleSandboxTest = async () => {
+  // 检测 skill 是否需要 Google OAuth（含 stitch/gcloud 类 MCP 的 plugin skill）
+  const needsGoogleOAuth = (s: any) => {
+    if (s.skill_type !== 'plugin') return false;
+    const pc = s.plugin_config ? (typeof s.plugin_config === 'string' ? JSON.parse(s.plugin_config) : s.plugin_config) : {};
+    const pt = (s.prompt_template || '').toLowerCase();
+    return pt.includes('stitch') || pt.includes('gcloud') || pt.includes('google cloud') || pc.source === 'clawhub';
+  };
+
+  // Google OAuth 弹窗：使用 stitch-mcp-auto 的内置 client（无需平台配置）
+  const getGoogleToken = (): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const CLIENT_ID = '764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com';
+      const SCOPE = 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email';
+      const REDIRECT = `${window.location.origin}/oauth-google-callback.html`;
+      const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=token&scope=${encodeURIComponent(SCOPE)}`;
+      const popup = window.open(url, 'google-oauth', 'width=500,height=620');
+      const timer = setInterval(() => {
+        try {
+          if (popup?.location?.hash?.includes('access_token')) {
+            const params = new URLSearchParams(popup.location.hash.slice(1));
+            const token = params.get('access_token');
+            clearInterval(timer);
+            popup.close();
+            resolve(token);
+          }
+          if (popup?.closed) { clearInterval(timer); resolve(null); }
+        } catch { /* cross-origin, keep waiting */ }
+      }, 300);
+      setTimeout(() => { clearInterval(timer); popup?.close(); resolve(null); }, 120000);
+    });
+  };
+
+  const handleSandboxTest = async (withOAuth = false) => {
     setSandboxing(true);
     try {
-      await api.skills.sandboxTest(id!);
-      flash('success', '沙箱测试已启动，AI 正在运行 ReAct 循环…');
+      let oauthTokens: string | undefined;
+      if (withOAuth) {
+        flash('success', '请在弹窗中完成 Google 授权…');
+        const token = await getGoogleToken();
+        if (!token) { flash('error', 'Google 授权取消或失败'); return; }
+        oauthTokens = JSON.stringify({ google: { access_token: token }, stitch: { access_token: token } });
+      }
+      await api.skills.sandboxTest(id!, oauthTokens);
+      flash('success', withOAuth ? '✅ 已授权，沙箱测试已启动（Google token 已注入）' : '沙箱测试已启动，AI 正在运行 ReAct 循环…');
       load();
     } catch (e: any) { flash('error', e.message); }
     finally { setSandboxing(false); }
@@ -161,18 +200,21 @@ export default function SkillDetail() {
           <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 拒绝</button>
           <button
             className="btn btn-secondary btn-sm"
-            onClick={handleSandboxTest}
+            onClick={() => handleSandboxTest(false)}
             disabled={sandboxing || skill.sandbox_status === 'running'}
             title="在 AI 沙箱中测试这个技能的 ReAct 循环">
             {skill.sandbox_status === 'running' ? '🔄 测试运行中…' : '🐳 沙箱测试'}
           </button>
-          <button
-            className="btn btn-sm"
-            style={{ background: '#7c3aed', color: '#fff' }}
-            onClick={() => window.open(`/preview/${skill.id}`, '_blank')}
-            title="管理员预览：无需发布即可与 Skill 对话测试">
-            🔗 预览测试
-          </button>
+          {needsGoogleOAuth(skill) && (
+            <button
+              className="btn btn-sm"
+              style={{ background: '#1a73e8', color: '#fff' }}
+              onClick={() => handleSandboxTest(true)}
+              disabled={sandboxing || skill.sandbox_status === 'running'}
+              title="先完成 Google 授权，再触发沙箱测试（MCP 工具可用）">
+              🔐 授权测试
+            </button>
+          )}
           <button
             className="btn btn-sm"
             style={{ color: 'var(--danger)' }}

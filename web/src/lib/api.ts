@@ -43,8 +43,12 @@ export const api = {
       request<any>(`/skills/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) }),
     importClawhub: (url: string, type = 'external') =>
       request<any>('/skills/import-clawhub', { method: 'POST', body: JSON.stringify({ url, type }) }),
-    sandboxTest: async (id: string) => {
-      const res = await fetch(`${API_BASE}/skills/${id}/sandbox-test`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    sandboxTest: async (id: string, oauthTokens?: string) => {
+      const res = await fetch(`${API_BASE}/skills/${id}/sandbox-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(oauthTokens ? { oauthTokens } : {}),
+      });
       const data = await res.json();
       if (!res.ok && res.status !== 202) throw new Error(data.error || `HTTP ${res.status}`);
       return data;

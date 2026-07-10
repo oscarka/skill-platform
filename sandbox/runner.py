@@ -23,10 +23,26 @@ SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 e
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
+OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider: {access_token, refresh_token, ...}}
 
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
 FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
+
+# ─── 注入 OAuth tokens 到对应的 MCP 工具目录 ─────────────────────────────────
+if OAUTH_TOKENS:
+    try:
+        tokens_map = json.loads(OAUTH_TOKENS)
+        # Stitch MCP: ~/.stitch-mcp-auto/tokens.json
+        if "google" in tokens_map or "stitch" in tokens_map:
+            stitch_dir = os.path.expanduser("~/.stitch-mcp-auto")
+            os.makedirs(stitch_dir, exist_ok=True)
+            token_data = tokens_map.get("stitch") or tokens_map.get("google")
+            with open(os.path.join(stitch_dir, "tokens.json"), "w") as f:
+                json.dump(token_data, f)
+            print(f"[oauth] stitch tokens injected to {stitch_dir}/tokens.json", flush=True)
+    except Exception as e:
+        print(f"[oauth] token injection failed: {e}", flush=True)
 
 
 # ─── 模型配置表（参照 OpenClaw model-context.ts）────────────────────────────

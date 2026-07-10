@@ -43,7 +43,7 @@ export interface SandboxTestResult {
 /**
  * 对一个 Skill 跑沙箱测试，结果写入数据库
  */
-export async function runSandboxTest(skillId: string): Promise<void> {
+export async function runSandboxTest(skillId: string, oauthTokens?: string): Promise<void> {
   const t0 = Date.now();
 
   // 标记为 running
@@ -81,7 +81,7 @@ export async function runSandboxTest(skillId: string): Promise<void> {
     if (needsSandbox) {
       if (USE_CLOUD_RUN) {
         // ── Cloud Run Job 沙箱执行路径 ──────────────────────────────────────
-        result = await runCloudRunJobTest(skill, parsed, t0);
+        result = await runCloudRunJobTest(skill, parsed, t0, oauthTokens);
       } else {
         // ── 本地 Docker 路径（开发用）──────────────────────────────────────
         result = await runDockerReActLoop(skill, parsed, t0);
@@ -769,7 +769,8 @@ async function appendProgress(skillId: string, event: object) {
 async function runCloudRunJobTest(
   skill: any,
   parsed: ParsedSkill,
-  t0: number
+  t0: number,
+  oauthTokens?: string
 ): Promise<SandboxTestResult> {
   const skillId = skill.id as string;
   const content = skill.prompt_template || skill.code || '';
@@ -854,6 +855,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     callbackUrl,
     sandboxSecret,
     mcpConfigs:       mcpConfigsJson,
+    oauthTokens:      oauthTokens || '',
   });
 
   await appendProgress(skillId, {

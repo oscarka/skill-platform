@@ -3,7 +3,6 @@ import Layout from './components/Layout';
 import SkillList from './pages/SkillList';
 import SkillNew from './pages/SkillNew';
 import SkillDetail from './pages/SkillDetail';
-import SkillPreview from './pages/SkillPreview';
 import Settings from './pages/Settings';
 import TicketList from './pages/TicketList';
 import TicketCreate from './pages/TicketCreate';
@@ -16,9 +15,6 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* 独立全屏页面（不带侧边栏） */}
-        <Route path="/preview/:id" element={<SkillPreview />} />
-        {/* 主应用（带 Layout） */}
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/skills" replace />} />
           <Route path="skills" element={<SkillList />} />

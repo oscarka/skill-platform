@@ -560,6 +560,7 @@ skillRouter.delete('/:id', async (req, res) => {
 
 // ─── POST /api/skills/:id/sandbox-test ───────────────────────────────────────
 // 触发沙箱测试（异步，立即返回 202）
+// body 可选：{ oauthTokens: JSON.stringify({google: {access_token, refresh_token, ...}}) }
 skillRouter.post('/:id/sandbox-test', async (req, res) => {
   try {
     const skill = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
@@ -574,9 +575,12 @@ skillRouter.post('/:id/sandbox-test', async (req, res) => {
       return res.status(400).json({ error: 'Skill has no content to test' });
     }
 
+    // 可选：管理员授权后传入 OAuth tokens，注入沙箱供 MCP 工具使用
+    const oauthTokens: string | undefined = req.body?.oauthTokens || undefined;
+
     res.status(202).json({ message: 'Sandbox test started', skillId: skill.id });
 
-    runSandboxTest(skill.id).catch(err => {
+    runSandboxTest(skill.id, oauthTokens).catch(err => {
       console.error('[SandboxRoute] Unhandled error:', err.message);
     });
 
