@@ -299,7 +299,8 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
         else:
             tools_this_turn = TOOLS
 
-        progress(f"turn_{turn+1}", f"calling AI (ctx≈{estimate_chars(messages)//1000}k chars)")
+        ctx_k = estimate_chars(messages) // 1000
+        progress(f"turn_{turn+1}", f"AI 思考中（上下文约 {ctx_k}k 字符）")
         resp = call_ai(messages, tools=tools_this_turn)
         choice = resp["choices"][0]
         msg = choice["message"]
@@ -311,16 +312,17 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
         if not tool_calls:
             if not content_text.strip():
                 # 空响应（既无 content 也无 tool_calls）→ 当作正常完成
-                progress("done", "AI returned empty response (treating as finished)")
-                return "Task completed."
-            progress("done", "AI finished")
+                progress("完成", "AI 返回空响应，视为测试结束")
+                return "测试完成。"
+            progress("完成", "AI 已给出测试结论")
             return content_text
 
         # 有 tool_call → 执行工具
         for tc in msg["tool_calls"]:
             name = tc["function"]["name"]
             args = json.loads(tc["function"]["arguments"])
-            progress(f"tool:{name}", args.get("command", args.get("path", ""))[:80])
+            tool_label = {"exec": "执行命令", "read_file": "读取文件", "write_file": "写入文件", "http_get": "HTTP请求"}.get(name, name)
+            progress(f"工具:{tool_label}", args.get("command", args.get("path", args.get("url", "")))[:80])
             result_str = dispatch_tool(name, args)
             # 截断过大的工具输出（防止上下文超限）
             if len(result_str) > 2000:
@@ -330,7 +332,7 @@ def react_loop(system_prompt: str, user_msg: str) -> str:
                 "tool_call_id": tc["id"],
                 "content": result_str,
             })
-    return "max turns reached"
+    return "已达最大轮次上限"
 
 # ─── 结果写回 Supabase ────────────────────────────────────────────────────────
 def save_result(result: dict):
@@ -356,10 +358,10 @@ def save_result(result: dict):
 # ─── 主入口 ───────────────────────────────────────────────────────────────────
 def main():
     start = time.time()
-    progress("start", f"skill_id={SKILL_ID}")
+    progress("启动", f"开始测试 skill_id={SKILL_ID}")
 
     if not SKILL_MD:
-        progress("error", "SKILL_MD is empty")
+        progress("错误", "SKILL.md 内容为空，无法测试")
         sys.exit(1)
 
     system_prompt = textwrap.dedent(f"""
@@ -394,17 +396,25 @@ def main():
         - 用 openai 库模拟真实用户调用，AI_API_KEY 和 AI_BASE_URL 环境变量已设置
         - 把 SKILL.md 的正文作为 system_prompt，把测试输入中的每个测试用例作为 user_message
         - 用 Python 脚本调用 API，评估返回内容的质量
+        ⚠️ 重要：AI_BASE_URL 已包含完整路径（如 https://ark.xx.com/api/v3），
+           openai 库直接用，不要手动拼接 /v1/！curl 请用 AI_CHAT_URL 环境变量。
         - 示例：
             import openai, os
-            client = openai.OpenAI(api_key=os.environ["AI_API_KEY"], base_url=os.environ.get("AI_BASE_URL"))
+            client = openai.OpenAI(api_key=os.environ["AI_API_KEY"], base_url=os.environ["AI_BASE_URL"])
             resp = client.chat.completions.create(
                 model=os.environ.get("AI_MODEL","doubao-seed-1-6-250615"),
                 messages=[
                     {{"role":"system","content":"<SKILL.md 正文>"}},
                     {{"role":"user","content":"<测试用例>"}}
-                ]
+                ],
+                timeout=30
             )
             print(resp.choices[0].message.content)
+        - curl 示例（用预置的 AI_CHAT_URL，不要自己拼路径）：
+            curl -s -X POST "$AI_CHAT_URL" \\
+              -H "Authorization: Bearer $AI_API_KEY" \\
+              -H "Content-Type: application/json" \\
+              -d '{{"model":"'"$AI_MODEL"'","messages":[{{"role":"user","content":"test"}}]}}'
 
         结果格式（最后一轮直接输出此 JSON）：
         {{"passed": true/false, "score": 0-100, "output": "测试结果摘要", "notes": "详细说明"}}
@@ -448,7 +458,7 @@ def main():
             "duration_ms": duration_ms,
             "tested_at": datetime.now(timezone.utc).isoformat(),
         }
-        progress("error", str(e))
+        progress("错误", f"测试异常：{str(e)[:100]}")
 
     print(f"[RESULT] {json.dumps(result, ensure_ascii=False)}", flush=True)
     save_result(result)

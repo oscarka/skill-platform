@@ -26,6 +26,17 @@ export default function SkillList() {
 
   const handleSearch = (e: React.FormEvent) => { e.preventDefault(); load(); };
 
+  const handleDelete = async (e: React.MouseEvent, skillId: string, skillName: string) => {
+    e.stopPropagation(); // 不触发卡片点击跳转
+    if (!confirm(`确定要删除 Skill「${skillName}」吗？此操作不可恢复。`)) return;
+    try {
+      await api.skills.delete(skillId);
+      setSkills(prev => prev.filter(s => s.id !== skillId));
+    } catch {
+      alert('删除失败，请重试');
+    }
+  };
+
   const typeIcon = (t: string) => t === 'internal' ? '🔵' : '🟢';
   const skillTypeIcon = (st: string) => st === 'prompt' ? '📝' : '💻';
 
@@ -92,6 +103,17 @@ export default function SkillList() {
                     {skill.preferred_model.split('-')[0]}
                   </span>
                 )}
+                <button
+                  onClick={e => handleDelete(e, skill.id, skill.name)}
+                  title="删除 Skill"
+                  style={{
+                    marginLeft: 'auto', background: 'none', border: 'none',
+                    cursor: 'pointer', color: 'var(--gray-400)', fontSize: '1rem',
+                    padding: '2px 6px', borderRadius: 4, lineHeight: 1,
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'var(--danger)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--gray-400)')}
+                >🗑️</button>
               </div>
               {skill.ai_review && (
                 <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--gray-100)', display: 'flex', alignItems: 'center', gap: 8 }}>
