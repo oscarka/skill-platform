@@ -209,11 +209,10 @@ class TranscriptManager:
     def upload_to_gcs(self, bucket: str) -> dict:
         """
         上传双份 transcript + spill 文件到 GCS。
+        使用 google-cloud-storage Python 库（Cloud Run 容器已通过 Workload Identity 获取凭证）。
         返回 {full_path, display_path, spill_paths}
         """
-        import subprocess
-
-        prefix = f"gs://{bucket}/transcripts/{self.skill_id}/{int(time.time())}"
+        prefix = f"transcripts/{self.skill_id}/{int(time.time())}"
         paths = {}
 
         # 写入本地 JSONL 文件
@@ -222,31 +221,53 @@ class TranscriptManager:
         with open(self.display_path, "w") as f:
             f.write(json.dumps(self._display_entries, ensure_ascii=False))
 
-        # 上传
-        for name, local in [("transcript_full.jsonl", self.full_path), ("transcript.json", self.display_path)]:
-            gcs_path = f"{prefix}/{name}"
+        def _upload_file(local_path: str, blob_name: str) -> str:
+            """上传单个文件到 GCS，优先用 google-cloud-storage 库，回退到 gsutil"""
+            gcs_uri = f"gs://{bucket}/{blob_name}"
+            # 方法1：google-cloud-storage 库（Workload Identity 自动认证）
             try:
-                subprocess.run(
-                    ["gcloud", "storage", "cp", local, gcs_path],
+                from google.cloud import storage as gcs_lib
+                client = gcs_lib.Client()
+                bkt = client.bucket(bucket)
+                blob = bkt.blob(blob_name)
+                blob.upload_from_filename(local_path)
+                print(f"[transcript] GCS uploaded (lib): {gcs_uri}", flush=True)
+                return gcs_uri
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"[transcript] GCS lib upload failed: {e}", flush=True)
+            # 方法2：gsutil 命令行
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["gsutil", "cp", local_path, gcs_uri],
                     capture_output=True, timeout=30
                 )
-                paths[name] = gcs_path
+                if result.returncode == 0:
+                    print(f"[transcript] GCS uploaded (gsutil): {gcs_uri}", flush=True)
+                    return gcs_uri
+                else:
+                    print(f"[transcript] gsutil failed: {result.stderr.decode()[:200]}", flush=True)
             except Exception as e:
-                print(f"[transcript] GCS upload failed for {name}: {e}", flush=True)
+                print(f"[transcript] gsutil error: {e}", flush=True)
+            return ""
+
+        # 上传主文件
+        for name, local in [("transcript_full.jsonl", self.full_path), ("transcript.json", self.display_path)]:
+            result = _upload_file(local, f"{prefix}/{name}")
+            if result:
+                paths[name] = result
+            else:
+                print(f"[transcript] GCS upload skipped for {name}", flush=True)
 
         # 上传 spill 文件
         spill_paths = []
         for f in os.listdir(self.spill_dir):
             local = os.path.join(self.spill_dir, f)
-            gcs_path = f"{prefix}/spill/{f}"
-            try:
-                subprocess.run(
-                    ["gcloud", "storage", "cp", local, gcs_path],
-                    capture_output=True, timeout=30
-                )
-                spill_paths.append(gcs_path)
-            except Exception:
-                pass
+            result = _upload_file(local, f"{prefix}/spill/{f}")
+            if result:
+                spill_paths.append(result)
         paths["spill"] = spill_paths
 
         return paths
