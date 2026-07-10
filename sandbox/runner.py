@@ -52,10 +52,14 @@ def _build_token_obj(raw: dict) -> dict:
         obj["refresh_token"] = raw["refresh_token"]
     return obj
 
+# 明确打印 token 注入状态（不管有没有都打印，方便排查）
+print(f"[oauth] OAUTH_TOKENS env present: {bool(OAUTH_TOKENS)}, len={len(OAUTH_TOKENS)}", flush=True)
 if OAUTH_TOKENS:
     try:
         tokens_map = json.loads(OAUTH_TOKENS)
+        print(f"[oauth] token keys: {list(tokens_map.keys())}", flush=True)
         home = os.path.expanduser("~")
+        injected = False
 
         # 按 mcp_name 或 provider 匹配写入
         for key, rel_path in MCP_TOKEN_PATHS.items():
@@ -65,13 +69,28 @@ if OAUTH_TOKENS:
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 with open(full_path, "w") as f:
                     json.dump(token_obj, f, indent=2)
-                print(f"[oauth] {key} token injected → {full_path}", flush=True)
-                print(f"[oauth]   access_token={token_obj['access_token'][:20]}... "
-                      f"scope={token_obj['scope'][:40]}... "
-                      f"expiry={token_obj['expiry_date']}", flush=True)
-                break  # 避免重复写
+                print(f"[oauth] ✅ {key} token injected → {full_path}", flush=True)
+                print(f"[oauth]   token_type={token_obj.get('token_type')} "
+                      f"scope={token_obj.get('scope','')[:50]}... "
+                      f"expiry={token_obj.get('expiry_date')}", flush=True)
+                injected = True
+                break  # 同一个 token 不重复写
+
+        # 如果 tokens_map 里有 provider key 但没有匹配到 MCP_TOKEN_PATHS，
+        # 说明是新 provider，也写一份通用的（以 provider 命名）
+        if not injected:
+            for provider, tdata in tokens_map.items():
+                token_obj = _build_token_obj(tdata)
+                generic_dir = os.path.join(home, f".mcp-oauth/{provider}")
+                os.makedirs(generic_dir, exist_ok=True)
+                generic_path = os.path.join(generic_dir, "tokens.json")
+                with open(generic_path, "w") as f:
+                    json.dump(token_obj, f, indent=2)
+                print(f"[oauth] ✅ {provider} token → {generic_path} (generic fallback)", flush=True)
     except Exception as e:
-        print(f"[oauth] token injection failed: {e}", flush=True)
+        print(f"[oauth] ❌ token injection failed: {e}", flush=True)
+else:
+    print(f"[oauth] ⚠️  no OAUTH_TOKENS provided, MCP tools requiring auth may fail", flush=True)
 
 
 
@@ -221,23 +240,40 @@ def exec_pre_review(command: str) -> str | None:
     return None
 
 # ─── 工具：bash exec ──────────────────────────────────────────────────────────
+# MCP / npx 命令需要更长超时（首次 npx 要下载 npm 包，可能 60-120s）
+_MCP_CMD_PATTERNS = ['mcporter call', 'mcporter ', 'npx ', 'npx -y ']
+_MCP_TIMEOUT = 180  # 3 分钟，足够首次 npx 下载
+
+def _effective_timeout(command: str, requested: int) -> int:
+    """智能调整超时：MCP/npx 命令至少给 _MCP_TIMEOUT 秒"""
+    cmd_lower = command.strip().lower()
+    for pat in _MCP_CMD_PATTERNS:
+        if pat in cmd_lower:
+            return max(requested, _MCP_TIMEOUT)
+    return requested
+
 def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -> dict:
     # OpenClaw exec-auto-reviewer 拦截
     review = exec_pre_review(command)
     if review:
         print(f"[exec-blocked] {command[:80]}", flush=True)
         return {"stdout": review, "stderr": "", "exit_code": 0, "_blocked": True}
-    print(f"[exec] $ {command[:120]}", flush=True)
+    # 智能超时：MCP 命令自动加长
+    effective = _effective_timeout(command, timeout)
+    if effective != timeout:
+        print(f"[exec] $ {command[:120]}  (timeout: {timeout}→{effective}s, MCP auto-extend)", flush=True)
+    else:
+        print(f"[exec] $ {command[:120]}", flush=True)
     try:
         result = subprocess.run(
             command, shell=True, cwd=workdir,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=effective,
         )
         out = result.stdout[-3000:] if len(result.stdout) > 3000 else result.stdout
         err = result.stderr[-1000:] if len(result.stderr) > 1000 else result.stderr
         return {"stdout": out, "stderr": err, "exit_code": result.returncode}
     except subprocess.TimeoutExpired:
-        return {"stdout": "", "stderr": f"timeout after {timeout}s", "exit_code": -1}
+        return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
     except Exception as e:
         return {"stdout": "", "stderr": str(e), "exit_code": -2}
 
