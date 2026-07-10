@@ -213,7 +213,7 @@ def auto_configure_mcp():
             print(f"[MCP] 已配置: {name} (command={cmd} args={args_list})", flush=True)
 
         if mcp_servers:
-            config_dir = os.path.join(HOME, "config")
+            config_dir = os.path.join(os.path.expanduser("~"), "config")
             os.makedirs(config_dir, exist_ok=True)
             config_path = os.path.join(config_dir, "mcporter.json")
             with open(config_path, "w") as f:
