@@ -427,7 +427,7 @@ export default function SkillDetail() {
                 )}
 
                 {/* 人工批准操作 */}
-                <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--gray-200)', display: 'flex', gap: 10, alignItems: 'center' }}>
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--gray-200)', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: '.85rem', color: 'var(--gray-600)' }}>人工确认：</span>
                   <button className="btn btn-success btn-sm" onClick={handlePublish} disabled={!skill.h5_config && skill.type === 'external'}
                     title={!skill.h5_config && skill.type === 'external' ? '外部 Skill 需先配置 H5 表单' : ''}>
@@ -435,12 +435,31 @@ export default function SkillDetail() {
                   </button>
                   <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 打回</button>
                   <button className="btn btn-ghost btn-sm" onClick={handleSandboxTest} style={{ marginLeft: 'auto' }}>🔄 重新测试</button>
+                  {/* Bundle 安装按钮 */}
+                  <button
+                    className="btn btn-sm"
+                    style={{ background: skill.bundle_status === 'ready' ? 'var(--success)' : 'var(--primary)', color: '#fff' }}
+                    onClick={async () => {
+                      try { await api.skills.install(id!); flash('success', '安装已触发，正在打包依赖...'); load(); } catch (e: any) { flash('error', e.message); }
+                    }}
+                    disabled={skill.bundle_status === 'building'}
+                    title={skill.bundle_status === 'ready' ? `已安装 v${skill.bundle_version}` : '安装到系统（打包依赖到 GCS）'}>
+                    {skill.bundle_status === 'building' ? '⏳ 安装中...' : skill.bundle_status === 'ready' ? `📦 已安装 v${skill.bundle_version}` : '📦 安装到系统'}
+                  </button>
                   {/* 上传 scripts zip（脚本类技能用）*/}
                   <label className="btn btn-ghost btn-sm" title="上传 skill zip 包提供 scripts/ 目录" style={{ cursor: 'pointer' }}>
                     {uploadingScripts ? '上传中…' : '📦 上传 scripts.zip'}
                     <input type="file" accept=".zip,.tar.gz" style={{ display: 'none' }} onChange={handleUploadScripts} disabled={uploadingScripts} />
                   </label>
                 </div>
+                {/* Bundle 安装状态信息 */}
+                {skill.bundle_status && skill.bundle_status !== 'none' && (
+                  <div style={{ marginTop: 8, fontSize: '.8rem', color: 'var(--gray-500)' }}>
+                    📦 Bundle: {skill.bundle_status === 'ready' ? `v${skill.bundle_version} 已就绪` : skill.bundle_status === 'building' ? '正在构建...' : skill.bundle_status === 'failed' ? '❌ 构建失败' : skill.bundle_status}
+                    {skill.installed_at && ` · 安装于 ${new Date(skill.installed_at).toLocaleString('zh-CN')}`}
+                    {skill.bundle_path && <span style={{ marginLeft: 8, color: 'var(--gray-400)' }}>{skill.bundle_path}</span>}
+                  </div>
+                )}
               </div>
             )}
 

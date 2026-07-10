@@ -49,6 +49,8 @@ export const api = {
       if (!res.ok && res.status !== 202) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     },
+    install: (id: string) =>
+      request<any>(`/skills/${id}/install`, { method: 'POST' }),
     uploadScripts: async (id: string, file: File): Promise<any> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();

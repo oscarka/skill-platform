@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db';
 import { runAI } from '../aiRunner';
 import { runSandboxTest } from '../sandboxService';
+import { getBundleStatus, buildBundle, markBundleReady, markBundleFailed, getBucketName } from '../bundleService';
 import https from 'https';
 import http from 'http';
 
@@ -32,6 +33,11 @@ export interface SkillRecord {
   published_at?: number;
   sandbox_status?: 'none' | 'running' | 'done' | 'failed';
   sandbox_test?: string;
+  content?: string;
+  bundle_version?: number;
+  bundle_path?: string;
+  bundle_status?: 'none' | 'building' | 'ready' | 'failed';
+  installed_at?: number;
 }
 
 // ─── ClaWHub API client ────────────────────────────────────────────────────────
@@ -89,6 +95,10 @@ function sanitize(skill: SkillRecord, full = false) {
     published_at: skill.published_at,
     sandbox_status: skill.sandbox_status || 'none',
     sandbox_test: skill.sandbox_test || null,
+    bundle_status: skill.bundle_status || 'none',
+    bundle_version: skill.bundle_version || 0,
+    bundle_path: skill.bundle_path || null,
+    installed_at: skill.installed_at || null,
   };
   if (full) {
     return {
@@ -569,6 +579,33 @@ skillRouter.post('/:id/sandbox-test', async (req, res) => {
       console.error('[SandboxRoute] Unhandled error:', err.message);
     });
 
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ─── POST /api/skills/:id/install ─────────────────────────────────────────────
+// 审核通过后安装 Skill Bundle → 打包依赖上传 GCS
+skillRouter.post('/:id/install', async (req, res) => {
+  try {
+    const skill = await db.getAsync<any>('SELECT id, name, status, content, bundle_status, bundle_version FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+    if (skill.bundle_status === 'building') return res.status(409).json({ error: '正在安装中，请稍候' });
+
+    await buildBundle(skill.id);
+    res.json({ message: '安装已触发', skillId: skill.id });
+
+    // 异步执行沙箱安装
+    runSandboxTest(skill.id).then(async (result: any) => {
+      if (result?.passed) {
+        const bundlePath = `gs://${getBucketName()}/${skill.id}/v${(skill.bundle_version || 0) + 1}.tar.gz`;
+        await markBundleReady(skill.id, bundlePath);
+        console.log(`[Bundle] Skill "${skill.name}" installed: ${bundlePath}`);
+      } else {
+        await markBundleFailed(skill.id);
+      }
+    }).catch(async () => {
+      await markBundleFailed(skill.id);
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
