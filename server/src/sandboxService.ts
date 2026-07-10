@@ -46,6 +46,24 @@ export interface SandboxTestResult {
 export async function runSandboxTest(skillId: string, oauthTokens?: string): Promise<void> {
   const t0 = Date.now();
 
+  // 如果没有显式传入 token，从 DB 自动取存储的 MCP OAuth token
+  if (!oauthTokens) {
+    try {
+      const storedTokens = await db.allAsync<any>(
+        `SELECT provider, mcp_name, access_token FROM mcp_oauth_tokens WHERE expires_at = 0 OR expires_at > $1`,
+        [Date.now()]
+      );
+      if (storedTokens.length > 0) {
+        const tokenMap: Record<string, any> = {};
+        for (const t of storedTokens) {
+          tokenMap[t.provider] = { access_token: t.access_token };
+          if (t.mcp_name) tokenMap[t.mcp_name] = { access_token: t.access_token };
+        }
+        oauthTokens = JSON.stringify(tokenMap);
+      }
+    } catch { /* 忽略 token 加载失败，继续测试 */ }
+  }
+
   // 标记为 running
   await db.runAsync(
     `UPDATE skills SET sandbox_status='running', updated_at=? WHERE id=?`,

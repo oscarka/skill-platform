@@ -271,6 +271,21 @@ CREATE TABLE IF NOT EXISTS mcp_configs (
   created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   UNIQUE(name)
 );
+
+-- MCP OAuth 持久 token 表
+-- 每个 provider 一行，管理员授权一次后所有测试复用
+CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+  id          TEXT PRIMARY KEY,
+  provider    TEXT NOT NULL,        -- 'google' | 'tencent' | 'github' 等
+  mcp_name    TEXT,                 -- 关联的 MCP server 名称，如 'stitch-mcp-auto'
+  access_token  TEXT NOT NULL,
+  refresh_token TEXT,
+  expires_at  BIGINT,               -- Unix ms，0 = 永不过期
+  token_data  TEXT,                 -- 完整 token JSON（备用）
+  created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  updated_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  UNIQUE(provider, mcp_name)
+);
 `;
 
 export async function initDb(): Promise<void> {

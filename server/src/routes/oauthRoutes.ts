@@ -181,3 +181,48 @@ oauthRouter.get('/api/oauth/token-for-skill', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── POST /api/oauth/mcp-tokens ──────────────────────────────────────────────
+// 管理员授权后存储 MCP OAuth token（持久化，所有测试复用）
+// body: { provider, mcp_name?, access_token, refresh_token?, expires_in?, token_data? }
+oauthRouter.post('/mcp-tokens', async (req, res) => {
+  try {
+    const { provider, mcp_name, access_token, refresh_token, expires_in, token_data } = req.body;
+    if (!provider || !access_token) return res.status(400).json({ error: 'provider and access_token required' });
+
+    const expires_at = expires_in ? Date.now() + expires_in * 1000 : 0;
+    const now = Date.now();
+    const id = `${provider}-${mcp_name || 'default'}`;
+
+    await db.runAsync(
+      `INSERT INTO mcp_oauth_tokens (id, provider, mcp_name, access_token, refresh_token, expires_at, token_data, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (provider, mcp_name) DO UPDATE SET
+         access_token=$4, refresh_token=$5, expires_at=$6, token_data=$7, updated_at=$9`,
+      [id, provider, mcp_name || null, access_token, refresh_token || null, expires_at, token_data ? JSON.stringify(token_data) : null, now, now]
+    );
+    res.json({ ok: true, id });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── GET /api/oauth/mcp-tokens ───────────────────────────────────────────────
+// 列出所有已存储的 MCP OAuth token（不返回 token 明文，只返回状态）
+oauthRouter.get('/mcp-tokens', async (req, res) => {
+  try {
+    const rows = await db.allAsync<any>(
+      `SELECT id, provider, mcp_name, expires_at, updated_at,
+              CASE WHEN expires_at = 0 OR expires_at > $1 THEN 'valid' ELSE 'expired' END as status
+       FROM mcp_oauth_tokens ORDER BY updated_at DESC`,
+      [Date.now()]
+    );
+    res.json(rows);
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── DELETE /api/oauth/mcp-tokens/:id ────────────────────────────────────────
+oauthRouter.delete('/mcp-tokens/:id', async (req, res) => {
+  try {
+    await db.runAsync(`DELETE FROM mcp_oauth_tokens WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
