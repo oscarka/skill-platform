@@ -8,6 +8,7 @@ import TicketList from './pages/TicketList';
 import TicketCreate from './pages/TicketCreate';
 import TicketDetail from './pages/TicketDetail';
 import SkillTest from './pages/SkillTest';
+import McpConfigs from './pages/McpConfigs';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="tickets/new" element={<TicketCreate />} />
           <Route path="tickets/:id" element={<TicketDetail />} />
           <Route path="test" element={<SkillTest />} />
+          <Route path="mcp-configs" element={<McpConfigs />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

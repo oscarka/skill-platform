@@ -260,6 +260,17 @@ CREATE TABLE IF NOT EXISTS test_runs (
   created_by  TEXT,
   created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
 );
+
+CREATE TABLE IF NOT EXISTS mcp_configs (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  command     TEXT NOT NULL,
+  args        TEXT NOT NULL DEFAULT '',
+  env         TEXT,
+  description TEXT,
+  created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  UNIQUE(name)
+);
 `;
 
 export async function initDb(): Promise<void> {

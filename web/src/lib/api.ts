@@ -115,4 +115,13 @@ export const api = {
     runs: (skillId: string) => request<any>(`/test/runs/${skillId}`),
     getRun: (runId: string) => request<any>(`/test/run/${runId}`),
   },
+  // ─── MCP Configs ───────────────────────────────────────────────────────────
+  mcpConfigs: {
+    list: () => request<any>('/mcp-configs'),
+    create: (body: { name: string; command: string; args?: string; description?: string }) =>
+      request<any>('/mcp-configs', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: any) =>
+      request<any>(`/mcp-configs/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+    delete: (id: string) => request<any>(`/mcp-configs/${id}`, { method: 'DELETE' }),
+  },
 };

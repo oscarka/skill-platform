@@ -10,6 +10,7 @@ import { ticketRouter } from './routes/ticketRoutes';
 import { h5Router } from './routes/h5Routes';
 import { resultRouter } from './routes/resultRoutes';
 import { testRouter } from './routes/testRoutes';
+import { mcpRouter } from './routes/mcpRoutes';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3100', 10);
@@ -31,6 +32,7 @@ app.use('/api/tickets', ticketRouter);
 app.use('/api/h5', h5Router);
 app.use('/api/results', resultRouter);
 app.use('/api/test', testRouter);
+app.use('/api/mcp-configs', mcpRouter);
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
