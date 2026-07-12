@@ -31,8 +31,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     python-docx python-pptx \
     Pillow pytesseract \
     pandas numpy \
-    openai \
-    beautifulsoup4 lxml html5lib
+    openai
 
 # 创建沙箱用户
 RUN useradd --create-home --shell /bin/bash sandbox
