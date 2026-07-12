@@ -337,8 +337,7 @@ def tool_mcp_call(fn_name: str, args: dict) -> dict:
 # 参考 OpenClaw exec-auto-reviewer.prompt.ts：拦截无效命令，节省 AI 轮次
 PRE_INSTALLED_PKGS = {
     'requests', 'httpx', 'pypdf2', 'pdfplumber', 'python-docx', 'python-pptx',
-    'pillow', 'pytesseract', 'pandas', 'numpy', 'openai', 'flask', 'fastapi',
-    'beautifulsoup4', 'bs4', 'lxml', 'html5lib',  # HTML parsing
+    'pillow', 'pytesseract', 'pandas', 'numpy', 'openai', 'flask', 'fastapi'
 }
 
 def exec_pre_review(command: str) -> str | None:
@@ -861,7 +860,13 @@ def executor_react_loop(
         + "- 你有真实的工具可以直接调用（MCP native tools 名称格式：mcp__<server>__<tool>）\n"
         + "- 直接调用工具完成任务，不要只在文字里描述你打算做什么\n"
         + "- 完成后输出最终结果正文（不需要解释调用过程）\n"
-        + "- MCP 工具调用格式：直接 function calling，参数按工具 schema 填写"
+        + "- MCP 工具调用格式：直接 function calling，参数按工具 schema 填写\n"
+        + "\n"
+        + "🚫 严格禁止：\n"
+        + "- 禁止 pip install / apt install（沙箱包已固定，安装会失败且浪费轮次）\n"
+        + "- 禁止用 curl/wget 作为 MCP 工具的 fallback（MCP 工具失败就换 URL，不要 curl）\n"
+        + "- MCP 工具返回错误时，直接换另一个 URL 再试，不要绕路用命令行\n"
+        + "- 轮次有限，每轮必须推进实质进展"
     )
 
     # Executor 工具集 = MCP native tools + exec + read_file（不含 invoke_skill）
