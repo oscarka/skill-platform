@@ -882,16 +882,32 @@ def executor_react_loop(
     tm.append_system(system, label="executor")
 
     tool_calls_log = []  # 供 Evaluator 参考：AI 真正调用了哪些工具
+    collected_outputs = []  # 收集中间文字输出，用于 max_turns 兜底
 
     for turn in range(max_turns):
+        # 在最后 2 轮时，注入强制输出提示，防止 AI 一直抓取不总结
+        if turn == max_turns - 2 and tool_calls_log:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "⚠️ 你还有 2 轮机会。请**立刻停止抓取新页面**，"
+                    "根据已经获取的信息写出最终结果摘要。"
+                    "下一轮必须输出完整的文字回复，不能再调用工具。"
+                )
+            })
+
         resp = call_ai(messages, tools=executor_tools)
         msg = resp["choices"][0]["message"]
         messages.append(msg)
 
         tc_list = msg.get("tool_calls") or []
+        content = msg.get("content", "")
+        if content:
+            collected_outputs.append(content)
+
         tm.append_assistant(
             turn=turn + 1,
-            content=msg.get("content", ""),
+            content=content,
             tool_calls=[{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in tc_list],
         )
 
@@ -899,7 +915,7 @@ def executor_react_loop(
             # Executor 输出最终结果
             return {
                 "ok": True,
-                "output": msg.get("content", ""),
+                "output": content,
                 "tool_calls_log": tool_calls_log,
                 "turns": turn + 1,
             }
@@ -935,12 +951,15 @@ def executor_react_loop(
                 "content": truncate_tool_result(result_str, max_chars),
             })
 
+    # 达到最大轮次：用已收集的中间文字输出作为兜底（总比"未能给出回复"好）
+    fallback = "\n\n".join(collected_outputs) if collected_outputs else "Executor 达到最大轮次，未能给出最终回复"
     return {
-        "ok": False,
-        "output": "Executor 达到最大轮次，未能给出最终回复",
+        "ok": bool(collected_outputs),
+        "output": fallback,
         "tool_calls_log": tool_calls_log,
         "turns": max_turns,
     }
+
 
 
 # ─── Evaluator Agent（严格评测，无工具）────────────────────────────────────────
