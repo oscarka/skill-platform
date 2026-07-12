@@ -223,6 +223,104 @@ def auto_configure_mcp():
         print(f"[MCP] 解析 MCP_CONFIGS 失败: {e}", flush=True)
 
 
+# ─── MCP 工具动态发现（OpenClaw 风格：把 MCP tools 注册为 native function calling）──
+# 启动时 mcporter list --schema --json，把 MCP server 的工具注入 TOOLS 数组，
+# AI 直接用 function calling 调用，不需要记 mcporter CLI 语法
+_MCP_TOOL_REGISTRY: dict = {}  # { "server__tool": {"server": str, "tool": str, "schema": dict} }
+
+def discover_mcp_tools() -> list:
+    """运行 mcporter list --schema --json，解析工具列表，注册为 native tools。
+    返回新增的 TOOLS 条目列表。"""
+    try:
+        result = subprocess.run(
+            "mcporter list --schema --json",
+            shell=True, capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            print(f"[MCP-discover] mcporter list failed: {result.stderr[:200]}", flush=True)
+            return []
+        data = json.loads(result.stdout)
+        servers = data.get("servers", [])
+        new_tools = []
+        for srv in servers:
+            srv_name = srv.get("name", "")
+            status = srv.get("status", "")
+            if status != "ok":
+                print(f"[MCP-discover] skip {srv_name}: status={status}", flush=True)
+                continue
+            for tool in srv.get("tools", []):
+                tool_name = tool.get("name", "")
+                if not tool_name:
+                    continue
+                # 用 server__tool 作为 function name（避免冲突）
+                fn_name = f"mcp__{srv_name}__{tool_name}"
+                desc = tool.get("description", f"MCP tool {srv_name}.{tool_name}")
+                # 取 input schema（若有），否则用通用 kwargs schema
+                input_schema = tool.get("inputSchema") or {
+                    "type": "object",
+                    "properties": {
+                        "args": {
+                            "type": "string",
+                            "description": "Tool arguments in 'key=value key2=value2' format"
+                        }
+                    },
+                    "required": []
+                }
+                _MCP_TOOL_REGISTRY[fn_name] = {
+                    "server": srv_name,
+                    "tool": tool_name,
+                    "schema": input_schema,
+                }
+                new_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "description": f"[MCP: {srv_name}] {desc}",
+                        "parameters": input_schema,
+                    }
+                })
+                print(f"[MCP-discover] registered: {fn_name}", flush=True)
+        return new_tools
+    except Exception as e:
+        print(f"[MCP-discover] error: {e}", flush=True)
+        return []
+
+
+def tool_mcp_call(fn_name: str, args: dict) -> dict:
+    """执行 MCP tool call：把 AI 的 function calling args 翻译成 mcporter call 命令。"""
+    reg = _MCP_TOOL_REGISTRY.get(fn_name)
+    if not reg:
+        return {"error": f"MCP tool not registered: {fn_name}"}
+    server = reg["server"]
+    tool = reg["tool"]
+    # 把 args dict 转成 key=value 格式
+    # 字符串值如果含空格需要加引号
+    arg_parts = []
+    for k, v in args.items():
+        if isinstance(v, str):
+            # 用单引号包裹，避免 shell 展开
+            arg_parts.append(f"{k}='{v}'")
+        elif isinstance(v, (dict, list)):
+            arg_parts.append(f"{k}='{json.dumps(v)}'")
+        else:
+            arg_parts.append(f"{k}={v}")
+    args_str = " ".join(arg_parts)
+    cmd = f"mcporter call {server}.{tool} {args_str}".strip()
+    print(f"[MCP-call] {cmd[:120]}", flush=True)
+    effective = _effective_timeout(cmd, 60)
+    try:
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=effective
+        )
+        out = r.stdout[-4000:] if len(r.stdout) > 4000 else r.stdout
+        err = r.stderr[-1000:] if len(r.stderr) > 1000 else r.stderr
+        return {"stdout": out, "stderr": err, "exit_code": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "exit_code": -2}
+
+
 
 # ─── OpenClaw exec-auto-reviewer（简化版）──────────────────────────────────────
 # 参考 OpenClaw exec-auto-reviewer.prompt.ts：拦截无效命令，节省 AI 轮次
@@ -706,6 +804,9 @@ def dispatch_tool(name: str, args: dict) -> str:
             skill_system_prompt=args.get("skill_system_prompt"),
         )
         return json.dumps(r, ensure_ascii=False)
+    elif name in _MCP_TOOL_REGISTRY:
+        r = tool_mcp_call(name, args)
+        return json.dumps(r, ensure_ascii=False)
     return json.dumps({"error": f"unknown tool: {name}"})
 
 # ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
@@ -839,6 +940,12 @@ def main():
     # 自动配置已保存的 MCP 服务
     auto_configure_mcp()
 
+    # 动态发现 MCP tools，注册为 native function calling 工具
+    mcp_native_tools = discover_mcp_tools()
+    if mcp_native_tools:
+        TOOLS.extend(mcp_native_tools)
+        print(f"[MCP-discover] 共注册 {len(mcp_native_tools)} 个 MCP native tools", flush=True)
+
     if not SKILL_MD:
         progress("错误", "SKILL.md 内容为空，无法测试")
         sys.exit(1)
@@ -869,10 +976,12 @@ def main():
         - 用 exec 工具执行 Skill 的脚本
         - 把测试输入传给脚本，收集输出
 
-        🔌 MCP 工具支持（mcporter 已预装）：
-        - 如果 SKILL.md 有 `requires.bins: ["mcporter"]`，用 exec 调用
-        - 配置：exec("mcporter config add <name> --command npx --args '-y <pkg>'")
-        - 调用：exec("mcporter call <server>.<tool> key=value ...")
+        🔌 MCP 工具支持（已自动配置为 native tools）：
+        - 如果 SKILL.md 有 `requires.bins: ["mcporter"]`，MCP 工具已在启动时自动发现并注册
+        - 可用的 MCP 工具以 native function calling 形式提供，名称格式：mcp__<server>__<tool>
+        - 直接调用这些工具，无需通过 exec 运行 mcporter 命令行
+        - 例：若 fetch server 有 fetch_html 工具 → 直接调用 mcp__fetch__fetch_html(url='https://...')
+        - 返回 {stdout, stderr, exit_code}，stdout 为工具原始输出
 
         ═══════════════════════════════════════════════════════
         🏆 阶段 3：评估 & 输出结果

@@ -1,6 +1,6 @@
 ---
 name: web-researcher
-version: 1.0.0
+version: 1.1.0
 description: Research any topic by fetching and analyzing live web pages via MCP. Summarizes content, extracts key facts, and compares multiple sources.
 metadata:
   openclaw:
@@ -16,12 +16,15 @@ This skill lets you research topics by fetching live web pages and analyzing the
 ## Workflow
 
 1.  **Setup (First Time Only)**
-    -   Configure the fetch MCP server: `mcporter config add fetch --command "npx" --args "-y @anthropic-ai/mcp-server-fetch"`
+    -   Configure the fetch MCP server:
+        ```
+        mcporter config add fetch --command "npx" --args "-y mcp-fetch-server"
+        ```
 
 2.  **Research a Topic**
-    -   When the user asks to research something, use `fetch.fetch` to retrieve relevant web pages.
-    -   Analyze and summarize the content.
-    -   If comparing sources, fetch multiple URLs and present a comparison.
+    -   Use the `fetch_html` MCP tool to retrieve web pages (see exact call syntax below).
+    -   Analyze the returned content, extracting key facts and data.
+    -   If comparing sources, fetch multiple URLs and synthesize results.
 
 3.  **Output**
     -   Provide a clear, structured summary with key findings.
@@ -30,16 +33,45 @@ This skill lets you research topics by fetching live web pages and analyzing the
 
 ## Tools (via mcporter)
 
-Call these using `mcporter call fetch.<tool_name> <args>`:
+⚠️ **CRITICAL: mcporter call syntax uses `key=value`, NOT `--key value`**
 
--   **fetch**
-    -   Args: `url` (string) - The URL to fetch
-    -   Returns: Page content as text/markdown
-    -   *Use this to retrieve web page content.*
+```
+# ✅ CORRECT
+mcporter call fetch.fetch_html url=https://example.com
+
+# ❌ WRONG - do NOT use --key flags
+mcporter call fetch.fetch_html --url https://example.com
+```
+
+### fetch_html
+Fetches the HTML content of a web page.
+
+- **Args**: `url=<string>` — the URL to fetch
+- **Returns**: Raw HTML of the page
+
+**Example:**
+```
+mcporter call fetch.fetch_html url=https://en.wikipedia.org/wiki/Solar_energy
+```
+
+### Handling the HTML response
+The tool returns raw HTML. You MUST parse it to extract useful content:
+- Look for text within `<p>`, `<h1>`–`<h6>`, `<li>` tags
+- Ignore `<script>`, `<style>`, `<nav>`, `<footer>` sections
+- Or pipe through python to strip tags:
+  ```
+  mcporter call fetch.fetch_html url=https://example.com | python3 -c "
+  import sys, re
+  html = sys.stdin.read()
+  text = re.sub(r'<[^>]+>', ' ', html)
+  text = re.sub(r'\s+', ' ', text).strip()
+  print(text[:3000])
+  "
+  ```
 
 ## Tips
 
--   Start with well-known sources (Wikipedia, official docs) for factual queries.
--   For news topics, fetch multiple sources to cross-reference.
--   The fetched content is converted to readable text automatically.
--   If a URL returns an error, try an alternative source.
+-   Start with Wikipedia or official sites for factual queries.
+-   For news, fetch multiple sources to cross-reference.
+-   If a URL returns HTTP 403/404, try an alternative source immediately.
+-   Wikipedia URLs work well: `https://en.wikipedia.org/wiki/<Topic>`
