@@ -98,6 +98,33 @@ class TranscriptManager:
         self._append_raw(full_entry, display_entry)
         return entry_id
 
+    def append_system(self, content: str, label: str = "") -> str:
+        """
+        记录 system prompt 到 transcript（完整版存 full，截断版存 display）。
+        让 transcript 能还原每次 AI 调用的完整上下文。
+        label 用于区分是哪个 Agent 的 system prompt（如 executor/evaluator）。
+        """
+        entry_id = _gen_id()
+        entry = {
+            "type": "message",
+            "id": entry_id,
+            "role": "system",
+            "label": label or "orchestrator",
+            "content": content,
+            "ts": _now_iso(),
+        }
+        # 完整版：保留完整 system prompt
+        full_entry = dict(entry)
+
+        # 截断版：只保留前 500 字符（system prompt 一般很长，UI 不需要完整展示）
+        display_entry = dict(entry)
+        if len(content) > 500:
+            display_entry["content"] = content[:500] + f"...[{len(content)} chars total]"
+            display_entry["is_truncated"] = True
+
+        self._append_raw(full_entry, display_entry)
+        return entry_id
+
     def append_tool_call(self, turn: int, tool_name: str, tool_input: Any,
                          tool_output: str, exit_code: int = 0,
                          tool_call_id: str = "") -> str:

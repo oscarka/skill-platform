@@ -970,8 +970,10 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     strengths: passed ? (aiEval?.strengths ?? ['沙箱 AI Agent 执行成功']) : [],
     weaknesses: passed ? (aiEval?.weaknesses ?? []) : [`Job ${finalStatus}`],
     trace: [],
-    // 保留 transcript 和 test_results（从 callback 结果中获取）
-    transcript: callbackResult?.transcript || [],
+    // transcript: 优先用本次 callback 的结果，即使是空数组也用（表示本次无数据）
+    // 只有在 callback 完全没有返回时（callbackResult 为 null），才用空数组
+    // 不使用旧缓存，避免 Job FAILED 时展示上次测试的旧 transcript
+    transcript: callbackResult?.transcript ?? [],
     test_results: aiEval?.test_results || callbackResult?.test_results || [],
     durationMs: Date.now() - t0,
     testedAt: Date.now(),

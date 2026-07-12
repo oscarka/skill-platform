@@ -809,7 +809,217 @@ def dispatch_tool(name: str, args: dict) -> str:
         return json.dumps(r, ensure_ascii=False)
     return json.dumps({"error": f"unknown tool: {name}"})
 
-# ─── ReAct Loop（最多 10 轮）────────────────────────────────────────────────
+
+# ─── Skill 类型检测 ──────────────────────────────────────────────────────────
+def detect_skill_type(skill_md: str) -> str:
+    """
+    根据 SKILL.md 内容判断 Skill 类型：
+    - 'mcp'    : requires mcporter → Executor 有 MCP native tools
+    - 'script' : 有 bash 脚本 → Executor 有 exec 工具
+    - 'prompt' : 纯提示词 → 用 invoke_skill（内层 AI 无工具，正确行为）
+    """
+    md_lower = skill_md.lower()
+    if "mcporter" in md_lower or ('"mcporter"' in skill_md) or ("'mcporter'" in skill_md):
+        return "mcp"
+    if "scripts/" in skill_md or "```bash" in skill_md or "```sh" in skill_md:
+        return "script"
+    return "prompt"
+
+
+# ─── Executor Agent（双 Agent 架构核心）────────────────────────────────────────
+# 参照 OpenClaw 设计：Executor 以 SKILL.md 为 system prompt，有真实工具，
+# 独立执行 Skill 功能，与评测 AI 完全分离。
+EXECUTOR_TOOLS = None  # 在 main() 里动态构建（含 MCP native tools）
+
+def executor_react_loop(
+    skill_md: str,
+    user_message: str,
+    mcp_tools: list,
+    tm: TranscriptManager,
+    max_turns: int = 8,
+) -> dict:
+    """
+    Executor Agent：以 SKILL.md 为 system prompt，调用真实工具执行 Skill 功能。
+    返回 {output, tool_calls_log, turns, ok}
+    """
+    system = (
+        skill_md.strip()
+        + "\n\n---\n"
+        + "⚠️ 你是一个正在执行这个 Skill 的 AI Agent。\n"
+        + "- 你有真实的工具可以直接调用（MCP native tools 名称格式：mcp__<server>__<tool>）\n"
+        + "- 直接调用工具完成任务，不要只在文字里描述你打算做什么\n"
+        + "- 完成后输出最终结果正文（不需要解释调用过程）\n"
+        + "- MCP 工具调用格式：直接 function calling，参数按工具 schema 填写"
+    )
+
+    # Executor 工具集 = MCP native tools + exec + read_file（不含 invoke_skill）
+    executor_tools = mcp_tools + [
+        t for t in TOOLS if t["function"]["name"] in ("exec", "read_file", "write_file")
+    ]
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user_message},
+    ]
+    # 记录 Executor 的 system prompt 到 transcript
+    tm.append_system(system, label="executor")
+
+    tool_calls_log = []  # 供 Evaluator 参考：AI 真正调用了哪些工具
+
+    for turn in range(max_turns):
+        resp = call_ai(messages, tools=executor_tools)
+        msg = resp["choices"][0]["message"]
+        messages.append(msg)
+
+        tc_list = msg.get("tool_calls") or []
+        tm.append_assistant(
+            turn=turn + 1,
+            content=msg.get("content", ""),
+            tool_calls=[{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in tc_list],
+        )
+
+        if not tc_list:
+            # Executor 输出最终结果
+            return {
+                "ok": True,
+                "output": msg.get("content", ""),
+                "tool_calls_log": tool_calls_log,
+                "turns": turn + 1,
+            }
+
+        for tc in tc_list:
+            t_name = tc["function"]["name"]
+            t_args = json.loads(tc["function"]["arguments"])
+            result_str = dispatch_tool(t_name, t_args)
+
+            # 记录工具调用（供 Evaluator 判断"是否真正用了工具"）
+            try:
+                result_preview = json.loads(result_str)
+                out_preview = str(result_preview.get("stdout", result_str))[:300]
+            except Exception:
+                out_preview = result_str[:300]
+            tool_calls_log.append({
+                "tool": t_name,
+                "args_preview": str(t_args)[:200],
+                "output_preview": out_preview,
+            })
+
+            tm.append_tool_call(
+                turn=turn + 1,
+                tool_name=t_name,
+                tool_input=t_args,
+                tool_output=result_str,
+                tool_call_id=tc["id"],
+            )
+            max_chars = calculate_max_chars(CONTEXT_WINDOW_TOKENS)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": truncate_tool_result(result_str, max_chars),
+            })
+
+    return {
+        "ok": False,
+        "output": "Executor 达到最大轮次，未能给出最终回复",
+        "tool_calls_log": tool_calls_log,
+        "turns": max_turns,
+    }
+
+
+# ─── Evaluator Agent（严格评测，无工具）────────────────────────────────────────
+EVALUATOR_SYSTEM_PROMPT = """
+你是一个严格的 Skill 质量评估专家。
+
+## 评估原则
+
+你会收到：SKILL.md 原文、每个测试用例的用户输入、Executor AI 的实际输出、以及 Executor 实际调用的工具记录。
+
+评估时必须参考「工具调用记录」：
+- 如果 Executor 调用了真实工具（MCP / exec）并从工具获取数据 → 可以给高分
+- 如果 Executor 没有调用任何工具，仅凭 AI 内部知识给出答案 → 最高 45 分，passed=false
+- 如果 Executor 调用了工具但工具失败（403/404 等网络问题），Skill 逻辑正确 → 60-69 分，passed=true
+
+## 评分标准（严格）
+
+| 分数 | 含义 |
+|------|------|
+| 90-100 | 完美：工具调用成功，结果来自真实数据，内容准确完整 |
+| 80-89 | 优秀：主流程成功，有小瑕疵 |
+| 70-79 | 良好：大部分工作，有一个 case 失败 |
+| 60-69 | 及格：工具调用失败但因外部原因（网络/认证），Skill 本身逻辑正确 |
+| 40-59 | 不及格：Executor 主要靠 AI 内部知识而非真实工具，即使内容看起来合理 |
+| 0-39 | 差：Skill 逻辑本身有缺陷，或完全未执行 |
+
+## 输出格式
+
+直接输出 JSON，不要用代码块包裹：
+{
+  "passed": true/false,
+  "score": 0-100,
+  "output": "一句话总结",
+  "notes": "详细评价，必须提及工具调用情况",
+  "test_results": [
+    {
+      "case": "test_case_1",
+      "input": "用户输入",
+      "response": "Executor 输出（不要截断）",
+      "evaluation": "对这条结果的评价，必须说明是否真正用了工具"
+    }
+  ]
+}
+""".strip()
+
+
+def evaluator_call(
+    skill_md: str,
+    test_cases: list,
+    executor_results: list,
+    tm: TranscriptManager,
+) -> dict:
+    """
+    Evaluator Agent：无工具，收到 Executor 结果后严格评分。
+    """
+    cases_str = "\n\n".join([
+        f"### 用例 {i+1}\n**用户输入**：{tc}\n\n"
+        f"**Executor 实际输出**：\n{res.get('output', '')[:3000]}\n\n"
+        f"**实际工具调用记录**（用于判断是否真正获取了数据）：\n"
+        f"{json.dumps(res.get('tool_calls_log', []), ensure_ascii=False)}"
+        for i, (tc, res) in enumerate(zip(test_cases, executor_results))
+    ])
+
+    user_content = (
+        f"## SKILL.md\n\n{skill_md[:3000]}\n\n"
+        f"## 各测试用例执行结果\n\n{cases_str}"
+    )
+
+    tm.append_system(EVALUATOR_SYSTEM_PROMPT, label="evaluator")
+    resp = call_ai(
+        messages=[
+            {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content},
+        ],
+        tools=None,
+    )
+    raw = resp["choices"][0]["message"].get("content", "{}")
+    # 去掉可能的 markdown 代码块
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {
+            "passed": False,
+            "score": 0,
+            "output": "Evaluator 输出无法解析为 JSON",
+            "notes": raw[:500],
+            "test_results": [],
+        }
+
+
+
 def react_loop(system_prompt: str, user_msg: str) -> dict:
     """返回 {"output": str, "tm": TranscriptManager} — 使用 OpenClaw 风格的双份 Transcript"""
     messages = [
@@ -823,6 +1033,8 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
         context_tokens=CONTEXT_WINDOW_TOKENS,
     )
     tm.append_event("start", f"开始测试 skill_id={SKILL_ID}")
+    # 记录 system prompt（完整版存 full transcript，让上下文可还原）
+    tm.append_system(system_prompt, label="orchestrator")
 
     for turn in range(12):
         # OpenClaw-style context pressure check + pruning
@@ -1036,48 +1248,120 @@ def main():
 请开始测试这个 Skill。
     """.strip()
 
+    tm: Optional[TranscriptManager] = None
+    result: dict = {
+        "skill_id": SKILL_ID,
+        "passed": False,
+        "output": "Job did not complete",
+        "duration_ms": 0,
+        "tested_at": datetime.now(timezone.utc).isoformat(),
+        "transcript": [],  # 空 transcript，前端应显示"无数据"而非旧缓存
+    }
+
+    # 检测 Skill 类型，决定走哪条路径
+    skill_type = detect_skill_type(SKILL_MD)
+    print(f"[main] detected skill_type={skill_type}", flush=True)
+    progress("分析", f"Skill 类型：{skill_type}")
+
     try:
-        loop_result = react_loop(system_prompt, user_msg)
-        output = loop_result["output"]
-        tm = loop_result.get("tm")  # TranscriptManager instance
-        duration_ms = int((time.time() - start) * 1000)
+        if skill_type in ("mcp", "script"):
+            # ── 双 Agent 路径：Executor + Evaluator ──────────────────────────
+            # 创建 TranscriptManager
+            tm = TranscriptManager(
+                work_dir="/tmp/transcript",
+                skill_id=SKILL_ID,
+                context_tokens=CONTEXT_WINDOW_TOKENS,
+            )
+            tm.append_event("start", f"双 Agent 模式，skill_type={skill_type}")
 
-        # 回调用截断版 transcript（小 body，不会超时）
-        display_transcript = tm.get_display_entries() if tm else []
+            # 解析测试用例
+            if isinstance(USER_INPUTS, dict):
+                test_cases = list(USER_INPUTS.values())
+            elif isinstance(USER_INPUTS, list):
+                test_cases = USER_INPUTS
+            else:
+                test_cases = [str(USER_INPUTS)]
 
-        result = {
-            "skill_id": SKILL_ID,
-            "passed": True,
-            "output": output,
-            "transcript": display_transcript,  # 截断版给 callback
-            "testInput": json.dumps(USER_INPUTS, ensure_ascii=False),  # 原始测试输入
-            "model": AI_MODEL,                  # 使用的模型
-            "duration_ms": duration_ms,
-            "tested_at": datetime.now(timezone.utc).isoformat(),
-        }
+            # Executor 依次执行每个测试用例
+            executor_results = []
+            for i, case in enumerate(test_cases):
+                progress(f"执行用例 {i+1}/{len(test_cases)}", str(case)[:80])
+                tm.append_event("executor_start", f"用例 {i+1}: {str(case)[:100]}")
+                e_result = executor_react_loop(
+                    skill_md=SKILL_MD,
+                    user_message=str(case),
+                    mcp_tools=mcp_native_tools,
+                    tm=tm,
+                )
+                executor_results.append(e_result)
+                tm.append_event("executor_done", f"用例 {i+1} 完成，turns={e_result['turns']}, ok={e_result['ok']}")
+                progress(f"用例 {i+1} 完成", f"ok={e_result['ok']}, turns={e_result['turns']}")
 
-        # 上传完整版 transcript 到 GCS（不受 body 大小限制）
-        if tm:
-            try:
-                gcs_paths = tm.upload_to_gcs("skill-platform-bundles-0884226164")
-                result["transcript_gcs"] = gcs_paths
-                print(f"[transcript] uploaded to GCS: {gcs_paths}", flush=True)
-            except Exception as e:
-                print(f"[transcript] GCS upload failed: {e}", flush=True)
+            # Evaluator 严格评分
+            progress("评估", "Evaluator 严格评估中...")
+            eval_result = evaluator_call(
+                skill_md=SKILL_MD,
+                test_cases=test_cases,
+                executor_results=executor_results,
+                tm=tm,
+            )
+
+            duration_ms = int((time.time() - start) * 1000)
+            output = json.dumps(eval_result, ensure_ascii=False)
+            display_transcript = tm.get_display_entries()
+
+            result = {
+                "skill_id": SKILL_ID,
+                "passed": eval_result.get("passed", False),
+                "output": output,
+                "transcript": display_transcript,
+                "testInput": json.dumps(USER_INPUTS, ensure_ascii=False),
+                "model": AI_MODEL,
+                "duration_ms": duration_ms,
+                "tested_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        else:
+            # ── 旧路径：prompt-only Skill，用 react_loop + invoke_skill ──────
+            loop_result = react_loop(system_prompt, user_msg)
+            output = loop_result["output"]
+            tm = loop_result.get("tm")
+            duration_ms = int((time.time() - start) * 1000)
+            display_transcript = tm.get_display_entries() if tm else []
+            result = {
+                "skill_id": SKILL_ID,
+                "passed": True,
+                "output": output,
+                "transcript": display_transcript,
+                "testInput": json.dumps(USER_INPUTS, ensure_ascii=False),
+                "model": AI_MODEL,
+                "duration_ms": duration_ms,
+                "tested_at": datetime.now(timezone.utc).isoformat(),
+            }
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
-        result = {
-            "skill_id": SKILL_ID,
+        result.update({
             "passed": False,
-            "output": str(e),
+            "output": f"Job FAILED: {str(e)}",
             "duration_ms": duration_ms,
-            "tested_at": datetime.now(timezone.utc).isoformat(),
-        }
+            # transcript 保留已有的（哪怕是空列表）—— 告诉前端"本次无数据"
+            "transcript": tm.get_display_entries() if tm else [],
+        })
         progress("错误", f"测试异常：{str(e)[:100]}")
 
-    print(f"[RESULT] {json.dumps(result, ensure_ascii=False)}", flush=True)
-    save_result(result)
+    finally:
+        # 无论成功还是失败，都保存结果并上传 GCS
+        # 这样 Job FAILED 时前端也能看到正确状态，不会显示旧缓存
+        print(f"[RESULT] {json.dumps(result, ensure_ascii=False)}", flush=True)
+        save_result(result)
+
+        if tm:
+            try:
+                gcs_paths = tm.upload_to_gcs("skill-platform-bundles-0884226164")
+                print(f"[transcript] uploaded to GCS: {gcs_paths}", flush=True)
+            except Exception as e:
+                print(f"[transcript] GCS upload failed: {e}", flush=True)
 
 if __name__ == "__main__":
     main()
