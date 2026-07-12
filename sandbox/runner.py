@@ -880,19 +880,23 @@ def executor_react_loop(
     system = (
         skill_md.strip()
         + "\n\n---\n"
-        + "⚠️ 你是一个正在执行这个 Skill 的 AI Agent。\n"
-        + "- 你有真实的工具可以直接调用（MCP native tools 名称格式：mcp__<server>__<tool>）\n"
-        + "- 直接调用工具完成任务，不要只在文字里描述你打算做什么\n"
-        + "- 信息收集完毕后，调用 submit_result 工具提交最终结果（不要只用文字输出）\n"
-        + "- MCP 工具调用格式：直接 function calling，参数按工具 schema 填写\n"
+        + "## 执行规则（必须遵守）\n"
+        + "\n"
+        + "你是一个正在执行上述 Skill 的 AI Agent，拥有真实工具。\n"
+        + "\n"
+        + "**工作流程：**\n"
+        + "1. 调用 MCP 工具收集信息（工具名格式：mcp__<server>__<tool>）\n"
+        + "2. 收集到足够信息后，**必须调用 submit_result 工具提交最终结论**\n"
+        + "3. 不能只输出文字就结束——纯文字输出不算完成，系统会忽略它\n"
+        + "\n"
+        + "**⚠️ 强制要求：任务完成的唯一合法方式是调用 submit_result(content=\"...\")\n"
+        + "任何情况下直接输出文字而不调用 submit_result，都视为未完成。**\n"
         + "\n"
         + "🚫 严格禁止：\n"
-        + "- 禁止 pip install / apt install（沙箱包已固定，安装会失败且浪费轮次）\n"
-        + "- 禁止用 curl/wget 作为 MCP 工具的 fallback（MCP 工具失败就换 URL，不要 curl）\n"
-        + "- MCP 工具返回错误时，直接换另一个 URL 再试，不要绕路用命令行\n"
-        + "- 轮次有限，每轮必须推进实质进展\n"
-        + "\n"
-        + "✅ 结束方式：收集到足够信息后，调用 submit_result(content=...) 提交结论。"
+        + "- 禁止 pip install / apt install\n"
+        + "- 禁止用 curl/wget 代替 MCP 工具\n"
+        + "- MCP 工具失败时直接换 URL，不要绕路用命令行\n"
+        + "- 禁止连续抓取超过 6 个页面才开始总结（够了就 submit）"
     )
 
     # Executor 工具集 = MCP native tools + exec + read_file + submit_result
@@ -954,13 +958,16 @@ def executor_react_loop(
         )
 
         if not tc_list:
-            # Executor 输出最终结果
-            return {
-                "ok": True,
-                "output": content,
-                "tool_calls_log": tool_calls_log,
-                "turns": turn + 1,
-            }
+            # AI 输出了纯文字但没调用 submit_result
+            # 收集到 collected_outputs 里，继续循环，鼓励 AI 下一轮调用 submit_result
+            if content:
+                # 在下一轮的 system prompt 里追加强提示，让 AI 意识到应该调用 submit_result
+                base_system = (
+                    base_system
+                    + "\n\n🔴 警告：你刚才只输出了文字，但没有调用 submit_result。"
+                    + "系统不会记录你的纯文字输出。"
+                    + "**下一轮必须调用 submit_result(content=...) 提交结论，否则任务失败。**"
+                )
 
         for tc in tc_list:
             t_name = tc["function"]["name"]
