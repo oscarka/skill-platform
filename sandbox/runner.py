@@ -287,26 +287,37 @@ def discover_mcp_tools() -> list:
 
 
 def tool_mcp_call(fn_name: str, args: dict) -> dict:
-    """执行 MCP tool call：把 AI 的 function calling args 翻译成 mcporter call 命令。"""
+    """
+    执行 MCP tool call。
+    支持两种 AI 传参格式：
+    1. 结构化对象（优先）：{"url": "https://..."} → mcporter call server.tool url='https://...'
+    2. 通用字符串（schema fallback）：{"args": "url=https://..."} → 直接拼接
+    """
     reg = _MCP_TOOL_REGISTRY.get(fn_name)
     if not reg:
         return {"error": f"MCP tool not registered: {fn_name}"}
     server = reg["server"]
     tool = reg["tool"]
-    # 把 args dict 转成 key=value 格式
-    # 字符串值如果含空格需要加引号
-    arg_parts = []
-    for k, v in args.items():
-        if isinstance(v, str):
-            # 用单引号包裹，避免 shell 展开
-            arg_parts.append(f"{k}='{v}'")
-        elif isinstance(v, (dict, list)):
-            arg_parts.append(f"{k}='{json.dumps(v)}'")
-        else:
-            arg_parts.append(f"{k}={v}")
-    args_str = " ".join(arg_parts)
+
+    # 情况1：AI 用了通用 schema，传了 {"args": "url=..."} 字符串格式
+    if set(args.keys()) == {"args"} and isinstance(args.get("args"), str):
+        args_str = args["args"]
+    else:
+        # 情况2：AI 用了正确的结构化参数，转成 key=value 格式
+        arg_parts = []
+        for k, v in args.items():
+            if isinstance(v, str):
+                # url 等字符串值用单引号，避免 shell 展开
+                escaped = v.replace("'", "'\"'\"'")
+                arg_parts.append(f"{k}='{escaped}'")
+            elif isinstance(v, (dict, list)):
+                arg_parts.append(f"{k}='{json.dumps(v)}'")
+            else:
+                arg_parts.append(f"{k}={v}")
+        args_str = " ".join(arg_parts)
+
     cmd = f"mcporter call {server}.{tool} {args_str}".strip()
-    print(f"[MCP-call] {cmd[:120]}", flush=True)
+    print(f"[MCP-call] {cmd[:160]}", flush=True)
     effective = _effective_timeout(cmd, 60)
     try:
         r = subprocess.run(
@@ -326,7 +337,8 @@ def tool_mcp_call(fn_name: str, args: dict) -> dict:
 # 参考 OpenClaw exec-auto-reviewer.prompt.ts：拦截无效命令，节省 AI 轮次
 PRE_INSTALLED_PKGS = {
     'requests', 'httpx', 'pypdf2', 'pdfplumber', 'python-docx', 'python-pptx',
-    'pillow', 'pytesseract', 'pandas', 'numpy', 'openai', 'flask', 'fastapi'
+    'pillow', 'pytesseract', 'pandas', 'numpy', 'openai', 'flask', 'fastapi',
+    'beautifulsoup4', 'bs4', 'lxml', 'html5lib',  # HTML parsing
 }
 
 def exec_pre_review(command: str) -> str | None:
@@ -836,7 +848,7 @@ def executor_react_loop(
     user_message: str,
     mcp_tools: list,
     tm: TranscriptManager,
-    max_turns: int = 8,
+    max_turns: int = 12,
 ) -> dict:
     """
     Executor Agent：以 SKILL.md 为 system prompt，调用真实工具执行 Skill 功能。
