@@ -842,6 +842,30 @@ def detect_skill_type(skill_md: str) -> str:
 # 独立执行 Skill 功能，与评测 AI 完全分离。
 EXECUTOR_TOOLS = None  # 在 main() 里动态构建（含 MCP native tools）
 
+# 改进 B：submit_result 工具（参照 OpenClaw update_goal(complete) 设计）
+# AI 主动调用来宣布任务完成，不再依赖"不调用工具"这个模糊信号
+SUBMIT_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_result",
+        "description": (
+            "当你认为已收集到足够信息，调用此工具提交最终结果。"
+            "调用后任务立即结束，content 将作为最终输出。"
+            "不要在调用此工具后再调用其他工具。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "最终结果的完整文字内容，必须包含实质性内容，不能是空字符串"
+                }
+            },
+            "required": ["content"]
+        }
+    }
+}
+
 def executor_react_loop(
     skill_md: str,
     user_message: str,
@@ -859,20 +883,22 @@ def executor_react_loop(
         + "⚠️ 你是一个正在执行这个 Skill 的 AI Agent。\n"
         + "- 你有真实的工具可以直接调用（MCP native tools 名称格式：mcp__<server>__<tool>）\n"
         + "- 直接调用工具完成任务，不要只在文字里描述你打算做什么\n"
-        + "- 完成后输出最终结果正文（不需要解释调用过程）\n"
+        + "- 信息收集完毕后，调用 submit_result 工具提交最终结果（不要只用文字输出）\n"
         + "- MCP 工具调用格式：直接 function calling，参数按工具 schema 填写\n"
         + "\n"
         + "🚫 严格禁止：\n"
         + "- 禁止 pip install / apt install（沙箱包已固定，安装会失败且浪费轮次）\n"
         + "- 禁止用 curl/wget 作为 MCP 工具的 fallback（MCP 工具失败就换 URL，不要 curl）\n"
         + "- MCP 工具返回错误时，直接换另一个 URL 再试，不要绕路用命令行\n"
-        + "- 轮次有限，每轮必须推进实质进展"
+        + "- 轮次有限，每轮必须推进实质进展\n"
+        + "\n"
+        + "✅ 结束方式：收集到足够信息后，调用 submit_result(content=...) 提交结论。"
     )
 
-    # Executor 工具集 = MCP native tools + exec + read_file（不含 invoke_skill）
+    # Executor 工具集 = MCP native tools + exec + read_file + submit_result
     executor_tools = mcp_tools + [
         t for t in TOOLS if t["function"]["name"] in ("exec", "read_file", "write_file")
-    ]
+    ] + [SUBMIT_RESULT_TOOL]
 
     messages = [
         {"role": "system", "content": system},
@@ -883,18 +909,34 @@ def executor_react_loop(
 
     tool_calls_log = []  # 供 Evaluator 参考：AI 真正调用了哪些工具
     collected_outputs = []  # 收集中间文字输出，用于 max_turns 兜底
+    base_system = system   # 改进 A：保存基础 system prompt，每轮追加进度信息
 
     for turn in range(max_turns):
-        # 在最后 2 轮时，注入强制输出提示，防止 AI 一直抓取不总结
-        if turn == max_turns - 2 and tool_calls_log:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "⚠️ 你还有 2 轮机会。请**立刻停止抓取新页面**，"
-                    "根据已经获取的信息写出最终结果摘要。"
-                    "下一轮必须输出完整的文字回复，不能再调用工具。"
-                )
-            })
+        # 改进 A：每轮动态更新 system prompt（参照 OpenClaw contextBudgetStatus）
+        # 替代之前"倒数第 2 轮注入假 user 消息"的 hack
+        remaining = max_turns - turn - 1
+        progress_hint = (
+            f"\n\n📍 当前进度：第 {turn + 1} 轮 / 共 {max_turns} 轮，剩余 {remaining} 轮。"
+        )
+        if remaining <= 2:
+            progress_hint += (
+                "\n⚠️ 轮次即将用尽，请根据已收集信息调用 submit_result 提交结论，不要再抓取新页面。"
+            )
+        elif remaining <= 4:
+            progress_hint += "\n💡 轮次剩余不多，请评估是否已有足够信息，适时调用 submit_result。"
+
+        # 改进 C：token 压力检测（参照 OpenClaw Context Budget 机制）
+        # 用 estimate_chars 估算当前 context 占比，>70% 时注入额外警告
+        token_pressure = estimate_chars(messages) / (CHARS_PER_TOKEN * CONTEXT_WINDOW_TOKENS)
+        if token_pressure > 0.70:
+            pressure_pct = int(token_pressure * 100)
+            progress_hint += (
+                f"\n🔴 上下文已用 {pressure_pct}%（即将溢出），"
+                "请立即调用 submit_result 提交目前收集到的结论，不要再抓取新内容。"
+            )
+            print(f"[executor] token pressure {pressure_pct}% at turn {turn+1}, injecting warning")
+
+        messages[0] = {"role": "system", "content": base_system + progress_hint}
 
         resp = call_ai(messages, tools=executor_tools)
         msg = resp["choices"][0]["message"]
@@ -923,6 +965,29 @@ def executor_react_loop(
         for tc in tc_list:
             t_name = tc["function"]["name"]
             t_args = json.loads(tc["function"]["arguments"])
+
+            # 改进 B：拦截 submit_result（参照 OpenClaw update_goal(complete)）
+            # AI 主动调用 submit_result → 立即结束，不再继续循环
+            if t_name == "submit_result":
+                final_content = t_args.get("content", "").strip()
+                if final_content:
+                    tm.append_tool_call(
+                        turn=turn + 1,
+                        tool_name=t_name,
+                        tool_input=t_args,
+                        tool_output="[task completed by AI]",
+                        tool_call_id=tc["id"],
+                    )
+                    print(f"[executor] submit_result called at turn {turn+1}, content_len={len(final_content)}")
+                    return {
+                        "ok": True,
+                        "output": final_content,
+                        "tool_calls_log": tool_calls_log,
+                        "turns": turn + 1,
+                    }
+                # content 为空：忽略 submit_result，继续执行
+                continue
+
             result_str = dispatch_tool(t_name, t_args)
 
             # 记录工具调用（供 Evaluator 判断"是否真正用了工具"）
