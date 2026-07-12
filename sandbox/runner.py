@@ -1193,7 +1193,7 @@ def main():
         - 可用的 MCP 工具以 native function calling 形式提供，名称格式：mcp__<server>__<tool>
         - 直接调用这些工具，无需通过 exec 运行 mcporter 命令行
         - 例：若 fetch server 有 fetch_html 工具 → 直接调用 mcp__fetch__fetch_html(url='https://...')
-        - 返回 {stdout, stderr, exit_code}，stdout 为工具原始输出
+        - 返回 {{stdout, stderr, exit_code}}，stdout 为工具原始输出
 
         ═══════════════════════════════════════════════════════
         🏆 阶段 3：评估 & 输出结果
