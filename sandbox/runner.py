@@ -25,6 +25,7 @@ SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
 OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, ...}}
 CASE_COUNT    = max(1, min(3, int(os.environ.get("CASE_COUNT", "1"))))  # 测试用例数（1-3）
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")                   # Tavily 搜索 API key
 
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
@@ -474,6 +475,46 @@ def tool_read(path: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+# ─── 工具：web_search（Tavily 搜索，参照 OpenClaw web_search tool）─────────────
+def tool_web_search(query: str, max_results: int = 5) -> dict:
+    """
+    调用 Tavily Search API 执行真实网络搜索。
+    返回带真实 URL 的搜索结果，AI 可进一步用 mcp__fetch__* 抓取全文。
+    参照 OpenClaw web_search 工具的定位：先搜 → 得真实 URL → 再抓内容。
+    """
+    import requests as _req
+    if not TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY not configured", "results": []}
+    try:
+        resp = _req.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "max_results": max(1, min(10, max_results)),
+                "search_depth": "basic",
+                "include_answer": False,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = [
+            {
+                "url":     r.get("url", ""),
+                "title":   r.get("title", ""),
+                "content": r.get("content", "")[:600],
+                "score":   round(r.get("score", 0), 3),
+            }
+            for r in data.get("results", [])
+        ]
+        print(f"[web_search] query={query!r} → {len(results)} results", flush=True)
+        return {"results": results}
+    except Exception as e:
+        print(f"[web_search] error: {e}", flush=True)
+        return {"error": str(e), "results": []}
+
+
 # ─── 工具：invoke_skill（子 Agent 调用）──────────────────────────────────────
 def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dict:
     """
@@ -563,6 +604,33 @@ TOOLS = [
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "使用 Tavily 搜索引擎搜索网络，返回真实 URL 和内容摘要。"
+                " 参照 OpenClaw web_search 工具：先用此工具搜索获得真实 URL，"
+                " 再用 mcp__fetch__fetch_readable 抓取全文。"
+                " 禁止直接猜测或编造文章 URL，必须先搜索。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词（英文效果更好）"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最多返回几条结果（1-10，默认5）",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
             }
         }
     },
@@ -837,6 +905,12 @@ def dispatch_tool(name: str, args: dict) -> str:
             skill_system_prompt=args.get("skill_system_prompt"),
         )
         return json.dumps(r, ensure_ascii=False)
+    elif name == "web_search":
+        r = tool_web_search(
+            query=args["query"],
+            max_results=args.get("max_results", 5),
+        )
+        return json.dumps(r, ensure_ascii=False)
     elif name in _MCP_TOOL_REGISTRY:
         r = tool_mcp_call(name, args)
         return json.dumps(r, ensure_ascii=False)
@@ -961,9 +1035,10 @@ def executor_react_loop(
         + "你是一个正在执行上述 Skill 的 AI Agent，拥有真实工具。\n"
         + "\n"
         + "**工作流程：**\n"
-        + "1. 调用 MCP 工具收集信息（工具名格式：mcp__<server>__<tool>）\n"
-        + "2. 收集到足够信息后，直接输出最终结论（文字回复）即可完成任务\n"
-        + "3. 不需要调用任何特殊工具来'提交'结果，直接写出结论就是完成\n"
+        + "1. **先用 web_search 搜索**获取真实 URL，禁止猜测或编造文章 URL\n"
+        + "2. 用 mcp__fetch__fetch_readable 抓取搜索结果里的真实 URL 获取全文\n"
+        + "3. 收集到足够信息后，直接输出最终结论（文字回复）即可完成任务\n"
+        + "4. 不需要调用任何特殊工具来'提交'结果，直接写出结论就是完成\n"
         + "\n"
         + "🚫 严格禁止：\n"
         + "- 禁止 pip install / apt install\n"
@@ -972,11 +1047,18 @@ def executor_react_loop(
         + "- 信息收集够了就直接输出结论，不要无限抓取新页面"
     )
 
-    # Executor 工具集 = MCP native tools + exec + read_file
-    # 参照 OpenClaw：不需要 submit_result，AI 直接输出文字即完成
-    executor_tools = mcp_tools + [
+    # Executor 工具集 = MCP native tools + exec + read_file + web_search(当 Tavily key 可用时)
+    # 参照 OpenClaw tool catalog: web_search 是标准工具，不限于特定 skill 类型
+    web_search_tools = [
+        t for t in TOOLS if t["function"]["name"] == "web_search"
+    ] if TAVILY_API_KEY else []
+    executor_tools = mcp_tools + web_search_tools + [
         t for t in TOOLS if t["function"]["name"] in ("exec", "read_file", "write_file")
     ]
+    if web_search_tools:
+        print(f"[executor] web_search enabled (Tavily)", flush=True)
+    else:
+        print(f"[executor] web_search disabled (no TAVILY_API_KEY)", flush=True)
 
     messages = [
         {"role": "system", "content": system},

@@ -93,6 +93,7 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     { name: 'MCP_CONFIGS',         value: opts.mcpConfigs || '[]' },
     { name: 'OAUTH_TOKENS',        value: opts.oauthTokens || '' },
     { name: 'CASE_COUNT',          value: String(Math.max(1, Math.min(3, opts.caseCount || 1))) },
+    { name: 'TAVILY_API_KEY',      value: process.env.TAVILY_API_KEY || '' },
   ];
 
   const jobParent = `projects/${GCP_PROJECT}/locations/${GCP_REGION}/jobs/${JOB_NAME}`;
