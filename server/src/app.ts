@@ -24,7 +24,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // ─── Static: H5 client pages ─────────────────────────────────────────────────
-const H5_DIR = path.resolve(__dirname, '..', '..', '..', 'h5');
+const H5_DIR = path.resolve(__dirname, '..', 'h5');
 app.use('/h5', express.static(H5_DIR));
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
