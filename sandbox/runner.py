@@ -921,10 +921,12 @@ def executor_react_loop(
     user_message: str,
     mcp_tools: list,
     tm: TranscriptManager,
-    max_turns: int = 12,
+    max_turns: int = None,  # None = 使用安全阀 HARD_TURN_LIMIT=30
 ) -> dict:
     """
     Executor Agent：以 SKILL.md 为 system prompt，调用真实工具执行 Skill 功能。
+    参照 OpenClaw：不使用固定轮次数限制，靠 end_turn + context budget 自然结束。
+    HARD_TURN_LIMIT=30 仅作安全阀，不是正常结束条件。
     返回 {output, tool_calls_log, turns, ok}
     """
     system = (
@@ -964,7 +966,7 @@ def executor_react_loop(
     base_system = system       # 每轮动态更新 system prompt
     # 参照 OpenClaw：内层循环无硬性轮次限制，靠 context budget 和 end_turn 自然结束
     # HARD_TURN_LIMIT 只是防止失控的安全阀，不是正常结束条件
-    HARD_TURN_LIMIT = max_turns if max_turns else 30
+    HARD_TURN_LIMIT = max_turns if max_turns is not None else 30
     turn = 0
 
     while turn < HARD_TURN_LIMIT:
