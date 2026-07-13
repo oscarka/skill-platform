@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS ticket_results (
   id              TEXT PRIMARY KEY,
   ticket_id       TEXT UNIQUE NOT NULL,
   raw_result      TEXT,
+  ai_log          TEXT,
   revised_result  TEXT,
   revision_notes  TEXT,
   revised_by      TEXT,
@@ -299,6 +300,7 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS sandbox_progress TEXT`,
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS scripts_path TEXT`,
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS plugin_config TEXT`,
+      `ALTER TABLE ticket_results ADD COLUMN IF NOT EXISTS ai_log TEXT`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }

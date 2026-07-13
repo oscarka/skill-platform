@@ -30,6 +30,7 @@ export default function TicketDetail() {
   const [revisionNotes, setRevisionNotes] = useState('');
   const [revisedBy, setRevisedBy] = useState('');
   const [savingRevision, setSavingRevision] = useState(false);
+  const [showLog, setShowLog] = useState(false);
   // Poll ref
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -97,7 +98,7 @@ export default function TicketDetail() {
   };
 
   const startEdit = () => {
-    setRevisedText(result?.revised_result || result?.raw_result || '');
+  setRevisedText(result?.revised_result || result?.raw_result || '');
     setRevisionNotes(result?.revision_notes || '');
     setRevisedBy(result?.revised_by || '');
     setEditingResult(true);
@@ -233,6 +234,30 @@ export default function TicketDetail() {
                   <span>修订人：{result.revised_by}</span>
                   {result.revision_notes && <span>备注：{result.revision_notes}</span>}
                   {result.revised_at && <span>{new Date(result.revised_at).toLocaleString('zh-CN')}</span>}
+                </div>
+              )}
+              {/* AI Log (collapsible, like sandbox transcript) */}
+              {result.ai_log && (
+                <div style={{ marginTop: 12 }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setShowLog(v => !v)}
+                    style={{ fontSize: '.78rem' }}
+                  >
+                    {showLog ? '▲ 收起 AI 日志' : '▼ 查看 AI 日志（发送给 AI 的内容）'}
+                  </button>
+                  {showLog && (
+                    <pre style={{
+                      marginTop: 8,
+                      background: '#0d1117', color: '#e6edf3',
+                      borderRadius: 8, padding: '14px 16px',
+                      fontSize: '.75rem', lineHeight: 1.7,
+                      overflowX: 'auto', maxHeight: 500, overflowY: 'auto',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    }}>
+                      {result.ai_log}
+                    </pre>
+                  )}
                 </div>
               )}
             </>

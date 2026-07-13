@@ -71,6 +71,21 @@ function buildPromptFromTemplate(template: string, inputs: TicketInput[]): strin
   return result;
 }
 
+// ─── Build user message for plugin-type skill (SKILL.md 无占位符，用输入构建 user message)───────────────
+// 这种情况下 SKILL.md 作为 system prompt，客户填写的表单字段作为 user message
+function buildUserMessageFromInputs(inputs: TicketInput[]): string {
+  const lines: string[] = ['以下是客户提交的信息，请根据这些信息完成任务：'];
+  for (const inp of inputs) {
+    if (inp.field_type === 'text' && inp.value) {
+      lines.push(`《${inp.field_key}》: ${inp.value}`);
+    } else if (inp.field_type === 'file' && inp.file_path) {
+      const text = readFileAsText(inp.file_path, inp.mime_type || '');
+      lines.push(`《${inp.file_name || inp.field_key}》:\n${text}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 // ─── Sandboxed code runner ────────────────────────────────────────────────────
 async function runCodeSkill(
   code: string,
@@ -136,37 +151,50 @@ export async function processTicket(ticketId: string): Promise<void> {
 
   try {
     let rawResult: string;
+    let aiLog: string = ''; // 用于记录实际发送给 AI 的内容（日志显示）
 
-    if (skill.skill_type === 'prompt' || (skill.skill_type === 'plugin' && skill.prompt_template)) {
-      // 'plugin' 类型的 skill 上传自 skills-library，prompt_template 存放 SKILL.md 全文
-      // 用 SKILL.md 作为 system prompt，客户填写的表单字段作为 user message
+    if (skill.skill_type === 'prompt') {
+      // prompt 类型：模板有 {{field}} 占位符，替换后发送
       if (!skill.prompt_template) throw new Error('Skill has no prompt template');
       const finalPrompt = buildPromptFromTemplate(skill.prompt_template, inputs);
+      aiLog = `[system]你是 Skill「${skill.name}」的 AI 助手。\n\n[user]\n${finalPrompt}`;
       const aiRes = await runAI(finalPrompt, {
         model: skill.preferred_model || undefined,
         fallback: skill.fallback_model || undefined,
         systemPrompt: `你是 Skill「${skill.name}」的 AI 助手，请认真完成任务并给出专业、完整的回答。`,
       });
       rawResult = aiRes.text;
+    } else if (skill.skill_type === 'plugin' && skill.prompt_template) {
+      // plugin 类型： SKILL.md 作为 system prompt，客户表单字段作为 user message
+      // SKILL.md 没有 {{}} 占位符，所以不能用 buildPromptFromTemplate
+      const userMessage = buildUserMessageFromInputs(inputs);
+      aiLog = `[system (SKILL.md)]\n${skill.prompt_template}\n\n[user]\n${userMessage}`;
+      const aiRes = await runAI(userMessage, {
+        model: skill.preferred_model || undefined,
+        fallback: skill.fallback_model || undefined,
+        systemPrompt: skill.prompt_template, // SKILL.md 全文作为 system prompt
+      });
+      rawResult = aiRes.text;
     } else if (skill.skill_type === 'code') {
       if (!skill.code) throw new Error('Skill has no code');
       rawResult = await runCodeSkill(skill.code, inputs, skill);
+      aiLog = `[code runner] executed`;
     } else {
       throw new Error(`Skill type '${skill.skill_type}' has no executable content`);
     }
 
-    // Save result
+    // Save result (with ai_log for transparency / log viewing)
     const resultId = uuidv4();
     const existing = await db.getAsync<any>('SELECT id FROM ticket_results WHERE ticket_id=?', [ticketId]);
     if (existing) {
       await db.runAsync(
-        `UPDATE ticket_results SET raw_result=?, updated_at=? WHERE ticket_id=?`,
-        [rawResult, Date.now(), ticketId]
+        `UPDATE ticket_results SET raw_result=?, ai_log=?, updated_at=? WHERE ticket_id=?`,
+        [rawResult, aiLog, Date.now(), ticketId]
       );
     } else {
       await db.runAsync(
-        `INSERT INTO ticket_results (id, ticket_id, raw_result, created_at, updated_at) VALUES (?,?,?,?,?)`,
-        [resultId, ticketId, rawResult, Date.now(), Date.now()]
+        `INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
+        [resultId, ticketId, rawResult, aiLog, Date.now(), Date.now()]
       );
     }
 
