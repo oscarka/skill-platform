@@ -842,29 +842,79 @@ def detect_skill_type(skill_md: str) -> str:
 # 独立执行 Skill 功能，与评测 AI 完全分离。
 EXECUTOR_TOOLS = None  # 在 main() 里动态构建（含 MCP native tools）
 
-# 改进 B：submit_result 工具（参照 OpenClaw update_goal(complete) 设计）
-# AI 主动调用来宣布任务完成，不再依赖"不调用工具"这个模糊信号
-SUBMIT_RESULT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "submit_result",
-        "description": (
-            "当你认为已收集到足够信息，调用此工具提交最终结果。"
-            "调用后任务立即结束，content 将作为最终输出。"
-            "不要在调用此工具后再调用其他工具。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "最终结果的完整文字内容，必须包含实质性内容，不能是空字符串"
-                }
-            },
-            "required": ["content"]
-        }
+# OpenClaw 移植说明：没有 submit_result 工具。
+# AI 收集完信息后自然输出文字（end_turn），即为任务完成。
+# 参照 OpenClaw attempt.ts：stopReason = "end_turn" → 直接返回结果。
+
+# ─── OpenClaw Preemptive Compaction（参照 preemptive-compaction.ts）───────────
+# 常量来自 OpenClaw 源码
+_OC_CHARS_PER_TOKEN = 4        # 普通文字
+_OC_TOOL_CHARS_PER_TOKEN = 2   # tool result 更保守（JSON 密度高）
+_OC_MSG_OVERHEAD_TOKENS = 12   # 每条消息固定开销
+_OC_SAFETY_MARGIN = 1.1        # 估算安全系数，避免低估
+_OC_MIN_PROMPT_BUDGET_RATIO = 0.5   # 保留至少 50% context 给 prompt
+
+def _oc_estimate_tokens(messages: list, system: str, context_window: int) -> dict:
+    """
+    参照 OpenClaw estimateLlmBoundaryTokenPressure。
+    估算当前 context 占用，返回 {estimated, budget, overflow, tool_reducible}。
+    """
+    total_chars = len(system)
+    tool_chars = 0
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(str(b) for b in content)
+        total_chars += len(content) + _OC_MSG_OVERHEAD_TOKENS * _OC_CHARS_PER_TOKEN
+        if m.get("role") == "tool":
+            tool_chars += len(content)
+
+    estimated = int(total_chars / _OC_CHARS_PER_TOKEN * _OC_SAFETY_MARGIN)
+    reserve = max(8000, int(context_window * (1 - _OC_MIN_PROMPT_BUDGET_RATIO)))
+    budget = context_window - reserve
+    overflow = max(0, estimated - budget)
+    # tool result 可压缩量（保守估算：tool result 平均可缩 70%）
+    tool_reducible = int(tool_chars * 0.7 / _OC_TOOL_CHARS_PER_TOKEN)
+    return {
+        "estimated": estimated,
+        "budget": budget,
+        "overflow": overflow,
+        "tool_reducible_tokens": tool_reducible,
+        "pressure_pct": int(estimated / max(1, context_window) * 100),
     }
-}
+
+def _oc_compact_route(pressure: dict) -> str:
+    """
+    参照 OpenClaw shouldPreemptivelyCompactBeforePrompt。
+    返回路由：fits / truncate / compact（暂不实现 LLM 摘要，只截短）。
+    """
+    overflow = pressure["overflow"]
+    if overflow <= 0:
+        return "fits"
+    # tool result 可缩减量 >= overflow * 1.5 → 只截短（truncate_tool_results_only）
+    if pressure["tool_reducible_tokens"] >= overflow * 1.5:
+        return "truncate"
+    return "compact"  # 暂与 truncate 同处理（不做 LLM 摘要压缩）
+
+def _oc_truncate_tool_results(messages: list, keep_recent: int = 3,
+                               max_chars: int = 2000) -> list:
+    """
+    参照 OpenClaw truncate_tool_results_only 路由。
+    截短旧 tool result，保留最近 keep_recent 条完整。
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    to_truncate = tool_indices[:-keep_recent] if len(tool_indices) > keep_recent else []
+    changed = 0
+    for idx in to_truncate:
+        content = messages[idx].get("content", "")
+        if len(content) > max_chars:
+            messages[idx] = dict(messages[idx])  # shallow copy，不改原始对象
+            messages[idx]["content"] = content[:max_chars] + "\n...[context compaction]"
+            changed += 1
+    if changed:
+        print(f"[executor] compaction: truncated {changed} old tool results")
+    return messages
+
 
 def executor_react_loop(
     skill_md: str,
@@ -886,23 +936,21 @@ def executor_react_loop(
         + "\n"
         + "**工作流程：**\n"
         + "1. 调用 MCP 工具收集信息（工具名格式：mcp__<server>__<tool>）\n"
-        + "2. 收集到足够信息后，**必须调用 submit_result 工具提交最终结论**\n"
-        + "3. 不能只输出文字就结束——纯文字输出不算完成，系统会忽略它\n"
-        + "\n"
-        + "**⚠️ 强制要求：任务完成的唯一合法方式是调用 submit_result(content=\"...\")\n"
-        + "任何情况下直接输出文字而不调用 submit_result，都视为未完成。**\n"
+        + "2. 收集到足够信息后，直接输出最终结论（文字回复）即可完成任务\n"
+        + "3. 不需要调用任何特殊工具来'提交'结果，直接写出结论就是完成\n"
         + "\n"
         + "🚫 严格禁止：\n"
         + "- 禁止 pip install / apt install\n"
         + "- 禁止用 curl/wget 代替 MCP 工具\n"
         + "- MCP 工具失败时直接换 URL，不要绕路用命令行\n"
-        + "- 禁止连续抓取超过 6 个页面才开始总结（够了就 submit）"
+        + "- 信息收集够了就直接输出结论，不要无限抓取新页面"
     )
 
-    # Executor 工具集 = MCP native tools + exec + read_file + submit_result
+    # Executor 工具集 = MCP native tools + exec + read_file
+    # 参照 OpenClaw：不需要 submit_result，AI 直接输出文字即完成
     executor_tools = mcp_tools + [
         t for t in TOOLS if t["function"]["name"] in ("exec", "read_file", "write_file")
-    ] + [SUBMIT_RESULT_TOOL]
+    ]
 
     messages = [
         {"role": "system", "content": system},
@@ -911,35 +959,29 @@ def executor_react_loop(
     # 记录 Executor 的 system prompt 到 transcript
     tm.append_system(system, label="executor")
 
-    tool_calls_log = []  # 供 Evaluator 参考：AI 真正调用了哪些工具
-    collected_outputs = []  # 收集中间文字输出，用于 max_turns 兜底
-    base_system = system   # 改进 A：保存基础 system prompt，每轮追加进度信息
+    tool_calls_log = []        # 供 Evaluator 参考：AI 真正调用了哪些工具
+    collected_outputs = []     # 兜底用
+    base_system = system       # 每轮动态更新 system prompt
+    # 参照 OpenClaw：内层循环无硬性轮次限制，靠 context budget 和 end_turn 自然结束
+    # HARD_TURN_LIMIT 只是防止失控的安全阀，不是正常结束条件
+    HARD_TURN_LIMIT = max_turns if max_turns else 30
+    turn = 0
 
-    for turn in range(max_turns):
-        # 改进 A：每轮动态更新 system prompt（参照 OpenClaw contextBudgetStatus）
-        # 替代之前"倒数第 2 轮注入假 user 消息"的 hack
-        remaining = max_turns - turn - 1
-        progress_hint = (
-            f"\n\n📍 当前进度：第 {turn + 1} 轮 / 共 {max_turns} 轮，剩余 {remaining} 轮。"
-        )
-        if remaining <= 2:
-            progress_hint += (
-                "\n⚠️ 轮次即将用尽，请根据已收集信息调用 submit_result 提交结论，不要再抓取新页面。"
-            )
-        elif remaining <= 4:
-            progress_hint += "\n💡 轮次剩余不多，请评估是否已有足够信息，适时调用 submit_result。"
+    while turn < HARD_TURN_LIMIT:
+        turn += 1
 
-        # 改进 C：token 压力检测（参照 OpenClaw Context Budget 机制）
-        # 用 estimate_chars 估算当前 context 占比，>70% 时注入额外警告
-        token_pressure = estimate_chars(messages) / (CHARS_PER_TOKEN * CONTEXT_WINDOW_TOKENS)
-        if token_pressure > 0.70:
-            pressure_pct = int(token_pressure * 100)
-            progress_hint += (
-                f"\n🔴 上下文已用 {pressure_pct}%（即将溢出），"
-                "请立即调用 submit_result 提交目前收集到的结论，不要再抓取新内容。"
-            )
-            print(f"[executor] token pressure {pressure_pct}% at turn {turn+1}, injecting warning")
+        # ── Step 1: Preemptive Compaction（参照 OpenClaw preemptive-compaction.ts）
+        pressure = _oc_estimate_tokens(messages, base_system, CONTEXT_WINDOW_TOKENS)
+        route = _oc_compact_route(pressure)
+        if route in ("truncate", "compact"):
+            print(f"[executor] compaction route={route} pressure={pressure['pressure_pct']}% at turn {turn}")
+            messages = _oc_truncate_tool_results(messages)
 
+        # ── Step 2: 每轮更新 system prompt（含 context budget 状态，参照 OpenClaw contextBudgetStatus）
+        # 中立展示状态，不用威胁性语言
+        progress_hint = f"\n\n📍 第 {turn} 轮 | Context 已用约 {pressure['pressure_pct']}%"
+        if pressure["pressure_pct"] >= 70:
+            progress_hint += " | ⚠️ Context 较满，信息够了请直接输出结论"
         messages[0] = {"role": "system", "content": base_system + progress_hint}
 
         resp = call_ai(messages, tools=executor_tools)
@@ -947,7 +989,7 @@ def executor_react_loop(
         messages.append(msg)
 
         tc_list = msg.get("tool_calls") or []
-        content = msg.get("content", "")
+        content = (msg.get("content") or "").strip()
         if content:
             collected_outputs.append(content)
 
@@ -958,42 +1000,42 @@ def executor_react_loop(
         )
 
         if not tc_list:
-            # AI 输出了纯文字但没调用 submit_result
-            # 收集到 collected_outputs 里，继续循环，鼓励 AI 下一轮调用 submit_result
-            if content:
-                # 在下一轮的 system prompt 里追加强提示，让 AI 意识到应该调用 submit_result
-                base_system = (
-                    base_system
-                    + "\n\n🔴 警告：你刚才只输出了文字，但没有调用 submit_result。"
-                    + "系统不会记录你的纯文字输出。"
-                    + "**下一轮必须调用 submit_result(content=...) 提交结论，否则任务失败。**"
-                )
+            # 参照 OpenClaw incomplete-turn.ts：
+            # stopReason = "end_turn" / "stop" → 正常完成，直接返回
+            # stopReason = "length" → 被截断，注入 recovery 提示继续
+            finish_reason = resp["choices"][0].get("finish_reason", "stop")
+            if finish_reason == "length":
+                # 被 max_tokens 截断：让 AI 继续写完（OpenClaw REASONING_ONLY_RETRY_INSTRUCTION）
+                print(f"[executor] finish_reason=length at turn {turn+1}, injecting recovery")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "你的上一条回复被截断了（达到 token 上限）。"
+                        "请从截断处继续，完成完整回复，不要从头重写。"
+                    )
+                })
+                continue
+            elif not content:
+                # 空响应：注入 recovery 提示（OpenClaw EMPTY_RESPONSE_RETRY_INSTRUCTION）
+                print(f"[executor] empty response at turn {turn+1}, injecting recovery")
+                messages.append({
+                    "role": "user",
+                    "content": "你没有输出任何内容。请继续完成任务，不要重新开始。"
+                })
+                continue
+            else:
+                # 有内容、无工具调用 = end_turn = 正常完成（OpenClaw 标准路径）
+                print(f"[executor] end_turn at turn {turn+1}, content_len={len(content)}")
+                return {
+                    "ok": True,
+                    "output": content,
+                    "tool_calls_log": tool_calls_log,
+                    "turns": turn + 1,
+                }
 
         for tc in tc_list:
             t_name = tc["function"]["name"]
             t_args = json.loads(tc["function"]["arguments"])
-
-            # 改进 B：拦截 submit_result（参照 OpenClaw update_goal(complete)）
-            # AI 主动调用 submit_result → 立即结束，不再继续循环
-            if t_name == "submit_result":
-                final_content = t_args.get("content", "").strip()
-                if final_content:
-                    tm.append_tool_call(
-                        turn=turn + 1,
-                        tool_name=t_name,
-                        tool_input=t_args,
-                        tool_output="[task completed by AI]",
-                        tool_call_id=tc["id"],
-                    )
-                    print(f"[executor] submit_result called at turn {turn+1}, content_len={len(final_content)}")
-                    return {
-                        "ok": True,
-                        "output": final_content,
-                        "tool_calls_log": tool_calls_log,
-                        "turns": turn + 1,
-                    }
-                # content 为空：忽略 submit_result，继续执行
-                continue
 
             result_str = dispatch_tool(t_name, t_args)
 
@@ -1022,6 +1064,7 @@ def executor_react_loop(
                 "tool_call_id": tc["id"],
                 "content": truncate_tool_result(result_str, max_chars),
             })
+
 
     # 达到最大轮次：用已收集的中间文字输出作为兜底（总比"未能给出回复"好）
     fallback = "\n\n".join(collected_outputs) if collected_outputs else "Executor 达到最大轮次，未能给出最终回复"
