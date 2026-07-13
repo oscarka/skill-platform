@@ -1438,12 +1438,24 @@ def main():
         ⚠️ 如果失败是「需要认证」「外部服务不可用」等环境问题，给 60-69 分并 passed=true。
     """).strip()
 
-    user_msg = f"""
-## SKILL.md 内容
+
+    # 按 CASE_COUNT 截取测试用例（prompt 路径和 mcp 路径共用）
+    if isinstance(USER_INPUTS, dict):
+        _all_kv = list(USER_INPUTS.items())[:CASE_COUNT]
+        _limited_inputs = dict(_all_kv)
+    elif isinstance(USER_INPUTS, list):
+        _limited_inputs = USER_INPUTS[:CASE_COUNT]
+    else:
+        _limited_inputs = USER_INPUTS
+    _orig_len = len(USER_INPUTS) if isinstance(USER_INPUTS, (dict, list)) else 1
+    _lim_len  = len(_limited_inputs) if isinstance(_limited_inputs, (dict, list)) else 1
+    print(f"[main] CASE_COUNT={CASE_COUNT}, cases: {_orig_len} → {_lim_len}", flush=True)
+
+    user_msg = f"""## SKILL.md 内容
 {SKILL_MD}
 
 ## 测试输入
-{json.dumps(USER_INPUTS, ensure_ascii=False, indent=2)}
+{json.dumps(_limited_inputs, ensure_ascii=False, indent=2)}
 
 请开始测试这个 Skill。
     """.strip()
