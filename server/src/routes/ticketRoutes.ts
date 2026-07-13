@@ -193,3 +193,60 @@ ticketRouter.get('/:id/status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── POST /api/tickets/:id/agent-callback — Cloud Run Job result for plugin skills ──
+// runner.py calls this when Agent finishes (same format as sandbox-callback in skillRoutes)
+ticketRouter.post('/:id/agent-callback', async (req, res) => {
+  try {
+    const EXPECTED_SECRET = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+    const secret = req.headers['x-sandbox-secret'];
+    if (secret !== EXPECTED_SECRET) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const ticketId = req.params.id;
+    const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    const body = req.body as any;
+    // runner.py sends: { passed, output, transcript, duration_ms, test_results, ... }
+    const passed = body?.passed ?? false;
+    let rawResult: string = body?.output || '';
+    if (!rawResult && Array.isArray(body?.test_results) && body.test_results.length > 0) {
+      rawResult = body.test_results[0]?.output || body.test_results[0]?.result || '';
+    }
+    if (!rawResult) rawResult = passed ? '(Agent completed, no output)' : '(Agent failed)';
+
+    // Store transcript as ai_log for display
+    const aiLog = body?.transcript
+      ? JSON.stringify(body.transcript, null, 2)
+      : '';
+
+    const now = Date.now();
+    const existing = await db.getAsync<any>('SELECT id FROM ticket_results WHERE ticket_id=?', [ticketId]);
+    if (existing) {
+      await db.runAsync(
+        `UPDATE ticket_results SET raw_result=?, ai_log=?, updated_at=? WHERE ticket_id=?`,
+        [rawResult, aiLog, now, ticketId]
+      );
+    } else {
+      const { v4: uuidv4 } = require('uuid');
+      await db.runAsync(
+        `INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
+        [uuidv4(), ticketId, rawResult, aiLog, now, now]
+      );
+    }
+
+    const newStatus = passed ? 'done' : 'error';
+    await db.runAsync(
+      `UPDATE tickets SET status=?, ai_completed_at=?, updated_at=? WHERE id=?`,
+      [newStatus, now, now, ticketId]
+    );
+
+    console.log(`[TicketAgent] Callback for ticket ${ticketId}: passed=${passed}, preview=${rawResult.slice(0, 80)}`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('[TicketAgent] Callback error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});

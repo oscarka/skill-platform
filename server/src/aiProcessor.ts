@@ -3,6 +3,7 @@ import path from 'path';
 import * as db from './db';
 import { runAI } from './aiRunner';
 import { v4 as uuidv4 } from 'uuid';
+import { submitSandboxJob } from './cloudRunJobsClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface TicketInput {
@@ -154,7 +155,7 @@ export async function processTicket(ticketId: string): Promise<void> {
     let aiLog: string = ''; // 用于记录实际发送给 AI 的内容（日志显示）
 
     if (skill.skill_type === 'prompt') {
-      // prompt 类型：模板有 {{field}} 占位符，替换后发送
+      // prompt 类型：模板有 {{field}} 占位符，替换后直接调 LLM
       if (!skill.prompt_template) throw new Error('Skill has no prompt template');
       const finalPrompt = buildPromptFromTemplate(skill.prompt_template, inputs);
       aiLog = `[system]你是 Skill「${skill.name}」的 AI 助手。\n\n[user]\n${finalPrompt}`;
@@ -164,17 +165,15 @@ export async function processTicket(ticketId: string): Promise<void> {
         systemPrompt: `你是 Skill「${skill.name}」的 AI 助手，请认真完成任务并给出专业、完整的回答。`,
       });
       rawResult = aiRes.text;
+
     } else if (skill.skill_type === 'plugin' && skill.prompt_template) {
-      // plugin 类型： SKILL.md 作为 system prompt，客户表单字段作为 user message
-      // SKILL.md 没有 {{}} 占位符，所以不能用 buildPromptFromTemplate
-      const userMessage = buildUserMessageFromInputs(inputs);
-      aiLog = `[system (SKILL.md)]\n${skill.prompt_template}\n\n[user]\n${userMessage}`;
-      const aiRes = await runAI(userMessage, {
-        model: skill.preferred_model || undefined,
-        fallback: skill.fallback_model || undefined,
-        systemPrompt: skill.prompt_template, // SKILL.md 全文作为 system prompt
-      });
-      rawResult = aiRes.text;
+      // plugin 类型：走 Agent Runner（Cloud Run Job，和沙箱测试完全一样）
+      // 客户填写的表单数据作为唯一 test case，SKILL.md 作为 Agent 指令
+      await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs);
+      // Agent 异步运行，callback 会写回结果并更新工单状态
+      // 此处早返回，ticket 状态保持 'processing'
+      return;
+
     } else if (skill.skill_type === 'code') {
       if (!skill.code) throw new Error('Skill has no code');
       rawResult = await runCodeSkill(skill.code, inputs, skill);
@@ -219,4 +218,93 @@ export async function processTicket(ticketId: string): Promise<void> {
     }
     throw err;
   }
+}
+
+// ─── Helper: DB settings ───────────────────────────────────────────────────────
+async function getSetting(key: string): Promise<string> {
+  const row = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', [key]);
+  return row?.value || '';
+}
+
+// ─── Submit plugin-type ticket to Cloud Run Job (Agent Runner) ─────────────────
+// Mirrors runSandboxTest() in sandboxService.ts but uses ticket-specific callback URL
+async function submitTicketAgentJob(
+  ticketId: string,
+  skillId: string,
+  skill: Skill,
+  inputs: TicketInput[]
+): Promise<void> {
+  // Load AI keys from settings (same as sandboxService)
+  const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
+    getSetting('ai_model'),
+    getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+    getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+    getSetting('doubao_api_key').then(k => k
+      ? getSetting('deepseek_api_key')
+      : getSetting('doubao_api_key')),
+    getSetting('doubao_base_url').then(u => u
+      ? getSetting('deepseek_base_url')
+      : getSetting('doubao_base_url')),
+  ]);
+
+  // Load MCP configs
+  let mcpConfigsJson = '[]';
+  try {
+    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
+    if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+  } catch { /* ignore */ }
+
+  // Load OAuth tokens
+  let oauthTokens = '';
+  try {
+    const storedTokens = await db.allAsync<any>(
+      `SELECT provider, mcp_name, access_token, token_data, expires_at
+       FROM mcp_oauth_tokens WHERE expires_at = 0 OR expires_at > ?`, [Date.now()]
+    );
+    if (storedTokens.length > 0) {
+      const tokenMap: Record<string, any> = {};
+      for (const t of storedTokens) {
+        let tokenObj: Record<string, any> = { access_token: t.access_token };
+        if (t.token_data) {
+          try { tokenObj = { ...JSON.parse(t.token_data), access_token: t.access_token }; } catch {}
+        }
+        if (!tokenObj.expiry_date && t.expires_at) tokenObj.expiry_date = parseInt(t.expires_at);
+        tokenMap[t.provider] = tokenObj;
+        if (t.mcp_name) tokenMap[t.mcp_name] = tokenObj;
+      }
+      oauthTokens = JSON.stringify(tokenMap);
+    }
+  } catch { /* ignore */ }
+
+  // Build customer data as single test case
+  const userMessage = buildUserMessageFromInputs(inputs);
+  const testInputs = { ticket: userMessage };  // CASE_COUNT=1, one case
+
+  // Ticket-specific callback URL
+  const serviceUrl = process.env.SERVICE_URL || '';
+  const callbackUrl = serviceUrl
+    ? `${serviceUrl}/api/tickets/${ticketId}/agent-callback`
+    : '';
+  const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+
+  // Base64-encode SKILL.md for runner.py
+  const skillMdB64 = Buffer.from(skill.prompt_template || '').toString('base64');
+
+  const { executionId } = await submitSandboxJob({
+    skillId,
+    skillMd:          skillMdB64,
+    userInputs:       testInputs,
+    model:            model || 'doubao-1-5-pro-32k-250115',
+    aiKey,
+    aiBaseUrl:        aiBase,
+    fallbackAiKey:    fallbackKey,
+    fallbackAiBase:   fallbackBase,
+    callbackUrl,
+    sandboxSecret,
+    mcpConfigs:       mcpConfigsJson,
+    oauthTokens,
+    caseCount:        1,
+  });
+
+  console.log(`[TicketAgent] Cloud Run Job submitted for ticket ${ticketId}: ${executionId}`);
 }
