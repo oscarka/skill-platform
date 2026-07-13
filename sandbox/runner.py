@@ -2,7 +2,7 @@
 sandbox/runner.py  — AI Agent sandbox runner
 参考 OpenClaw bash-tools 设计，AI 读 SKILL.md 然后用 exec 工具执行任务
 """
-import os, sys, json, subprocess, time, textwrap, base64, re, shlex
+import os, sys, json, subprocess, time, textwrap, base64, re, shlex, signal
 from datetime import datetime, timezone
 
 # OpenClaw 风格模块
@@ -23,11 +23,33 @@ SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 e
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
-OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, token_type, scope, expiry_date, ...}}
+OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, ...}}
+CASE_COUNT    = max(1, min(3, int(os.environ.get("CASE_COUNT", "1"))))  # 测试用例数（1-3）
 
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
 FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
+
+# ─── SIGTERM 优雅退出（参照 OpenClaw AbortController 机制）────────────────────────
+# Cloud Run 在硬杀前 10 秒发送 SIGTERM，我们捕获它实现优雅退出
+_shutdown_requested: bool = False
+_JOB_START_TIME: float = time.time()  # Job 启动时间
+_JOB_TIMEOUT_SECONDS: int = 590       # 600s 硬限 - 10s 安全钙
+
+def _sigterm_handler(sig, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    print("[runner] SIGTERM received, requesting graceful shutdown", flush=True)
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+
+def _job_elapsed() -> float:
+    """Job 已运行秒数。"""
+    return time.time() - _JOB_START_TIME
+
+def _job_remaining() -> float:
+    """剩余秒数，<=0 表示已超时。"""
+    return _JOB_TIMEOUT_SECONDS - _job_elapsed()
 
 # ─── 注入 OAuth tokens 到对应的 MCP 工具目录 ─────────────────────────────────
 # 支持任意 MCP server，通过 mcp_name 匹配写入路径
@@ -921,12 +943,14 @@ def executor_react_loop(
     user_message: str,
     mcp_tools: list,
     tm: TranscriptManager,
-    max_turns: int = None,  # None = 使用安全阀 HARD_TURN_LIMIT=30
+    max_turns: int = None,   # None = 使用安全阀 HARD_TURN_LIMIT=30
+    deadline: float = None,  # Unix timestamp 截止时间（参照 OpenClaw abortSignal）
 ) -> dict:
     """
     Executor Agent：以 SKILL.md 为 system prompt，调用真实工具执行 Skill 功能。
     参照 OpenClaw：不使用固定轮次数限制，靠 end_turn + context budget 自然结束。
-    HARD_TURN_LIMIT=30 仅作安全阀，不是正常结束条件。
+    - HARD_TURN_LIMIT=30 仅作安全阀，不是正常结束条件
+    - deadline: 到期时优雅返回已收集内容，不硬断（参照 OpenClaw AbortController）
     返回 {output, tool_calls_log, turns, ok}
     """
     system = (
@@ -964,6 +988,7 @@ def executor_react_loop(
     tool_calls_log = []        # 供 Evaluator 参考：AI 真正调用了哪些工具
     collected_outputs = []     # 兜底用
     base_system = system       # 每轮动态更新 system prompt
+    case_start = time.time()   # 用于时间感知
     # 参照 OpenClaw：内层循环无硬性轮次限制，靠 context budget 和 end_turn 自然结束
     # HARD_TURN_LIMIT 只是防止失控的安全阀，不是正常结束条件
     HARD_TURN_LIMIT = max_turns if max_turns is not None else 30
@@ -972,6 +997,22 @@ def executor_react_loop(
     while turn < HARD_TURN_LIMIT:
         turn += 1
 
+        # ── 检查 SIGTERM / Job 超时（参照 OpenClaw AbortController）
+        # 优先检查：如果收到关闭信号或 deadline 已过，优雅返回已收集内容
+        remaining_job = _job_remaining()
+        remaining_case = (deadline - time.time()) if deadline else float("inf")
+        if _shutdown_requested or remaining_job <= 5 or remaining_case <= 5:
+            reason = "SIGTERM" if _shutdown_requested else f"timeout({remaining_job:.0f}s left)"
+            print(f"[executor] graceful exit at turn {turn}, reason={reason}", flush=True)
+            fallback = "\n\n".join(collected_outputs) if collected_outputs else ""
+            return {
+                "ok": bool(collected_outputs),
+                "output": fallback or f"[{reason}: incomplete]",
+                "tool_calls_log": tool_calls_log,
+                "turns": turn,
+                "graceful_exit": True,
+            }
+
         # ── Step 1: Preemptive Compaction（参照 OpenClaw preemptive-compaction.ts）
         pressure = _oc_estimate_tokens(messages, base_system, CONTEXT_WINDOW_TOKENS)
         route = _oc_compact_route(pressure)
@@ -979,11 +1020,17 @@ def executor_react_loop(
             print(f"[executor] compaction route={route} pressure={pressure['pressure_pct']}% at turn {turn}")
             messages = _oc_truncate_tool_results(messages)
 
-        # ── Step 2: 每轮更新 system prompt（含 context budget 状态，参照 OpenClaw contextBudgetStatus）
-        # 中立展示状态，不用威胁性语言
-        progress_hint = f"\n\n📍 第 {turn} 轮 | Context 已用约 {pressure['pressure_pct']}%"
+        # ── Step 2: 每轮更新 system prompt（含 context + 时间状态，参照 OpenClaw contextBudgetStatus）
+        elapsed_case = time.time() - case_start
+        time_hint = f" | 已用 {elapsed_case:.0f}s"
+        if deadline:
+            left = deadline - time.time()
+            time_hint += f" / 剩余约 {max(0, left):.0f}s"
+            if left < 40:
+                time_hint += " ⚠️ 时间不多，请整合已有信息直接输出结论"
+        progress_hint = f"\n\n📍 第 {turn} 轮 | Context 已用约 {pressure['pressure_pct']}%{time_hint}"
         if pressure["pressure_pct"] >= 70:
-            progress_hint += " | ⚠️ Context 较满，信息够了请直接输出结论"
+            progress_hint += " | Context 较满，信息够了请直接输出结论"
         messages[0] = {"role": "system", "content": base_system + progress_hint}
 
         resp = call_ai(messages, tools=executor_tools)
@@ -1427,24 +1474,41 @@ def main():
             )
             tm.append_event("start", f"双 Agent 模式，skill_type={skill_type}")
 
-            # 解析测试用例
+            # 解析测试用例，按 CASE_COUNT 截取（前端可配置1-3，默认1）
             if isinstance(USER_INPUTS, dict):
                 test_cases = list(USER_INPUTS.values())
             elif isinstance(USER_INPUTS, list):
                 test_cases = USER_INPUTS
             else:
                 test_cases = [str(USER_INPUTS)]
+            test_cases = test_cases[:CASE_COUNT]
+            n_cases = len(test_cases)
+
+            # 计算每个用例的时间预算（参照 OpenClaw per-run timeout 机制）
+            # 留出 60s 给 Evaluator + 启动开销
+            EVALUATOR_BUDGET = 60
+            per_case_budget = (_JOB_TIMEOUT_SECONDS - EVALUATOR_BUDGET - _job_elapsed()) / max(1, n_cases)
+            per_case_budget = max(60, per_case_budget)  # 最少 60s
+            print(f"[main] test_cases={n_cases}, per_case_budget={per_case_budget:.0f}s", flush=True)
 
             # Executor 依次执行每个测试用例
             executor_results = []
             for i, case in enumerate(test_cases):
-                progress(f"执行用例 {i+1}/{len(test_cases)}", str(case)[:80])
+                # 每用例前检查 SIGTERM 或总时间不足
+                if _shutdown_requested or _job_remaining() <= EVALUATOR_BUDGET:
+                    print(f"[main] skipping case {i+1}/{n_cases}: shutdown or timeout", flush=True)
+                    progress(f"跳过用例 {i+1}", "Job 即将结束，跳过剩余用例")
+                    break
+
+                case_deadline = time.time() + per_case_budget
+                progress(f"执行用例 {i+1}/{n_cases}", str(case)[:80])
                 tm.append_event("executor_start", f"用例 {i+1}: {str(case)[:100]}")
                 e_result = executor_react_loop(
                     skill_md=SKILL_MD,
                     user_message=str(case),
                     mcp_tools=mcp_native_tools,
                     tm=tm,
+                    deadline=case_deadline,
                 )
                 executor_results.append(e_result)
                 tm.append_event("executor_done", f"用例 {i+1} 完成，turns={e_result['turns']}, ok={e_result['ok']}")

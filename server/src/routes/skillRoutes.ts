@@ -577,10 +577,12 @@ skillRouter.post('/:id/sandbox-test', async (req, res) => {
 
     // 可选：管理员授权后传入 OAuth tokens，注入沙箱供 MCP 工具使用
     const oauthTokens: string | undefined = req.body?.oauthTokens || undefined;
+    // 可选：测试用例数量（1-3，默认1）
+    const caseCount: number = Math.max(1, Math.min(3, parseInt(req.body?.count || '1', 10) || 1));
 
     res.status(202).json({ message: 'Sandbox test started', skillId: skill.id });
 
-    runSandboxTest(skill.id, oauthTokens).catch(err => {
+    runSandboxTest(skill.id, oauthTokens, caseCount).catch(err => {
       console.error('[SandboxRoute] Unhandled error:', err.message);
     });
 

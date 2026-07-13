@@ -43,7 +43,7 @@ export interface SandboxTestResult {
 /**
  * 对一个 Skill 跑沙箱测试，结果写入数据库
  */
-export async function runSandboxTest(skillId: string, oauthTokens?: string): Promise<void> {
+export async function runSandboxTest(skillId: string, oauthTokens?: string, caseCount: number = 1): Promise<void> {
   const t0 = Date.now();
 
   // 如果没有显式传入 token，从 DB 自动取存储的 MCP OAuth token
@@ -108,7 +108,7 @@ export async function runSandboxTest(skillId: string, oauthTokens?: string): Pro
     if (needsSandbox) {
       if (USE_CLOUD_RUN) {
         // ── Cloud Run Job 沙箱执行路径 ──────────────────────────────────────
-        result = await runCloudRunJobTest(skill, parsed, t0, oauthTokens);
+      result = await runCloudRunJobTest(skill, parsed, t0, oauthTokens, caseCount);
       } else {
         // ── 本地 Docker 路径（开发用）──────────────────────────────────────
         result = await runDockerReActLoop(skill, parsed, t0);
@@ -797,7 +797,8 @@ async function runCloudRunJobTest(
   skill: any,
   parsed: ParsedSkill,
   t0: number,
-  oauthTokens?: string
+  oauthTokens?: string,
+  caseCount: number = 1
 ): Promise<SandboxTestResult> {
   const skillId = skill.id as string;
   const content = skill.prompt_template || skill.code || '';
@@ -883,6 +884,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     sandboxSecret,
     mcpConfigs:       mcpConfigsJson,
     oauthTokens:      oauthTokens || '',
+    caseCount:        caseCount,
   });
 
   await appendProgress(skillId, {

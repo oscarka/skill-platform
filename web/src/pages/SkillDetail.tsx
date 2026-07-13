@@ -18,6 +18,7 @@ export default function SkillDetail() {
   const [h5Config, setH5Config] = useState<any>(null);
   const [h5Editing, setH5Editing] = useState(false);
   const [sandboxing, setSandboxing] = useState(false);
+  const [caseCount, setCaseCount] = useState(1);  // 测试用例数（1-3）
   const [sandboxProgress, setSandboxProgress] = useState<{step:string;detail:string;ts:string;elapsed_s?:number}[]>([]);
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showTrace, setShowTrace] = useState(false);
@@ -184,8 +185,8 @@ export default function SkillDetail() {
   const handleSandboxTest = async (withOAuth = false) => {
     setSandboxing(true);
     try {
-      await api.skills.sandboxTest(id!);
-      flash('success', '沙箱测试已启动，AI 正在运行 ReAct 循环…');
+      await api.skills.sandboxTest(id!, undefined, caseCount);
+      flash('success', `沙箱测试已启动（${caseCount} 个用例），AI 正在运行中…`);
       load();
     } catch (e: any) { flash('error', e.message); }
     finally { setSandboxing(false); }
@@ -241,6 +242,16 @@ export default function SkillDetail() {
             </button>
           )}
           <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 拒绝</button>
+          <select
+            value={caseCount}
+            onChange={e => setCaseCount(Number(e.target.value))}
+            disabled={sandboxing || skill.sandbox_status === 'running'}
+            title="测试用例数量（默认1，最多3）"
+            style={{ fontSize: '12px', padding: '2px 6px', borderRadius: '4px', border: '1px solid #ccc', marginRight: '2px' }}>
+            <option value={1}>1 用例</option>
+            <option value={2}>2 用例</option>
+            <option value={3}>3 用例</option>
+          </select>
           <button
             className="btn btn-secondary btn-sm"
             onClick={() => handleSandboxTest(false)}
