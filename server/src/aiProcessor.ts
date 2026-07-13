@@ -18,7 +18,7 @@ interface TicketInput {
 interface Skill {
   id: string;
   name: string;
-  skill_type: 'prompt' | 'code';
+  skill_type: 'prompt' | 'code' | 'plugin';
   prompt_template?: string;
   code?: string;
   preferred_model?: string;
