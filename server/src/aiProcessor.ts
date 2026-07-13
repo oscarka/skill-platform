@@ -137,7 +137,9 @@ export async function processTicket(ticketId: string): Promise<void> {
   try {
     let rawResult: string;
 
-    if (skill.skill_type === 'prompt') {
+    if (skill.skill_type === 'prompt' || (skill.skill_type === 'plugin' && skill.prompt_template)) {
+      // 'plugin' 类型的 skill 上传自 skills-library，prompt_template 存放 SKILL.md 全文
+      // 用 SKILL.md 作为 system prompt，客户填写的表单字段作为 user message
       if (!skill.prompt_template) throw new Error('Skill has no prompt template');
       const finalPrompt = buildPromptFromTemplate(skill.prompt_template, inputs);
       const aiRes = await runAI(finalPrompt, {
@@ -146,9 +148,11 @@ export async function processTicket(ticketId: string): Promise<void> {
         systemPrompt: `你是 Skill「${skill.name}」的 AI 助手，请认真完成任务并给出专业、完整的回答。`,
       });
       rawResult = aiRes.text;
-    } else {
+    } else if (skill.skill_type === 'code') {
       if (!skill.code) throw new Error('Skill has no code');
       rawResult = await runCodeSkill(skill.code, inputs, skill);
+    } else {
+      throw new Error(`Skill type '${skill.skill_type}' has no executable content`);
     }
 
     // Save result
