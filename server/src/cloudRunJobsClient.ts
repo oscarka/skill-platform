@@ -29,6 +29,7 @@ export interface JobSubmitOptions {
   mcpConfigs?:      string;    // JSON array of saved MCP configs to auto-inject
   oauthTokens?:     string;    // JSON: {google: {access_token, refresh_token}, stitch: {...}}
   caseCount?:       number;    // 测试用例数（1-3，默认1）
+  ticketMode?:      boolean;   // 工单模式：跳过 Evaluator，返回 Executor 实际输出
 }
 
 export interface JobExecution {
@@ -94,6 +95,7 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     { name: 'OAUTH_TOKENS',        value: opts.oauthTokens || '' },
     { name: 'CASE_COUNT',          value: String(Math.max(1, Math.min(3, opts.caseCount || 1))) },
     { name: 'TAVILY_API_KEY',      value: process.env.TAVILY_API_KEY || '' },
+    { name: 'TICKET_MODE',         value: opts.ticketMode ? '1' : '0' },
   ];
 
   const jobParent = `projects/${GCP_PROJECT}/locations/${GCP_REGION}/jobs/${JOB_NAME}`;

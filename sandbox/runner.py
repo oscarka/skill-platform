@@ -26,6 +26,7 @@ MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, c
 OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, ...}}
 CASE_COUNT    = max(1, min(3, int(os.environ.get("CASE_COUNT", "1"))))  # 测试用例数（1-3）
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")                   # Tavily 搜索 API key
+TICKET_MODE    = os.environ.get("TICKET_MODE", "0") == "1"              # 工单模式：跳过 Evaluator，返回 Executor 实际输出
 
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
@@ -1618,19 +1619,44 @@ def main():
             )
 
             duration_ms = int((time.time() - start) * 1000)
-            output = json.dumps(eval_result, ensure_ascii=False)
             display_transcript = tm.get_display_entries()
 
-            result = {
-                "skill_id": SKILL_ID,
-                "passed": eval_result.get("passed", False),
-                "output": output,
-                "transcript": display_transcript,
-                "testInput": json.dumps(_limited_inputs, ensure_ascii=False),
-                "model": AI_MODEL,
-                "duration_ms": duration_ms,
-                "tested_at": datetime.now(timezone.utc).isoformat(),
-            }
+            if TICKET_MODE:
+                # ── 工单模式：跳过 Evaluator，直接用 Executor 的实际输出 ──────
+                # 客户看到的是 Agent 实际生成的内容，不是评分 JSON
+                executor_output = ""
+                if executor_results:
+                    executor_output = executor_results[0].get("output", "")
+                result = {
+                    "skill_id": SKILL_ID,
+                    "passed":   bool(executor_output),
+                    "output":   executor_output,       # Executor 实际输出（客户看到的）
+                    "transcript": display_transcript,
+                    "model":    AI_MODEL,
+                    "duration_ms": duration_ms,
+                    "tested_at": datetime.now(timezone.utc).isoformat(),
+                }
+                progress("完成", f"Agent 执行完毕（工单模式），输出 {len(executor_output)} 字")
+            else:
+                # ── 测试模式：Evaluator 严格评分 ─────────────────────────────
+                progress("评估", "Evaluator 严格评估中...")
+                eval_result = evaluator_call(
+                    skill_md=SKILL_MD,
+                    test_cases=test_cases,
+                    executor_results=executor_results,
+                    tm=tm,
+                )
+                output = json.dumps(eval_result, ensure_ascii=False)
+                result = {
+                    "skill_id": SKILL_ID,
+                    "passed": eval_result.get("passed", False),
+                    "output": output,
+                    "transcript": display_transcript,
+                    "testInput": json.dumps(_limited_inputs, ensure_ascii=False),
+                    "model": AI_MODEL,
+                    "duration_ms": duration_ms,
+                    "tested_at": datetime.now(timezone.utc).isoformat(),
+                }
 
         else:
             # ── 旧路径：prompt-only Skill，用 react_loop + invoke_skill ──────

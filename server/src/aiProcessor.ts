@@ -304,6 +304,7 @@ async function submitTicketAgentJob(
     mcpConfigs:       mcpConfigsJson,
     oauthTokens,
     caseCount:        1,
+    ticketMode:       true,   // 工单模式：runner.py 跳过 Evaluator，返回 Executor 实际输出
   });
 
   console.log(`[TicketAgent] Cloud Run Job submitted for ticket ${ticketId}: ${executionId}`);
