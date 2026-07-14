@@ -236,30 +236,128 @@ export default function TicketDetail() {
                   {result.revised_at && <span>{new Date(result.revised_at).toLocaleString('zh-CN')}</span>}
                 </div>
               )}
-              {/* AI Log (collapsible, like sandbox transcript) */}
-              {result.ai_log && (
-                <div style={{ marginTop: 12 }}>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => setShowLog(v => !v)}
-                    style={{ fontSize: '.78rem' }}
-                  >
-                    {showLog ? '▲ 收起 AI 日志' : '▼ 查看 AI 日志（发送给 AI 的内容）'}
-                  </button>
-                  {showLog && (
-                    <pre style={{
-                      marginTop: 8,
-                      background: '#0d1117', color: '#e6edf3',
-                      borderRadius: 8, padding: '14px 16px',
-                      fontSize: '.75rem', lineHeight: 1.7,
-                      overflowX: 'auto', maxHeight: 500, overflowY: 'auto',
-                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    }}>
-                      {result.ai_log}
-                    </pre>
-                  )}
-                </div>
-              )}
+              {/* AI 执行日志（Agent 每一步的操作记录，和沙箱测试日志格式一致） */}
+              {result.ai_log && (() => {
+                // 解析 transcript JSON（runner.py 存的是 JSON array）
+                let transcript: any[] = [];
+                try { transcript = JSON.parse(result.ai_log); } catch { transcript = []; }
+                const stepCount = transcript.filter((t: any) => t.type !== 'event' || t.event !== 'header').length;
+                // 下载完整日志
+                const downloadLog = () => {
+                  const blob = new Blob([result.ai_log], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url; a.download = `ticket-ai-log-${id || 'unknown'}.json`;
+                  a.click(); URL.revokeObjectURL(url);
+                };
+                return (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setShowLog(v => !v)}
+                        style={{ fontSize: '.78rem' }}
+                      >
+                        {showLog ? '▲ 收起执行日志' : `▼ 查看 Agent 执行日志（${stepCount} 步）`}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={downloadLog}
+                        style={{ fontSize: '.75rem', color: 'var(--primary)' }}
+                        title="下载完整执行日志（JSON 格式）"
+                      >
+                        📥 下载完整日志
+                      </button>
+                    </div>
+                    {showLog && (
+                      <div style={{
+                        marginTop: 8,
+                        borderLeft: '3px solid var(--gray-200)',
+                        paddingLeft: 12,
+                        maxHeight: 600,
+                        overflowY: 'auto',
+                      }}>
+                        {transcript.length === 0 ? (
+                          <div style={{ color: 'var(--gray-400)', fontSize: '.8rem' }}>暂无日志记录</div>
+                        ) : transcript.map((t: any, i: number) => (
+                          <div key={i} style={{ marginBottom: 12 }}>
+                            {/* 条目标题行 */}
+                            <div style={{
+                              fontSize: '.78rem', fontWeight: 600, marginBottom: 4,
+                              color: t.role === 'assistant' ? 'var(--primary)'
+                                : t.role === 'tool' ? 'var(--success)'
+                                : t.type === 'event' ? '#e67700'
+                                : 'var(--gray-500)'
+                            }}>
+                              {t.type === 'event'
+                                ? `⚡ ${t.event === 'start' ? '开始' : t.event === 'executor_done' ? '执行完成' : t.event || '事件'}`
+                                : t.role === 'system'
+                                  ? `📋 系统指令（${t.label || 'executor'}）`
+                                  : t.role === 'assistant'
+                                    ? `🤖 AI 思考与回复${t.turn != null ? `（第 ${t.turn} 轮）` : ''}`
+                                    : t.role === 'tool'
+                                      ? `🔧 工具调用：${t.tool || '未知工具'}`
+                                      : `第 ${t.round || t.turn || i} 步`}
+                              {t.ts && (
+                                <span style={{ fontWeight: 400, color: 'var(--gray-400)', marginLeft: 8 }}>
+                                  {t.ts.slice(11, 19)}
+                                </span>
+                              )}
+                              {t.is_truncated && (
+                                <span style={{ marginLeft: 8, fontSize: '.7rem', color: '#e67700', background: '#fff3e0', padding: '1px 6px', borderRadius: 3 }}>
+                                  ✂️ 已截断{t.original_length ? ` (原 ${(t.original_length / 1024).toFixed(1)}KB)` : ''}
+                                </span>
+                              )}
+                            </div>
+                            {/* 事件详情 */}
+                            {t.type === 'event' && t.detail && (
+                              <div style={{ fontSize: '.8rem', color: 'var(--gray-600)' }}>{t.detail}</div>
+                            )}
+                            {/* 系统指令（只显示前 200 字） */}
+                            {t.role === 'system' && t.content && (
+                              <pre style={{ background: '#f8f9fa', borderRadius: 4, padding: '6px 10px', fontSize: '.75rem', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto', margin: 0, color: 'var(--gray-600)' }}>
+                                {t.content.slice(0, 300)}{t.content.length > 300 ? `\n...[共 ${t.content.length} 字]` : ''}
+                              </pre>
+                            )}
+                            {/* AI 回复内容 */}
+                            {t.role === 'assistant' && t.content && (
+                              <pre style={{ background: '#f0f4ff', borderRadius: 4, padding: '8px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>
+                                {t.content}
+                              </pre>
+                            )}
+                            {/* 调用了哪些工具 */}
+                            {t.role === 'assistant' && t.tool_calls?.length > 0 && (
+                              <div style={{ marginTop: 4, fontSize: '.75rem', color: 'var(--gray-500)' }}>
+                                🔧 调用工具：{t.tool_calls.map((tc: any) => tc.name || tc.function?.name).join('、')}
+                              </div>
+                            )}
+                            {/* 工具输入 */}
+                            {t.role === 'tool' && t.input && (
+                              <div style={{ marginBottom: 4 }}>
+                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)', marginBottom: 2 }}>📥 输入参数：</div>
+                                <pre style={{ background: '#f0fff4', borderRadius: 4, padding: '6px 8px', fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto', margin: 0 }}>
+                                  {typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                            {/* 工具输出 */}
+                            {t.role === 'tool' && t.output && (
+                              <div>
+                                <div style={{ fontSize: '.75rem', color: 'var(--gray-500)', marginBottom: 2 }}>
+                                  📤 输出结果{t.is_truncated ? '（已截断，下载完整日志查看原文）' : ''}：
+                                </div>
+                                <pre style={{ background: '#fff8f0', borderRadius: 4, padding: '6px 8px', fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', margin: 0 }}>
+                                  {t.output}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           )}
 
