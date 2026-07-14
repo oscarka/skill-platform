@@ -55,10 +55,18 @@ export default function Layout() {
                   <NavLink
                     key={item.to}
                     to={item.to}
-                    className={({ isActive }) =>
-                      `nav-item${isActive || (item.to !== '/' && location.pathname.startsWith(item.to)) ? ' active' : ''}`
-                    }
-                    end={item.to === '/'}
+                    className={() => {
+                      const path = location.pathname;
+                      // 精确匹配当前路径
+                      if (path === item.to) return 'nav-item active';
+                      // "新建/上传" 类页面：只精确匹配，不匹配子路径
+                      if (item.to.endsWith('/new')) return 'nav-item';
+                      // 列表页：也匹配其详情子页（如 /tickets/:id），但不匹配同级 /new
+                      if (item.to !== '/' && path.startsWith(item.to + '/') && !path.startsWith(item.to + '/new')) {
+                        return 'nav-item active';
+                      }
+                      return 'nav-item';
+                    }}
                   >
                     <span className="nav-icon">{item.icon}</span>
                     {item.label}
