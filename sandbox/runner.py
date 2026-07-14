@@ -1570,6 +1570,12 @@ def main():
             )
             ticket_tm.append_event("start", f"工单模式 (skill_type={skill_type})")
 
+            # 明确打印 SKILL.md 前 200 字，供日志确认实际使用的 Skill 内容
+            skill_preview = SKILL_MD.strip()[:200].replace('\n', ' | ')
+            print(f"[ticket-mode] SKILL_ID={SKILL_ID}", flush=True)
+            print(f"[ticket-mode] SKILL_MD 前200字: {skill_preview}", flush=True)
+            ticket_tm.append_event("skill_loaded", f"Skill 内容已加载 ({len(SKILL_MD)} 字符)：{SKILL_MD.strip()[:120]}…")
+
             # 取第一个（也是唯一的）test case 作为客户输入
             if isinstance(_limited_inputs, dict):
                 customer_message = list(_limited_inputs.values())[0] if _limited_inputs else str(_limited_inputs)
