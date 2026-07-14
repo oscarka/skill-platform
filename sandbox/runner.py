@@ -1559,7 +1559,50 @@ def main():
     progress("分析", f"Skill 类型：{skill_type}")
 
     try:
-        if skill_type in ("mcp", "script"):
+        if TICKET_MODE:
+            # ── 工单模式：适用于所有 skill_type，跳过全部测试/评估逻辑 ──────────
+            # 直接用 SKILL.md 作 Agent 指令，客户提交的数据作 user message
+            # 结果是客户真正应该看到的内容，不是评分 JSON
+            ticket_tm = TranscriptManager(
+                work_dir="/tmp/transcript",
+                skill_id=SKILL_ID,
+                context_tokens=CONTEXT_WINDOW_TOKENS,
+            )
+            ticket_tm.append_event("start", f"工单模式 (skill_type={skill_type})")
+
+            # 取第一个（也是唯一的）test case 作为客户输入
+            if isinstance(_limited_inputs, dict):
+                customer_message = list(_limited_inputs.values())[0] if _limited_inputs else str(_limited_inputs)
+            elif isinstance(_limited_inputs, list):
+                customer_message = _limited_inputs[0] if _limited_inputs else str(_limited_inputs)
+            else:
+                customer_message = str(_limited_inputs)
+
+            ticket_deadline = time.time() + max(60, _JOB_TIMEOUT_SECONDS - _job_elapsed() - 30)
+            progress("执行", f"Agent 正在处理客户请求...")
+
+            e_result = executor_react_loop(
+                skill_md=SKILL_MD,
+                user_message=str(customer_message),
+                mcp_tools=mcp_native_tools,
+                tm=ticket_tm,
+                deadline=ticket_deadline,
+            )
+            executor_output = e_result.get("output", "")
+            duration_ms = int((time.time() - start) * 1000)
+
+            result.update({
+                "passed":    bool(executor_output),
+                "output":    executor_output,      # Agent 实际输出（客户看到的内容）
+                "transcript": ticket_tm.get_display_entries(),
+                "model":     AI_MODEL,
+                "duration_ms": duration_ms,
+                "tested_at": datetime.now(timezone.utc).isoformat(),
+            })
+            tm = ticket_tm
+            progress("完成", f"Agent 执行完毕（工单模式），输出 {len(executor_output)} 字")
+            # 不继续走 sandbox 测试路径
+        elif skill_type in ("mcp", "script"):
             # ── 双 Agent 路径：Executor + Evaluator ──────────────────────────
             # 创建 TranscriptManager
             tm = TranscriptManager(
