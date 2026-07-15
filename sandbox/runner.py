@@ -31,6 +31,7 @@ TICKET_MODE    = os.environ.get("TICKET_MODE", "0") == "1"              # 工单
 # Fallback AI provider
 FALLBACK_API_KEY  = os.environ.get("FALLBACK_AI_API_KEY", "")
 FALLBACK_BASE_URL = os.environ.get("FALLBACK_AI_BASE_URL", "")
+FALLBACK_MODEL    = os.environ.get("FALLBACK_AI_MODEL", "deepseek-chat")  # fallback 模型名，默认 deepseek-chat
 
 # ─── SIGTERM 优雅退出（参照 OpenClaw AbortController 机制）────────────────────────
 # Cloud Run 在硬杀前 10 秒发送 SIGTERM，我们捕获它实现优雅退出
@@ -833,49 +834,149 @@ def _resolve_tool_name(messages: list, tool_call_id: str) -> str:
 
 
 # ─── AI 调用（OpenAI 兼容接口，仿 OpenClaw FailoverError 多 provider）───────
-def _do_ai_call(messages: list, tools=None, timeout=180,
-                api_key: str = None, base_url: str = None) -> dict:
-    """Single AI call to a specific provider."""
-    import urllib.request, urllib.error
-    key  = api_key  or AI_API_KEY
-    base = base_url or AI_BASE_URL
-    body = {"model": AI_MODEL, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
+def _parse_sse_stream(r) -> dict:
+    """
+    解析 OpenAI-compatible SSE 流，合并 delta → 标准 chat.completions 响应格式。
+    参照 OpenClaw openai-transport-stream.ts 的 chunk 合并逻辑。
+    每次 readline() 只等一个 chunk（毫秒级），彻底解决 read timeout 问题。
+    """
+    choices: dict = {}   # index → {role, content, tool_calls[]}
+    usage: dict = {}
+    model_out = ""
+    finish_reason = None
+
+    for raw_line in r:
+        line = raw_line.decode("utf-8", errors="replace").rstrip()
+        if not line:
+            continue
+        if line.startswith("data: "):
+            payload = line[6:].strip()
+        elif line.startswith("data:"):
+            payload = line[5:].strip()
+        else:
+            continue
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        if chunk.get("model"):
+            model_out = chunk["model"]
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+
+        for ch in chunk.get("choices", []):
+            idx = ch.get("index", 0)
+            c = choices.setdefault(idx, {
+                "index": idx,
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": None,
+            })
+            if ch.get("finish_reason"):
+                c["finish_reason"] = ch["finish_reason"]
+                finish_reason = ch["finish_reason"]
+            delta = ch.get("delta", {})
+            # ── content delta ──────────────────────────────────────────
+            if delta.get("content"):
+                c["message"]["content"] += delta["content"]
+            if delta.get("role"):
+                c["message"]["role"] = delta["role"]
+            # ── tool_calls delta (OpenAI 风格) ─────────────────────────
+            for tc_delta in delta.get("tool_calls", []):
+                tc_idx  = tc_delta.get("index", 0)
+                tc_list = c["message"].setdefault("tool_calls", [])
+                while len(tc_list) <= tc_idx:
+                    tc_list.append({"id": "", "type": "function",
+                                    "function": {"name": "", "arguments": ""}})
+                tc = tc_list[tc_idx]
+                if tc_delta.get("id"):
+                    tc["id"] = tc_delta["id"]
+                if tc_delta.get("type"):
+                    tc["type"] = tc_delta["type"]
+                fn_delta = tc_delta.get("function", {})
+                if fn_delta.get("name"):
+                    tc["function"]["name"] += fn_delta["name"]
+                if fn_delta.get("arguments"):
+                    tc["function"]["arguments"] += fn_delta["arguments"]
+
+    # tool_calls 为空时删掉 key（和非流式格式保持一致）
+    for c in choices.values():
+        if not c["message"].get("tool_calls"):
+            c["message"].pop("tool_calls", None)
+
+    return {
+        "choices": list(choices.values()),
+        "model": model_out,
+        "usage": usage,
+    }
+
+
+def _do_ai_call(messages: list, tools=None, first_token_timeout=45,
+                api_key: str = None, base_url: str = None, model: str = None) -> dict:
+    """
+    流式 SSE AI 调用（参照 OpenClaw stream:true + firstEventTimeoutMs 模式）。
+    - first_token_timeout: 仅控制「连接建立 + 首个 token 到达」的超时（秒）
+    - 之后每行 readline() 自动继承 socket timeout，每 chunk 毫秒级，不会 read-timeout
+    - 彻底解决 urllib r.read() 等整个响应体导致的超时问题
+    """
+    import urllib.request, urllib.error, socket
+    key       = api_key  or AI_API_KEY
+    base      = base_url or AI_BASE_URL
+    use_model = model    or AI_MODEL
+    body = {
+        "model":      use_model,
+        "messages":   messages,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        "stream":     True,          # ← 关键：永远流式，参照 OpenClaw
+    }
     if tools:
-        body["tools"] = tools
+        body["tools"]       = tools
         body["tool_choice"] = "auto"
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions",
         data=data,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {key}",
+                 "Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
+        with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
+            # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
+            try:
+                r.fp.raw._sock.settimeout(60)   # 每个 chunk 间隔最多 60s
+            except Exception:
+                pass
+            return _parse_sse_stream(r)
     except urllib.error.HTTPError as e:
-        body_str = e.read().decode()
+        body_str = e.read().decode(errors="replace")
         raise RuntimeError(f"AI API error {e.code}: {body_str}")
+
 
 def call_ai(messages: list, tools=None) -> dict:
     """
     3-level fallback (OpenClaw FailoverError pattern):
-    Level 1: Primary provider + tools
-    Level 2: Fallback provider + tools (Doubao <-> DeepSeek)
+    Level 1: Primary provider + tools  (streaming)
+    Level 2: Fallback provider + tools (FALLBACK_MODEL，修复模型名问题)
     Level 3: Primary provider, no tools, simplified context
     """
     try:
-        return _do_ai_call(messages, tools, timeout=180)
+        return _do_ai_call(messages, tools)
     except (RuntimeError, Exception) as e1:
         err1 = str(e1)
         print(f"[call_ai] L1 failed: {err1[:100]}", flush=True)
 
-        # Level 2: switch to fallback provider
+        # Level 2: fallback provider + 正确的 fallback 模型名
         if FALLBACK_API_KEY and FALLBACK_BASE_URL:
             try:
-                print(f"[call_ai] L2 trying fallback provider...", flush=True)
-                return _do_ai_call(messages, tools, timeout=180,
-                                   api_key=FALLBACK_API_KEY, base_url=FALLBACK_BASE_URL)
+                print(f"[call_ai] L2 trying fallback ({FALLBACK_MODEL})...", flush=True)
+                return _do_ai_call(messages, tools,
+                                   api_key=FALLBACK_API_KEY,
+                                   base_url=FALLBACK_BASE_URL,
+                                   model=FALLBACK_MODEL)
             except Exception as e2:
                 print(f"[call_ai] L2 failed: {str(e2)[:80]}", flush=True)
 
@@ -884,9 +985,9 @@ def call_ai(messages: list, tools=None) -> dict:
             print("[call_ai] L3 retry: no tools, simplified context", flush=True)
             sys_msg = [m for m in messages if m.get("role") == "system"]
             usr_msg = [m for m in messages if m.get("role") == "user"]
-            simple = sys_msg + (usr_msg[-1:] if usr_msg else [])
+            simple  = sys_msg + (usr_msg[-1:] if usr_msg else [])
             simple.append({"role": "user", "content": "Please output the final test result as JSON only."})
-            return _do_ai_call(simple, tools=None, timeout=120)
+            return _do_ai_call(simple, tools=None)
         raise
 
 # ─── 工具调用分发 ─────────────────────────────────────────────────────────────
