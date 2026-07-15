@@ -869,6 +869,12 @@ def _parse_sse_stream(r) -> dict:
         except json.JSONDecodeError:
             continue
 
+        # ── 检测 SSE 流内嵌的错误（Doubao 偶发：空响应、工具调用失败等）──────
+        if "error" in chunk:
+            err = chunk["error"]
+            err_msg = err.get("message") or str(err)
+            raise RuntimeError(f"AI stream error: {err_msg}")
+
         if chunk.get("model"):
             model_out = chunk["model"]
         if chunk.get("usage"):
