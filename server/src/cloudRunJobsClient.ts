@@ -30,6 +30,7 @@ export interface JobSubmitOptions {
   oauthTokens?:     string;    // JSON: {google: {access_token, refresh_token}, stitch: {...}}
   caseCount?:       number;    // 测试用例数（1-3，默认1）
   ticketMode?:      boolean;   // 工单模式：跳过 Evaluator，返回 Executor 实际输出
+  fallbackModel?:   string;    // 仿 OpenClaw FailoverError：L2 fallback 模型名
 }
 
 export interface JobExecution {
@@ -87,6 +88,7 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     // Fallback provider（仿 OpenClaw FailoverError 多 provider 切换）
     { name: 'FALLBACK_AI_API_KEY', value: opts.fallbackAiKey || '' },
     { name: 'FALLBACK_AI_BASE_URL',value: opts.fallbackAiBase || '' },
+    { name: 'FALLBACK_AI_MODEL',   value: opts.fallbackModel || 'deepseek-chat' },  // L2 正确模型名
     { name: 'DATABASE_URL',        value: opts.dbUrl || process.env.DATABASE_URL || '' },
     { name: 'DB_SCHEMA',           value: opts.dbSchema || process.env.DB_SCHEMA || 'skill_platform' },
     { name: 'CALLBACK_URL',        value: opts.callbackUrl || '' },
@@ -105,7 +107,8 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
     overrides: {
       containerOverrides: [{ env: envVars }],
       taskCount: 1,
-      timeout: '600s',
+      // timeout 不设置，使用 Cloud Run Job 默认配置（2000s）
+      // 之前设为 '600s' 会覆盖 --task-timeout=2000 的配置，导致 3 case 超时
     },
   };
 
