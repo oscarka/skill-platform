@@ -87,6 +87,7 @@ steps:
       - skill-sandbox-job
       - --image=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
       - --region=asia-east1
+      - --task-timeout=2000   # 33 分钟：3 case × 580s + 90s evaluator + 120s 启动 = 1950s
     waitFor: [push-sandbox]
 
 images:

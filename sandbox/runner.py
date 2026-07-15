@@ -37,7 +37,14 @@ FALLBACK_MODEL    = os.environ.get("FALLBACK_AI_MODEL", "deepseek-chat")  # fall
 # Cloud Run 在硬杀前 10 秒发送 SIGTERM，我们捕获它实现优雅退出
 _shutdown_requested: bool = False
 _JOB_START_TIME: float = time.time()  # Job 启动时间
-_JOB_TIMEOUT_SECONDS: int = 590       # 600s 硬限 - 10s 安全钙
+# 每个测试用例独立给予完整 600s（性能类似独立的 600s Cloud Run job）
+PER_CASE_BUDGET: int = int(os.environ.get("PER_CASE_BUDGET_SECONDS", "580"))  # 每 case 最多用多少秒
+EVALUATOR_BUDGET: int = 90   # Evaluator 保留时间
+# 总 job timeout = CASE_COUNT × PER_CASE + Evaluator + 120s 启动开销
+_JOB_TIMEOUT_SECONDS: int = int(os.environ.get(
+    "JOB_TIMEOUT_SECONDS",
+    str(CASE_COUNT * PER_CASE_BUDGET + EVALUATOR_BUDGET + 120)
+))  # 默认按 CASE_COUNT 自动计算
 
 def _sigterm_handler(sig, frame):
     global _shutdown_requested
@@ -1729,12 +1736,10 @@ def main():
             test_cases = test_cases[:CASE_COUNT]
             n_cases = len(test_cases)
 
-            # 计算每个用例的时间预算（参照 OpenClaw per-run timeout 机制）
-            # 留出 60s 给 Evaluator + 启动开销
-            EVALUATOR_BUDGET = 60
-            per_case_budget = (_JOB_TIMEOUT_SECONDS - EVALUATOR_BUDGET - _job_elapsed()) / max(1, n_cases)
-            per_case_budget = max(60, per_case_budget)  # 最少 60s
-            print(f"[main] test_cases={n_cases}, per_case_budget={per_case_budget:.0f}s", flush=True)
+            # 每个用例独立享有完整 PER_CASE_BUDGET（不平分总时间）
+            # 参照：如果是独立的 Cloud Run job，每次都有完整 600s，这里保持相同逻辑
+            _per_case = min(PER_CASE_BUDGET, max(60, _job_remaining() - EVALUATOR_BUDGET - 10))
+            print(f"[main] test_cases={n_cases}, per_case_budget={_per_case:.0f}s (PER_CASE_BUDGET={PER_CASE_BUDGET}s, job_remaining={_job_remaining():.0f}s)", flush=True)
 
             # Executor 依次执行每个测试用例
             executor_results = []
@@ -1745,7 +1750,7 @@ def main():
                     progress(f"跳过用例 {i+1}", "Job 即将结束，跳过剩余用例")
                     break
 
-                case_deadline = time.time() + per_case_budget
+                case_deadline = time.time() + _per_case
                 progress(f"执行用例 {i+1}/{n_cases}", str(case)[:80])
                 tm.append_event("executor_start", f"用例 {i+1}: {str(case)[:100]}")
                 e_result = executor_react_loop(
