@@ -1608,8 +1608,8 @@ def main():
         🚀 阶段 2：执行 Skill（子 Agent 模式）
         ═══════════════════════════════════════════════════════
         对 prompt-only Skill：
-        - 使用 invoke_skill 工具，把 SKILL.md 全文作为 skill_system_prompt，
-          把每个测试用例作为 user_message，直接调用 Skill
+        - 使用 invoke_skill 工具，只传 user_message（测试用例内容）
+        - ⚠️ 不要传 skill_system_prompt 参数——Skill 内容已在系统中自动加载，无需重复传入
         - invoke_skill 会以 Skill 的身份回答，返回真实的 Skill 输出
         - 每个测试用例调用一次 invoke_skill
 
