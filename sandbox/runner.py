@@ -574,7 +574,7 @@ def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dic
                 {"role": "user",   "content": user_message},
             ],
             tools=None,
-            timeout=120,
+            first_token_timeout=120,
         )
         choice = resp.get("choices", [{}])[0]
         reply = choice.get("message", {}).get("content", "")
