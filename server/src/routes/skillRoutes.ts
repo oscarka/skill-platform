@@ -343,18 +343,22 @@ skillRouter.post('/upload-zip', zipUpload.single('file'), async (req, res) => {
     const zip = new AdmZip(req.file.buffer);
     const entries = zip.getEntries();
 
-    // 找 SKILL.md：支持根目录或任意子目录下的 SKILL.md
-    const skillMdEntry = entries.find(e =>
-      !e.isDirectory &&
-      (e.entryName === 'SKILL.md' ||
-       e.entryName.endsWith('/SKILL.md') ||
-       e.entryName.toLowerCase() === 'skill.md' ||
-       e.entryName.toLowerCase().endsWith('/skill.md'))
-    );
+    // 找 SKILL.md：匹配任意层级下的 SKILL.md，忽略 macOS 元数据目录
+    // 用文件名（最后一段路径）匹配，避免路径分隔符和大小写问题
+    const skillMdEntry = entries.find(e => {
+      const normalized = e.entryName.replace(/\\/g, '/');
+      if (normalized.startsWith('__MACOSX/')) return false;   // macOS 元数据
+      if (normalized.endsWith('/')) return false;              // 目录条目
+      const filename = normalized.split('/').filter(Boolean).pop() || '';
+      return filename.toLowerCase() === 'skill.md';
+    });
     if (!skillMdEntry) {
       return res.status(400).json({
         error: 'ZIP 中找不到 SKILL.md 文件，请确认压缩包格式正确',
-        found: entries.filter(e => !e.isDirectory).map(e => e.entryName).slice(0, 20),
+        found: entries
+          .filter(e => !e.entryName.startsWith('__MACOSX/') && !e.entryName.endsWith('/'))
+          .map(e => e.entryName)
+          .slice(0, 20),
       });
     }
 
