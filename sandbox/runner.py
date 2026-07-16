@@ -12,14 +12,46 @@ from redact import redact_secrets
 
 # ─── 环境变量 ─────────────────────────────────────────────────────────────────
 SKILL_ID      = os.environ.get("SKILL_ID", "")
-SKILL_MD_B64  = os.environ.get("SKILL_MD", "")          # base64 编码的 SKILL.md
+SKILL_MD_B64  = os.environ.get("SKILL_MD", "")          # base64 向后兼容（大 Skill 时为空）
 USER_INPUTS   = json.loads(os.environ.get("USER_INPUTS", "{}"))
 AI_API_KEY    = os.environ.get("AI_API_KEY", "")
 AI_BASE_URL   = os.environ.get("AI_BASE_URL", "")       # doubao/deepseek endpoint
 AI_MODEL      = os.environ.get("AI_MODEL", "")
 DB_URL        = os.environ.get("DATABASE_URL", "")
 DB_SCHEMA     = os.environ.get("DB_SCHEMA", "skill_platform")
-SKILL_MD      = base64.b64decode(SKILL_MD_B64).decode("utf-8") if SKILL_MD_B64 else ""
+
+def _fetch_skill_md_from_db() -> str:
+    """
+    OpenClaw 理念：从 DB 按 SKILL_ID 读取 prompt_template。
+    类比 OpenClaw 的「agent 用 read_file 工具从磁盘读 SKILL.md」——
+    内容不经过 env var，彻底规避 Cloud Run Job 32KB 限制。
+    """
+    if not SKILL_ID or not DB_URL:
+        return ""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DB_URL, connect_timeout=10)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'SELECT prompt_template FROM "{DB_SCHEMA}".skills WHERE id = %s',
+                    (SKILL_ID,)
+                )
+                row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            print(f"[runner] SKILL_MD loaded from DB: {len(row[0])} chars", flush=True)
+            return row[0]
+        print(f"[runner] SKILL_ID={SKILL_ID!r} not found in DB", flush=True)
+    except Exception as e:
+        print(f"[runner] DB fetch failed ({type(e).__name__}): {e}", flush=True)
+    return ""
+
+# OpenClaw 模式：从 DB 读 Skill 内容，无大小限制；回退到 base64 env var（向后兼容）
+SKILL_MD = _fetch_skill_md_from_db()
+if not SKILL_MD and SKILL_MD_B64:
+    SKILL_MD = base64.b64decode(SKILL_MD_B64).decode("utf-8")
+    print(f"[runner] SKILL_MD fallback from env var: {len(SKILL_MD)} chars", flush=True)
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]

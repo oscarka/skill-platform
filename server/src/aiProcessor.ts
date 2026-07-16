@@ -287,12 +287,11 @@ async function submitTicketAgentJob(
     : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  // Base64-encode SKILL.md for runner.py
-  const skillMdB64 = Buffer.from(skill.prompt_template || '').toString('base64');
+  // skillMdB64 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
 
   const { executionId } = await submitSandboxJob({
     skillId,
-    skillMd:          skillMdB64,
+    // skillMd 已废弃，runner.py 从 DB 读
     userInputs:       testInputs,
     model:            model || 'doubao-1-5-pro-32k-250115',
     aiKey,

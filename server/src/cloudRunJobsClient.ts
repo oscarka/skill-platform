@@ -15,7 +15,7 @@ export const USE_CLOUD_RUN = !!(GCP_PROJECT && SANDBOX_IMAGE);
 
 export interface JobSubmitOptions {
   skillId:          string;
-  skillMd:          string;   // base64 编码的 SKILL.md
+  skillMd?:         string;   // base64 编码的 SKILL.md（已废弃：runner.py 改从 DB 读取，保留向后兼容）
   userInputs:       Record<string, any>;
   model:            string;
   aiKey:            string;
@@ -78,7 +78,9 @@ export async function submitSandboxJob(opts: JobSubmitOptions): Promise<JobExecu
 
   const envVars = [
     { name: 'SKILL_ID',            value: opts.skillId },
-    { name: 'SKILL_MD',            value: opts.skillMd },
+    // SKILL_MD 已废弃（runner.py 改从 DB 按 SKILL_ID 读取，参考 OpenClaw 文件系统理念）
+    // 不再通过 env var 传递，彻底解决 Cloud Run Job 32KB 上限问题
+    { name: 'SKILL_MD',            value: '' },  // 保留 key 以防旧 runner.py 镜像仍需要它
     { name: 'USER_INPUTS',         value: JSON.stringify(opts.userInputs) },
     { name: 'AI_MODEL',            value: opts.model },
     { name: 'AI_API_KEY',          value: opts.aiKey },

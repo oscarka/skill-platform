@@ -32,7 +32,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     Pillow pytesseract \
     pandas numpy \
     openai \
-    google-cloud-storage
+    google-cloud-storage \
+    psycopg2-binary
 
 # 创建沙箱用户
 RUN useradd --create-home --shell /bin/bash sandbox

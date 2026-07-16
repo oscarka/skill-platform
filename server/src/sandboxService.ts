@@ -831,7 +831,7 @@ async function runCloudRunJobTest(
   const callbackUrl = serviceUrl ? `${serviceUrl}/api/skills/${skillId}/sandbox-callback` : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  const skillMdB64 = Buffer.from(content).toString('base64');
+  // skillMdB64 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
   let testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : {};
 
   // ── 自动生成测试数据（当没有手动指定时）──────────────────────────────────
@@ -873,7 +873,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
   // 提交 Cloud Run Job（传主+备用 provider，仿 OpenClaw FailoverError）
   const { executionId, executionName } = await submitSandboxJob({
     skillId,
-    skillMd:          skillMdB64,
+    // skillMd 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
     userInputs:       testInputs,
     model,
     aiKey,
