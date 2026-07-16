@@ -680,9 +680,8 @@ TOOLS = [
         "function": {
             "name": "invoke_skill",
             "description": (
-                "以 Skill 的 system prompt 身份，向 AI 发送一条用户消息，返回 Skill 的回复。"
-                " 用于测试 prompt-only Skill：把 SKILL.md 正文作为 system，测试用例作为 user。"
-                " 也可用于 script Skill 的 warm-up 检测（看 AI 对 Skill 指令的理解）。"
+                "向当前 Skill 发送一条用户消息，返回 Skill 的回复。"
+                " Skill 的 system prompt（SKILL.md 全文）已自动加载，只需传 user_message。"
             ),
             "parameters": {
                 "type": "object",
@@ -690,10 +689,6 @@ TOOLS = [
                     "user_message": {
                         "type": "string",
                         "description": "发给 Skill 的用户消息（即一条测试用例的内容）"
-                    },
-                    "skill_system_prompt": {
-                        "type": "string",
-                        "description": "可选：指定 Skill 的 system prompt。留空则自动使用当前 SKILL.md 全文。"
                     }
                 },
                 "required": ["user_message"]
