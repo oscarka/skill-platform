@@ -8,6 +8,8 @@ import { getBundleStatus, buildBundle, markBundleReady, markBundleFailed, getBuc
 import { readDisplayTranscript, readFullTranscript, readSpillFile, listTranscripts, summarizeTranscript } from '../transcriptService';
 import https from 'https';
 import http from 'http';
+import multer from 'multer';
+import AdmZip from 'adm-zip';
 
 export const skillRouter = express.Router();
 
@@ -317,7 +319,96 @@ skillRouter.post('/import-clawhub', async (req, res) => {
   }
 });
 
+// multer for ZIP upload (memory storage, max 20MB)
+const zipUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = file.mimetype === 'application/zip'
+      || file.mimetype === 'application/x-zip-compressed'
+      || file.mimetype === 'application/octet-stream'
+      || file.originalname.endsWith('.zip');
+    if (ok) cb(null, true);
+    else cb(new Error('Only .zip files are accepted'));
+  },
+});
 
+// ─── POST /api/skills/upload-zip ──────────────────────────────────────────────
+// 上传和其他平台下载好的 Skill 压缩包，自动解析 SKILL.md 入库
+skillRouter.post('/upload-zip', zipUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '请上传 .zip 文件' });
+    const { type = 'external' } = req.body;
+
+    const zip = new AdmZip(req.file.buffer);
+    const entries = zip.getEntries();
+
+    // 找 SKILL.md：支持根目录或任意子目录下的 SKILL.md
+    const skillMdEntry = entries.find(e =>
+      !e.isDirectory &&
+      (e.entryName === 'SKILL.md' ||
+       e.entryName.endsWith('/SKILL.md') ||
+       e.entryName.toLowerCase() === 'skill.md' ||
+       e.entryName.toLowerCase().endsWith('/skill.md'))
+    );
+    if (!skillMdEntry) {
+      return res.status(400).json({
+        error: 'ZIP 中找不到 SKILL.md 文件，请确认压缩包格式正确',
+        found: entries.filter(e => !e.isDirectory).map(e => e.entryName).slice(0, 20),
+      });
+    }
+
+    const skillMd = skillMdEntry.getData().toString('utf-8');
+
+    // 解析 YAML frontmatter：---\nkey: value\n---
+    let name = req.file.originalname.replace('.zip', '');
+    let author = 'unknown';
+    let version = '1.0.0';
+    let description = '';
+
+    const fmMatch = skillMd.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (fmMatch) {
+      const fm = fmMatch[1];
+      const pick = (key: string) => {
+        const m = fm.match(new RegExp(`^${key}:\\s*(.+)`, 'm'));
+        return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : '';
+      };
+      name        = pick('name')        || pick('displayName') || name;
+      author      = pick('author')      || pick('author_handle') || author;
+      version     = pick('version')     || version;
+      description = pick('description') || pick('summary') || description;
+    }
+
+    // 如果 description 短于30字，用 SKILL.md 前200字作承接
+    if (!description || description.length < 10) {
+      description = skillMd.replace(/^---[\s\S]*?---/, '').trim().slice(0, 200).replace(/\n/g, ' ');
+    }
+
+    const id  = uuidv4();
+    const now = Date.now();
+    await db.runAsync(
+      `INSERT INTO skills (id,name,version,description,category,type,skill_type,author_name,status,prompt_template,code,plugin_config,preferred_model,fallback_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, name, version, description.slice(0, 500), 'zip-upload', type, 'plugin',
+       author, 'pending', skillMd, null,
+       JSON.stringify({ source: 'zip-upload', originalFileName: req.file.originalname }),
+       null, null, now, now]
+    );
+
+    const skill = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [id]);
+    res.status(201).json({
+      skill: sanitize(skill!, true),
+      parsed: {
+        name, author, version,
+        skillMdEntry: skillMdEntry.entryName,
+        contentLength: skillMd.length,
+        preview: skillMd.slice(0, 400) + (skillMd.length > 400 ? '...' : ''),
+        allFiles: entries.filter(e => !e.isDirectory).map(e => e.entryName),
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 // ─── GET /api/skills/:id ──────────────────────────────────────────────────────

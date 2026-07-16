@@ -7,7 +7,7 @@ export default function SkillNew() {
   const [models, setModels] = useState<any[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState('');
-  const [mode, setMode] = useState<'manual' | 'clawhub'>('manual');
+  const [mode, setMode] = useState<'manual' | 'clawhub' | 'zip'>('manual');
 
   // Manual form
   const [form, setForm] = useState({
@@ -45,6 +45,39 @@ export default function SkillNew() {
     try {
       const res = await api.skills.importClawhub(clawhubUrl, clawhubType);
       setImportResult(res);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ZIP upload form
+  const [zipFile, setZipFile] = useState<File | null>(null);
+  const [zipType, setZipType] = useState('external');
+  const [zipResult, setZipResult] = useState<any>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const handleZipUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!zipFile) return;
+    setSubmitting(true); setErr(''); setZipResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', zipFile);
+      formData.append('type', zipType);
+      const token = localStorage.getItem('auth_token');
+      const resp = await fetch('/api/skills/upload-zip', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+      if (!resp.ok) {
+        const d = await resp.json();
+        throw new Error(d.error || 'Upload failed');
+      }
+      const res = await resp.json();
+      setZipResult(res);
     } catch (e: any) {
       setErr(e.message);
     } finally {
@@ -95,6 +128,17 @@ export default function SkillNew() {
             transition: 'all .15s',
           }}
         >🔌 从 ClaWHub 导入</button>
+        <button
+          type="button"
+          onClick={() => setMode('zip')}
+          style={{
+            padding: '10px 20px', borderRadius: 8, fontWeight: 600, cursor: 'pointer',
+            border: `2px solid ${mode === 'zip' ? '#0891b2' : 'var(--gray-200)'}`,
+            background: mode === 'zip' ? '#ecfeff' : '#fff',
+            color: mode === 'zip' ? '#0891b2' : 'var(--gray-600)',
+            transition: 'all .15s',
+          }}
+        >📦 上传压缩包</button>
       </div>
 
       {err && <div className="alert alert-error">{err}</div>}
@@ -194,6 +238,137 @@ export default function SkillNew() {
               <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', lineHeight: 1.7 }}>
                 ClaWHub 上的 Skill 本质是 AI 行为规范（Markdown），导入后作为 Prompt 模板使用。
                 CLI 工具类 Skill（需要 gh、curl 等）在导入后需要手动调整。
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ZIP Upload Mode ─── */}
+      {mode === 'zip' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 20, alignItems: 'start' }}>
+          <div>
+            <form onSubmit={handleZipUpload}>
+              <div className="card mb-4">
+                <div className="card-title">📦 上传 Skill 压缩包</div>
+
+                {/* 拖拽区域 */}
+                <div
+                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={e => {
+                    e.preventDefault(); setDragOver(false);
+                    const f = e.dataTransfer.files[0];
+                    if (f?.name.endsWith('.zip')) setZipFile(f);
+                    else setErr('请上传 .zip 格式文件');
+                  }}
+                  onClick={() => document.getElementById('zip-file-input')?.click()}
+                  style={{
+                    border: `2px dashed ${dragOver ? '#0891b2' : zipFile ? '#10b981' : 'var(--gray-300)'}`,
+                    borderRadius: 12, padding: 40, textAlign: 'center', cursor: 'pointer',
+                    background: dragOver ? '#ecfeff' : zipFile ? '#f0fdf4' : 'var(--gray-50)',
+                    transition: 'all .2s', marginBottom: 16,
+                  }}
+                >
+                  <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>
+                    {zipFile ? '✅' : '📂'}
+                  </div>
+                  {zipFile ? (
+                    <>
+                      <div style={{ fontWeight: 700, color: '#10b981' }}>{zipFile.name}</div>
+                      <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginTop: 4 }}>
+                        {(zipFile.size / 1024).toFixed(1)} KB · 点击重新选择
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 600, color: 'var(--gray-600)' }}>拖拽 .zip 文件到此处，或点击选择</div>
+                      <div style={{ fontSize: '.8rem', color: 'var(--gray-400)', marginTop: 4 }}>
+                        支持从 OpenClaw、ClaWHub 等平台下载的 Skill 压缩包（最大 20MB）
+                      </div>
+                    </>
+                  )}
+                  <input
+                    id="zip-file-input"
+                    type="file"
+                    accept=".zip"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const f = e.target.files?.[0];
+                      if (f) setZipFile(f);
+                    }}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">使用类型</label>
+                  <select className="form-select" value={zipType} onChange={e => setZipType(e.target.value)}>
+                    <option value="external">外部（客户填 H5）</option>
+                    <option value="internal">内部（员工使用）</option>
+                  </select>
+                </div>
+
+                <button className="btn btn-primary" type="submit" disabled={submitting || !zipFile}
+                  style={{ background: '#0891b2', borderColor: '#0891b2' }}>
+                  {submitting ? '解析上传中…' : '📦 解析并导入'}
+                </button>
+              </div>
+            </form>
+
+            {zipResult && (
+              <div className="card" style={{ borderColor: '#0891b2', borderWidth: 2 }}>
+                <div className="card-title" style={{ color: '#0891b2' }}>✅ 解析成功！</div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: '1rem' }}>{zipResult.parsed?.name || zipResult.skill?.name}</div>
+                  <div style={{ fontSize: '.82rem', color: 'var(--gray-500)', marginTop: 4 }}>
+                    作者：{zipResult.parsed?.author} · 版本：{zipResult.parsed?.version} · {zipResult.parsed?.contentLength} 字符
+                  </div>
+                  <div style={{ fontSize: '.78rem', color: 'var(--gray-400)', marginTop: 4 }}>
+                    SKILL.md 路径：{zipResult.parsed?.skillMdEntry}
+                  </div>
+                  {zipResult.parsed?.allFiles?.length > 1 && (
+                    <div style={{ marginTop: 8, fontSize: '.78rem', color: 'var(--gray-500)' }}>
+                      压缩包文件：{zipResult.parsed.allFiles.slice(0, 8).join(', ')}
+                      {zipResult.parsed.allFiles.length > 8 ? ` 等 ${zipResult.parsed.allFiles.length} 个` : ''}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', background: 'var(--gray-50)',
+                  padding: 12, borderRadius: 8, fontFamily: 'monospace', lineHeight: 1.6,
+                  maxHeight: 180, overflow: 'auto' }}>
+                  {zipResult.parsed?.preview}
+                </div>
+                <div style={{ marginTop: 14 }}>
+                  <button className="btn btn-primary"
+                    style={{ background: '#0891b2', borderColor: '#0891b2' }}
+                    onClick={() => navigate(`/skills/${zipResult.skill?.id}`)}>
+                    📋 进入审核流程 →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right panel */}
+          <div style={{ position: 'sticky', top: 80 }}>
+            <div className="card mb-4" style={{ background: 'linear-gradient(135deg, #ecfeff, #cffafe)' }}>
+              <div className="card-title" style={{ color: '#0891b2' }}>📦 压缩包格式说明</div>
+              <div style={{ fontSize: '.84rem', color: 'var(--gray-600)', lineHeight: 2 }}>
+                <div>① 在其他平台下载 Skill 压缩包（.zip）</div>
+                <div>② 将 .zip 拖入左侧上传区</div>
+                <div>③ 平台自动识别 <strong>SKILL.md</strong> 并解析</div>
+                <div>④ 进入正常 AI 审核 → 发布流程</div>
+              </div>
+            </div>
+            <div className="card">
+              <div className="card-title">📋 支持的格式</div>
+              <div style={{ fontSize: '.82rem', color: 'var(--gray-600)', lineHeight: 1.8 }}>
+                <div>✅ SKILL.md 在根目录</div>
+                <div>✅ SKILL.md 在子目录中</div>
+                <div>✅ 包含 scripts/、resources/ 等</div>
+                <div style={{ marginTop: 8, color: 'var(--gray-400)' }}>
+                  平台只读取 SKILL.md，其余文件暂不导入
+                </div>
               </div>
             </div>
           </div>
