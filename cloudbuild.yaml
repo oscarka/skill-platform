@@ -13,8 +13,14 @@ steps:
   # ── 构建主平台镜像 (server + web 合一) ─────────────────────────────────────
   - name: gcr.io/cloud-builders/docker
     id: build
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
+      - --cache-from
+      - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/platform:latest
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
       - -t
       - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/platform:$BUILD_ID
       - -t
@@ -26,8 +32,14 @@ steps:
   # ── 构建沙箱镜像 (Cloud Run Job 用，与主镜像并行) ──────────────────────────
   - name: gcr.io/cloud-builders/docker
     id: build-sandbox
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
+      - --cache-from
+      - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
       - -t
       - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:$BUILD_ID
       - -t
