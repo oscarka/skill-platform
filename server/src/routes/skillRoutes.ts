@@ -2,6 +2,7 @@ import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db';
 import { runAI } from '../aiRunner';
+import { runSkillReviewAgent } from '../reviewAgent';
 import { runSandboxTest } from '../sandboxService';
 import { getBundleStatus, buildBundle, markBundleReady, markBundleFailed, getBucketName } from '../bundleService';
 import { readDisplayTranscript, readFullTranscript, readSpillFile, listTranscripts, summarizeTranscript } from '../transcriptService';
@@ -405,7 +406,10 @@ skillRouter.put('/:id', async (req, res) => {
 });
 
 // ─── POST /api/skills/:id/review ─────────────────────────────────────────────
-// Trigger AI review of the skill. Sets status to 'reviewing', runs AI, stores result.
+// OpenClaw-style review agent:
+//   - 评审 AI 通过工具调用按需读取 Skill 内容（不预先拼串）
+//   - 类比 OpenClaw agent 用 read_file 读 SKILL.md
+//   - 彻底修复 skill_type='plugin' 时 content=null 导致 10 分的 bug
 skillRouter.post('/:id/review', async (req, res) => {
   try {
     const skill = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
@@ -413,61 +417,25 @@ skillRouter.post('/:id/review', async (req, res) => {
 
     await db.runAsync(`UPDATE skills SET status='reviewing', updated_at=? WHERE id=?`, [Date.now(), skill.id]);
 
-    const content = skill.skill_type === 'prompt' ? skill.prompt_template : skill.code;
-    const testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : null;
-
-    const reviewPrompt = `你是一个 Skill 平台的 AI 评审专家。请对以下 Skill 进行全面评审。
-
-## Skill 基本信息
-- 名称：${skill.name}
-- 类型：${skill.type === 'internal' ? '内部Skill（员工使用）' : '外部Skill（客户使用）'}
-- 执行方式：${skill.skill_type === 'prompt' ? 'Prompt模板型' : '代码逻辑型'}
-- 描述：${skill.description || '（未填写）'}
-
-## Skill 内容
-\`\`\`
-${content}
-\`\`\`
-
-${testInputs ? `## 测试素材
-${JSON.stringify(testInputs, null, 2)}` : ''}
-
-## 请完成以下评审任务：
-
-1. **格式检查**：内容是否完整，关键占位符是否合理（仅限Prompt型）
-2. **逻辑评估**：能否完成描述中所述的任务
-3. **质量打分**：0-100分，给出理由
-4. **优点**：列举3-5条具体优点
-5. **不足**：列举具体问题和改进建议
-${skill.type === 'external' ? `6. **H5字段建议**：分析该Skill需要收集哪些客户信息和文件，给出建议的H5表单字段配置` : ''}
-
-请以JSON格式返回，结构如下：
-{
-  "score": 85,
-  "passed": true,
-  "strengths": ["...", "..."],
-  "weaknesses": ["...", "..."],
-  "suggestions": ["...", "..."],
-  "summary": "一段总体评述"${skill.type === 'external' ? `,
-  "h5_config_suggestion": {
-    "title": "...",
-    "description": "...",
-    "fields": [{ "key": "field_key", "label": "显示标签", "type": "text|number|textarea|select|date", "required": true, "options": [] }],
-    "uploads": { "accept": ["application/pdf", "image/*"], "maxFiles": 3, "maxSizeMB": 20, "label": "上传说明" }
-  }` : ''}
-}`;
+    const testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : undefined;
 
     let reviewResult: any;
     try {
-      const aiRes = await runAI(reviewPrompt, {
+      reviewResult = await runSkillReviewAgent({
+        skillId: skill.id,
+        skillName: skill.name,
+        skillDescription: skill.description || undefined,
+        skillVisibility: skill.type === 'external' ? 'external' : 'internal',
+        testInputs,
         model: skill.preferred_model || undefined,
-        fallback: skill.fallback_model || undefined,
-        systemPrompt: '你是 Skill 平台的 AI 评审助手，请只返回合法 JSON，不要有其他文字。',
+        fallbackModel: skill.fallback_model || undefined,
+        onProgress: (p) => {
+          // 日志格式和沙箱一致：[review] {ts, step, detail}
+          console.log(`[review] ${JSON.stringify(p)}`);
+        },
       });
-      const jsonMatch = aiRes.text.match(/\{[\s\S]*\}/);
-      reviewResult = jsonMatch ? JSON.parse(jsonMatch[0]) : { score: 0, passed: false, summary: aiRes.text };
     } catch (aiErr: any) {
-      reviewResult = { score: 0, passed: false, summary: `AI评审失败: ${aiErr.message}` };
+      reviewResult = { score: 0, passed: false, summary: `AI评审失败: ${aiErr.message}`, strengths: [], weaknesses: [], suggestions: [] };
     }
 
     const finalStatus = reviewResult.passed ? 'approved' : 'rejected';
