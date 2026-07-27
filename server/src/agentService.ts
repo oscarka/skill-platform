@@ -258,6 +258,8 @@ async function handleHealthSkill(
       userInputs:    { ticket: sandboxUserMessage },
       model:         'gemini-3.6-flash',
       aiKey:         apiKey,
+      // Gemini OpenAI 兼容端点 — Cloud Run Job 需要完整 base URL 才能拼出 /chat/completions
+      aiBaseUrl:     'https://generativelanguage.googleapis.com/v1beta/openai',
       callbackUrl:   jobCallbackUrl,
       sandboxSecret: process.env.SANDBOX_SECRET || 'sandbox-secret-2024',
       caseCount:     1,
