@@ -43,7 +43,7 @@ export interface SandboxTestResult {
 /**
  * 对一个 Skill 跑沙箱测试，结果写入数据库
  */
-export async function runSandboxTest(skillId: string, oauthTokens?: string, caseCount: number = 1): Promise<void> {
+export async function runSandboxTest(skillId: string, oauthTokens?: string, caseCount: number = 1, manualTestInput?: string, attachmentGcsPaths: string[] = [], overrideModel?: string): Promise<void> {
   const t0 = Date.now();
 
   // 如果没有显式传入 token，从 DB 自动取存储的 MCP OAuth token
@@ -101,6 +101,12 @@ export async function runSandboxTest(skillId: string, oauthTokens?: string, case
       dbSkillType === 'plugin' ||
       dbSkillType === 'code';
 
+    // overrideModel 优先级：本次请求传入 > Skill 配置 > 全局默认
+    if (overrideModel) {
+      skill.preferred_model = overrideModel;
+      console.log(`[SandboxService] Model overridden for this run: ${overrideModel}`);
+    }
+
     console.log(`[SandboxService] Routing: dbSkillType=${dbSkillType} parsedSkillType=${parsed.skillType} → ${needsSandbox ? 'SANDBOX' : 'PROMPT_EVAL'}`);
 
     let result: SandboxTestResult;
@@ -108,7 +114,7 @@ export async function runSandboxTest(skillId: string, oauthTokens?: string, case
     if (needsSandbox) {
       if (USE_CLOUD_RUN) {
         // ── Cloud Run Job 沙箱执行路径 ──────────────────────────────────────
-      result = await runCloudRunJobTest(skill, parsed, t0, oauthTokens, caseCount);
+      result = await runCloudRunJobTest(skill, parsed, t0, oauthTokens, caseCount, manualTestInput, attachmentGcsPaths);
       } else {
         // ── 本地 Docker 路径（开发用）──────────────────────────────────────
         result = await runDockerReActLoop(skill, parsed, t0);
@@ -116,6 +122,7 @@ export async function runSandboxTest(skillId: string, oauthTokens?: string, case
     } else {
       result = await runPromptReActLoop(parsed, t0);
     }
+
 
     // 写入结果
     await db.runAsync(
@@ -798,7 +805,9 @@ async function runCloudRunJobTest(
   parsed: ParsedSkill,
   t0: number,
   oauthTokens?: string,
-  caseCount: number = 1
+  caseCount: number = 1,
+  manualTestInput?: string,
+  attachmentGcsPaths: string[] = []
 ): Promise<SandboxTestResult> {
   const skillId = skill.id as string;
   const content = skill.prompt_template || skill.code || '';
@@ -811,34 +820,61 @@ async function runCloudRunJobTest(
 
   await appendProgress(skillId, { step: 'submit', detail: 'Submitting Cloud Run Job...' });
 
-  // 获取 AI 配置（主 + 备用 provider，仿 OpenClaw FailoverError 多 provider 切换）
+  // 获取 AI 配置（根据实际使用模型选择 provider）
   const getSetting = (k: string) => db.getAsync<{value:string}>('SELECT value FROM settings WHERE key=?',[k]).then(r=>r?.value||'');
-  const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
-    getSetting('default_model'),
-    getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
-    getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
-    // fallback：如果主是 doubao 则备用 deepseek，反之亦然
-    getSetting('doubao_api_key').then(k => k
-      ? getSetting('deepseek_api_key')       // 主是 doubao，备用 deepseek
-      : getSetting('doubao_api_key')),        // 主是 deepseek，备用 doubao
-    getSetting('doubao_base_url').then(u => u
-      ? getSetting('deepseek_base_url')
-      : getSetting('doubao_base_url')),
-  ]);
+
+  // 优先级：skill.preferred_model (已被 overrideModel 覆盖) > DB default_model > 硬编码默认
+  const dbDefaultModel = await getSetting('default_model');
+  const effectiveModel = skill.preferred_model || dbDefaultModel || 'doubao-seed-1-8-251228';
+
+  // 根据模型名确定 provider，选择对应的 API key 和 base URL
+  const isGemini = effectiveModel.startsWith('gemini-');
+  const isDeepSeek = effectiveModel.startsWith('deepseek-');
+
+  let aiKey: string, aiBase: string, fallbackKey: string, fallbackBase: string;
+
+  if (isGemini) {
+    // Gemini 走 Google AI Studio OpenAI 兼容端点
+    aiKey = await getSetting('gemini_api_key');
+    aiBase = 'https://generativelanguage.googleapis.com/v1beta/openai';
+    // fallback 用 doubao
+    fallbackKey = await getSetting('doubao_api_key') || await getSetting('deepseek_api_key');
+    fallbackBase = await getSetting('doubao_base_url') || await getSetting('deepseek_base_url');
+  } else if (isDeepSeek) {
+    aiKey = await getSetting('deepseek_api_key');
+    aiBase = await getSetting('deepseek_base_url');
+    fallbackKey = await getSetting('doubao_api_key');
+    fallbackBase = await getSetting('doubao_base_url');
+  } else {
+    // 默认 doubao
+    aiKey = await getSetting('doubao_api_key') || await getSetting('deepseek_api_key');
+    aiBase = await getSetting('doubao_base_url') || await getSetting('deepseek_base_url');
+    fallbackKey = aiKey ? (await getSetting('deepseek_api_key')) : (await getSetting('doubao_api_key'));
+    fallbackBase = aiBase ? (await getSetting('deepseek_base_url')) : (await getSetting('doubao_base_url'));
+  }
+
+  console.log(`[SandboxService] Effective model: ${effectiveModel} (provider: ${isGemini ? 'gemini' : isDeepSeek ? 'deepseek' : 'doubao'})`);
 
   // 构建 callback URL（runner.py 会把进度 POST 到这里）
   const serviceUrl = process.env.SERVICE_URL || '';
   const callbackUrl = serviceUrl ? `${serviceUrl}/api/skills/${skillId}/sandbox-callback` : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  // skillMdB64 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
-  let testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : {};
+  // ── 测试输入优先级：手工填写 > DB存储 > AI自动生成 ─────────────────────────────
+  let testInputs: any = {};
 
-  // ── 自动生成测试数据（当没有手动指定时）──────────────────────────────────
-  // 类比 OpenClaw 的 auto-test-data 生成机制
-  if (!testInputs || Object.keys(testInputs).length === 0) {
-    try {
-      const genPrompt = `根据以下 Skill 的说明，生成 2-3 个真实的测试用例输入（JSON 格式）。
+  if (manualTestInput && manualTestInput.trim()) {
+    // 手工模式：用户直接填写，封装成单个用例，不自动生成
+    testInputs = { "用户输入": manualTestInput.trim() };
+    console.log(`[SandboxService] Manual test input provided (${manualTestInput.length} chars), skipping auto-generation`);
+  } else {
+    testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : {};
+
+    // ── 自动生成测试数据（当没有手动指定时）──────────────────────────────────
+    // 类比 OpenClaw 的 auto-test-data 生成机制
+    if (!testInputs || Object.keys(testInputs).length === 0) {
+      try {
+        const genPrompt = `根据以下 Skill 的说明，生成 2-3 个真实的测试用例输入（JSON 格式）。
 要求：
 - 模拟真实用户请求，具体、有意义，不要空泛
 - 只输出 JSON 对象，不要解释
@@ -850,12 +886,13 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
 输出格式示例：
 {"test_case_1": "具体的测试请求1", "test_case_2": "具体的测试请求2"}`;
 
-      const genResp = await runAI(genPrompt, { temperature: 0.7, maxTokens: 300 });
-      const jm = genResp.text.match(/\{[\s\S]*\}/);
-      if (jm) testInputs = JSON.parse(jm[0]);
-      console.log(`[SandboxService] Auto-generated test inputs for "${parsed.name}":`, JSON.stringify(testInputs).slice(0, 150));
-    } catch (e) {
-      console.warn('[SandboxService] Failed to auto-generate test inputs, using {}');
+        const genResp = await runAI(genPrompt, { temperature: 0.7, maxTokens: 300 });
+        const jm = genResp.text.match(/\{[\s\S]*\}/);
+        if (jm) testInputs = JSON.parse(jm[0]);
+        console.log(`[SandboxService] Auto-generated test inputs for "${parsed.name}":`, JSON.stringify(testInputs).slice(0, 150));
+      } catch (e) {
+        console.warn('[SandboxService] Failed to auto-generate test inputs, using {}');
+      }
     }
   }
 
@@ -870,12 +907,21 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     }
   } catch { /* ignore if table doesn't exist yet */ }
 
+  // ── 注入附件信息（如有）─────────────────────────────────────────────────────
+  if (attachmentGcsPaths && attachmentGcsPaths.length > 0) {
+    if (typeof testInputs === 'object' && !Array.isArray(testInputs)) {
+      testInputs['__attachments__'] = attachmentGcsPaths;
+      console.log(`[SandboxService] Injecting ${attachmentGcsPaths.length} attachment(s):`, attachmentGcsPaths);
+    }
+  }
+
   // 提交 Cloud Run Job（传主+备用 provider，仿 OpenClaw FailoverError）
   const { executionId, executionName } = await submitSandboxJob({
+
     skillId,
     // skillMd 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
     userInputs:       testInputs,
-    model,
+    model:            effectiveModel,
     aiKey,
     aiBaseUrl:        aiBase,
     fallbackAiKey:    fallbackKey,
@@ -886,6 +932,7 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     oauthTokens:      oauthTokens || '',
     caseCount:        caseCount,
   });
+
 
   await appendProgress(skillId, {
     step: 'running',
@@ -979,6 +1026,6 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
     test_results: aiEval?.test_results || callbackResult?.test_results || [],
     durationMs: Date.now() - t0,
     testedAt: Date.now(),
-    model,
+    model: effectiveModel,
   };
 }

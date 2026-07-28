@@ -43,16 +43,24 @@ export const api = {
       request<any>(`/skills/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) }),
     importClawhub: (url: string, type = 'external') =>
       request<any>('/skills/import-clawhub', { method: 'POST', body: JSON.stringify({ url, type }) }),
-    sandboxTest: async (id: string, oauthTokens?: string, count: number = 1) => {
+    sandboxTest: async (id: string, oauthTokens?: string, count: number = 1, manualTestInput?: string, attachmentGcsPaths: string[] = [], overrideModel?: string) => {
       const res = await fetch(`${API_BASE}/skills/${id}/sandbox-test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...(oauthTokens ? { oauthTokens } : {}), count }),
+        body: JSON.stringify({
+          ...(oauthTokens ? { oauthTokens } : {}),
+          count,
+          ...(manualTestInput ? { manualTestInput } : {}),
+          ...(attachmentGcsPaths.length > 0 ? { attachmentGcsPaths: JSON.stringify(attachmentGcsPaths) } : {}),
+          ...(overrideModel ? { overrideModel } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok && res.status !== 202) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     },
+
+
     sandboxCancel: (id: string) =>
       request<any>(`/skills/${id}/sandbox-cancel`, { method: 'POST' }),
     install: (id: string) =>

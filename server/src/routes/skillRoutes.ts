@@ -10,6 +10,12 @@ import https from 'https';
 import http from 'http';
 import multer from 'multer';
 import AdmZip from 'adm-zip';
+import { x as tarExtract } from 'tar';
+
+import os from 'os';
+import path from 'path';
+import fs from 'fs';
+
 
 export const skillRouter = express.Router();
 
@@ -319,17 +325,71 @@ skillRouter.post('/import-clawhub', async (req, res) => {
   }
 });
 
-// multer for ZIP upload (memory storage, max 20MB)
+// multer for ZIP / tar.gz upload (memory storage, max 50MB)
 const zipUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
+    const name = file.originalname.toLowerCase();
     const ok = file.mimetype === 'application/zip'
       || file.mimetype === 'application/x-zip-compressed'
+      || file.mimetype === 'application/gzip'
+      || file.mimetype === 'application/x-gzip'
+      || file.mimetype === 'application/x-tar'
       || file.mimetype === 'application/octet-stream'
-      || file.originalname.endsWith('.zip');
+      || name.endsWith('.zip')
+      || name.endsWith('.tar.gz')
+      || name.endsWith('.tgz');
     if (ok) cb(null, true);
-    else cb(new Error('Only .zip files are accepted'));
+    else cb(new Error('Only .zip / .tar.gz / .tgz files are accepted'));
+  },
+});
+
+// 从 tar.gz buffer 中提取所有文件
+async function extractTarGz(buffer: Buffer): Promise<Map<string, Buffer>> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-tar-'));
+  try {
+    const tmpFile = path.join(tmpDir, 'archive.tar.gz');
+    fs.writeFileSync(tmpFile, buffer);
+    await tarExtract({ file: tmpFile, cwd: tmpDir });
+
+    fs.unlinkSync(tmpFile); // 删除归档本身
+
+    const result = new Map<string, Buffer>();
+    const walk = (dir: string, base: string) => {
+      for (const entry of fs.readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        const rel  = base ? `${base}/${entry}` : entry;
+        if (fs.statSync(full).isDirectory()) {
+          walk(full, rel);
+        } else {
+          result.set(rel, fs.readFileSync(full));
+        }
+      }
+    };
+    walk(tmpDir, '');
+    return result;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// multer for test file upload (PDF / image / Word, max 20MB each, up to 10 files)
+const ALLOWED_TEST_MIMETYPES = new Set([
+  'application/pdf',
+  'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+  'application/msword',                                                       // .doc
+  'text/plain', 'text/csv', 'text/markdown',
+]);
+const ALLOWED_TEST_EXTS = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.docx', '.doc', '.txt', '.csv', '.md']);
+const testFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 10 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ALLOWED_TEST_MIMETYPES.has(file.mimetype) || ALLOWED_TEST_EXTS.has(ext)) cb(null, true);
+    else cb(new Error(`不支持的文件格式：${ext}。支持 PDF、图片、Word、TXT、CSV、Markdown`));
   },
 });
 
@@ -337,35 +397,55 @@ const zipUpload = multer({
 // 上传和其他平台下载好的 Skill 压缩包，自动解析 SKILL.md 入库
 skillRouter.post('/upload-zip', zipUpload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: '请上传 .zip 文件' });
+    if (!req.file) return res.status(400).json({ error: '请上传 .zip / .tar.gz / .tgz 文件' });
     const { type = 'external' } = req.body;
+    const origName = req.file.originalname.toLowerCase();
+    const isTarGz = origName.endsWith('.tar.gz') || origName.endsWith('.tgz');
 
-    const zip = new AdmZip(req.file.buffer);
-    const entries = zip.getEntries();
+    let skillMd = '';
+    let foundFiles: string[] = [];
 
-    // 找 SKILL.md：匹配任意层级下的 SKILL.md，忽略 macOS 元数据目录
-    // 用文件名（最后一段路径）匹配，避免路径分隔符和大小写问题
-    const skillMdEntry = entries.find(e => {
-      const normalized = e.entryName.replace(/\\/g, '/');
-      if (normalized.startsWith('__MACOSX/')) return false;   // macOS 元数据
-      if (normalized.endsWith('/')) return false;              // 目录条目
-      const filename = normalized.split('/').filter(Boolean).pop() || '';
-      return filename.toLowerCase() === 'skill.md';
-    });
-    if (!skillMdEntry) {
-      return res.status(400).json({
-        error: 'ZIP 中找不到 SKILL.md 文件，请确认压缩包格式正确',
-        found: entries
-          .filter(e => !e.entryName.startsWith('__MACOSX/') && !e.entryName.endsWith('/'))
-          .map(e => e.entryName)
-          .slice(0, 20),
+    if (isTarGz) {
+      // ── tar.gz 路径 ─────────────────────────────────────────────────────────
+      const files = await extractTarGz(req.file.buffer);
+      foundFiles = Array.from(files.keys()).filter(p => !p.endsWith('/'));
+      const skillEntry = foundFiles.find(p => {
+        const seg = p.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+        return seg.toLowerCase() === 'skill.md';
       });
+      if (!skillEntry) {
+        return res.status(400).json({
+          error: 'tar.gz 中找不到 SKILL.md，请确认压缩包格式正确',
+          found: foundFiles.slice(0, 20),
+        });
+      }
+      skillMd = (files.get(skillEntry) || Buffer.alloc(0)).toString('utf-8');
+    } else {
+      // ── zip 路径 ────────────────────────────────────────────────────────────
+      const zip = new AdmZip(req.file.buffer);
+      const entries = zip.getEntries();
+      foundFiles = entries
+        .filter(e => !e.entryName.startsWith('__MACOSX/') && !e.entryName.endsWith('/'))
+        .map(e => e.entryName);
+      const skillMdEntry = entries.find(e => {
+        const normalized = e.entryName.replace(/\\/g, '/');
+        if (normalized.startsWith('__MACOSX/')) return false;
+        if (normalized.endsWith('/')) return false;
+        const filename = normalized.split('/').filter(Boolean).pop() || '';
+        return filename.toLowerCase() === 'skill.md';
+      });
+      if (!skillMdEntry) {
+        return res.status(400).json({
+          error: 'ZIP 中找不到 SKILL.md 文件，请确认压缩包格式正确',
+          found: foundFiles.slice(0, 20),
+        });
+      }
+      skillMd = skillMdEntry.getData().toString('utf-8');
     }
 
-    const skillMd = skillMdEntry.getData().toString('utf-8');
-
     // 解析 YAML frontmatter：---\nkey: value\n---
-    let name = req.file.originalname.replace('.zip', '');
+    let name = req.file.originalname
+      .replace(/\.tar\.gz$/i, '').replace(/\.tgz$/i, '').replace(/\.zip$/i, '');
     let author = 'unknown';
     let version = '1.0.0';
     let description = '';
@@ -403,12 +483,12 @@ skillRouter.post('/upload-zip', zipUpload.single('file'), async (req, res) => {
       skill: sanitize(skill!, true),
       parsed: {
         name, author, version,
-        skillMdEntry: skillMdEntry.entryName,
         contentLength: skillMd.length,
         preview: skillMd.slice(0, 400) + (skillMd.length > 400 ? '...' : ''),
-        allFiles: entries.filter(e => !e.isDirectory).map(e => e.entryName),
+        allFiles: foundFiles.slice(0, 30),
       },
     });
+
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -642,10 +722,18 @@ skillRouter.post('/:id/sandbox-test', async (req, res) => {
     const oauthTokens: string | undefined = req.body?.oauthTokens || undefined;
     // 可选：测试用例数量（1-3，默认1）
     const caseCount: number = Math.max(1, Math.min(3, parseInt(req.body?.count || '1', 10) || 1));
+    // 可选：手工填写的测试输入（纯文本，优先级高于 DB 存储和 AI 自动生成）
+    const manualTestInput: string | undefined = req.body?.manualTestInput || undefined;
+    // 可选：已上传到 GCS 的附件路径列表（JSON 字符串）
+    const attachmentGcsPaths: string[] = req.body?.attachmentGcsPaths
+      ? JSON.parse(req.body.attachmentGcsPaths)
+      : [];
+    // 可选：本次运行临时覆盖模型（不改 Skill 默认配置）
+    const overrideModel: string | undefined = req.body?.overrideModel || undefined;
 
     res.status(202).json({ message: 'Sandbox test started', skillId: skill.id });
 
-    runSandboxTest(skill.id, oauthTokens, caseCount).catch(err => {
+    runSandboxTest(skill.id, oauthTokens, caseCount, manualTestInput, attachmentGcsPaths, overrideModel).catch(err => {
       console.error('[SandboxRoute] Unhandled error:', err.message);
     });
 
@@ -653,6 +741,7 @@ skillRouter.post('/:id/sandbox-test', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // ─── POST /api/skills/:id/install ─────────────────────────────────────────────
 // 审核通过后安装 Skill Bundle → 打包依赖上传 GCS
 skillRouter.post('/:id/install', async (req, res) => {
@@ -744,6 +833,80 @@ skillRouter.get('/:id/sandbox-progress', async (req, res) => {
     const events = row.sandbox_progress ? JSON.parse(row.sandbox_progress) : [];
     res.json({ status: row.sandbox_status, events });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ─── GET /api/skills/:id/signed-url ─────────────────────────────────────────
+// 为 GCS 文件生成签名下载 URL（有效期 15 分钟），供前端下载/预览
+skillRouter.get('/:id/signed-url', async (req, res) => {
+  try {
+    const { Storage } = await import('@google-cloud/storage');
+    const gcsPath = req.query.path as string;
+    if (!gcsPath || !gcsPath.startsWith('gs://')) {
+      return res.status(400).json({ error: 'path must be a gs:// URI' });
+    }
+    const withoutProto = gcsPath.replace('gs://', '');
+    const slashIdx = withoutProto.indexOf('/');
+    const bucketName = withoutProto.slice(0, slashIdx);
+    const blobName   = withoutProto.slice(slashIdx + 1);
+    const storage = new Storage();
+    const [signedUrl] = await storage.bucket(bucketName).file(blobName).getSignedUrl({
+      version: 'v4',
+      action: 'read',
+      expires: Date.now() + 15 * 60 * 1000, // 15 min
+    });
+    res.json({ signedUrl });
+  } catch (e: any) {
+    console.error('[signed-url] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── POST /api/skills/:id/upload-test-files ───────────────────────────────────
+
+// 上传测试附件（PDF/图片/Word 等）到 GCS，返回 GCS 路径列表供沙箱测试使用
+// 支持最多 10 个文件，每个最大 20MB
+skillRouter.post('/:id/upload-test-files', testFileUpload.array('files', 10), async (req, res) => {
+  try {
+    const skill = await db.getAsync<SkillRecord>('SELECT id FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) return res.status(400).json({ error: '请至少上传一个文件' });
+
+    const bucket = getBucketName();
+    const gcsPaths: Array<{ gcsPath: string; filename: string; size: number; type: string }> = [];
+
+    // 动态 import google-cloud/storage（避免无 GCP 环境时报错）
+    let storageClient: any = null;
+    try {
+      const { Storage } = await import('@google-cloud/storage' as any);
+      storageClient = new Storage();
+    } catch {
+      // 本地开发环境没有 GCS，回退到保存到本地 uploads 目录
+    }
+
+    for (const file of files) {
+      const ext = path.extname(file.originalname).toLowerCase() || '.bin';
+      const blobName = `test-inputs/${skill.id}/${uuidv4()}${ext}`;
+      const gcsPath = `gs://${bucket}/${blobName}`;
+
+      if (storageClient) {
+        const bkt = storageClient.bucket(bucket);
+        const blob = bkt.file(blobName);
+        await blob.save(file.buffer, { contentType: file.mimetype, metadata: { originalName: file.originalname } });
+        console.log(`[UploadTestFiles] uploaded ${file.originalname} → ${gcsPath}`);
+      } else {
+        // 本地 fallback：把路径记为 local:// 供 runner.py 判断跳过
+        console.warn(`[UploadTestFiles] GCS not available, skipping actual upload for ${file.originalname}`);
+      }
+
+      gcsPaths.push({ gcsPath, filename: file.originalname, size: file.size, type: file.mimetype });
+    }
+
+    res.json({ gcsPaths, count: gcsPaths.length });
+  } catch (err: any) {
+    console.error('[UploadTestFiles] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

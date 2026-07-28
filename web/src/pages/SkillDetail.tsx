@@ -1,11 +1,28 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import OutputRenderer from '../components/OutputRenderer';
+
 
 const STATUS_LABEL: Record<string, string> = {
   pending: '待审核', reviewing: 'AI 评审中…', published: '已发布',
   rejected: '已拒绝', disabled: '已禁用',
 };
+
+// 模型 ID 转显示名称
+const MODEL_SHORT: Record<string, string> = {
+  'gemini-2.0-flash':                    'Gemini 2.0 Flash',
+  'gemini-2.5-flash':                    'Gemini 2.5 Flash',
+  'gemini-2.5-flash-lite-preview-06-17': 'Gemini 2.5 Flash Lite',
+  'gemini-3.6-flash':                    'Gemini 3.6 Flash',
+  'doubao-seed-1-8-251228':              '豆包 Seed 1.8',
+  'doubao-seed-2-1-pro-260628':          '豆包 Seed 2.1 Pro',
+  'doubao-1-5-pro-32k-250115':           '豆包 1.5 Pro',
+  'doubao-1-5-lite-32k-250115':          '豆包 1.5 Lite',
+  'deepseek-chat':                       'DeepSeek Chat',
+  'deepseek-reasoner':                   'DeepSeek Reasoner',
+};
+
 
 export default function SkillDetail() {
   const { id } = useParams<{ id: string }>();
@@ -20,8 +37,22 @@ export default function SkillDetail() {
   const [sandboxing, setSandboxing] = useState(false);
   const [caseCount, setCaseCount] = useState(1);  // 测试用例数（1-3）
   const [sandboxProgress, setSandboxProgress] = useState<{step:string;detail:string;ts:string;elapsed_s?:number}[]>([]);
+  const [showManualTest, setShowManualTest] = useState(false);
+  const [manualInput, setManualInput] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showTrace, setShowTrace] = useState(false);
+  const [uploadingScripts, setUploadingScripts] = useState(false);
+  // 模型列表 + 临时覆盖模型
+  const [availableModels, setAvailableModels] = useState<{ id: string; label: string; provider: string }[]>([]);
+  const [overrideModel, setOverrideModel] = useState<string>(''); // '' = 使用 Skill 默认
+  // 多文件附件状态
+  const [attachments, setAttachments] = useState<Array<{ file: File; gcsPath?: string; uploading?: boolean; error?: string }>>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const MAX_FILES = 10;
+  const MAX_FILE_MB = 20;
+  const ALLOWED_EXTS = ['.pdf','.png','.jpg','.jpeg','.webp','.gif','.docx','.doc','.txt','.csv','.md'];
+  const formatBytes = (b: number) => b < 1024*1024 ? `${(b/1024).toFixed(1)} KB` : `${(b/1024/1024).toFixed(1)} MB`;
+
 
   const load = () => {
     api.skills.get(id!).then(d => {
@@ -32,6 +63,13 @@ export default function SkillDetail() {
   };
 
   useEffect(() => { load(); }, [id]);
+
+  // 加载可用模型列表
+  useEffect(() => {
+    fetch('/api/settings/models').then(r => r.json()).then(d => {
+      if (d.models) setAvailableModels(d.models);
+    }).catch(() => {});
+  }, []);
 
   // 轮询：sandbox_status === 'running' 时每 5 秒刷新 + 获取进度
   // 注意：done 后保留 events（不清空），让用户看到完整日志
@@ -182,18 +220,63 @@ export default function SkillDetail() {
     } catch (e: any) { flash('error', e.message); }
   };
 
-  const handleSandboxTest = async (withOAuth = false) => {
+  const handleSandboxTest = async (withOAuth = false, manualTestInput?: string) => {
     setSandboxing(true);
     try {
-      await api.skills.sandboxTest(id!, undefined, caseCount);
-      flash('success', `沙箱测试已启动（${caseCount} 个用例），AI 正在运行中…`);
+      // 上传尚未上传的附件
+      let gcsPaths: string[] = attachments.filter(a => a.gcsPath).map(a => a.gcsPath!);
+      const pendingFiles = attachments.filter(a => !a.gcsPath && !a.error);
+      if (pendingFiles.length > 0) {
+        const formData = new FormData();
+        pendingFiles.forEach(a => formData.append('files', a.file));
+        // 先标记为上传中
+        setAttachments(prev => prev.map(a => !a.gcsPath && !a.error ? { ...a, uploading: true } : a));
+        const resp = await fetch(`/api/skills/${id}/upload-test-files`, { method: 'POST', body: formData });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        const newPaths: string[] = (data.gcsPaths || []).map((g: any) => g.gcsPath);
+        gcsPaths = [...gcsPaths, ...newPaths];
+        setAttachments(prev => {
+          let idx = 0;
+          return prev.map(a => (!a.gcsPath && !a.error) ? { ...a, uploading: false, gcsPath: newPaths[idx++] } : a);
+        });
+      }
+
+      await api.skills.sandboxTest(id!, undefined, caseCount, manualTestInput, gcsPaths, overrideModel || undefined);
+
+      if (manualTestInput || gcsPaths.length > 0) {
+        flash('success', `手动测试已启动${gcsPaths.length > 0 ? `（含 ${gcsPaths.length} 个附件）` : ''}，AI 正在运行中…`);
+        setShowManualTest(false);
+        setManualInput('');
+        setAttachments([]);
+      } else {
+        flash('success', `沙箱测试已启动（${caseCount} 个用例），AI 正在运行中…`);
+      }
       load();
     } catch (e: any) { flash('error', e.message); }
     finally { setSandboxing(false); }
   };
 
-  const [uploadingScripts, setUploadingScripts] = useState(false);
+  // 添加文件（去重 + 校验）
+  const addFiles = (newFiles: FileList | File[]) => {
+    const arr = Array.from(newFiles);
+    const current = attachments;
+    const toAdd = arr.filter(f => {
+      const ext = '.' + f.name.split('.').pop()!.toLowerCase();
+      if (!ALLOWED_EXTS.includes(ext)) { flash('error', `不支持的格式：${f.name}`); return false; }
+      if (f.size > MAX_FILE_MB * 1024 * 1024) { flash('error', `文件过大：${f.name}（最大 ${MAX_FILE_MB}MB）`); return false; }
+      if (current.find(a => a.file.name === f.name && a.file.size === f.size)) return false; // 去重
+      return true;
+    });
+    if (current.length + toAdd.length > MAX_FILES) {
+      flash('error', `最多上传 ${MAX_FILES} 个文件`);
+      return;
+    }
+    setAttachments(prev => [...prev, ...toAdd.map(f => ({ file: f }))]);
+  };
+
   const handleUploadScripts = async (e: React.ChangeEvent<HTMLInputElement>) => {
+
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadingScripts(true);
@@ -230,35 +313,114 @@ export default function SkillDetail() {
       {msg && <div className={`alert alert-${msg.type}`}>{msg.text}</div>}
 
       {/* Action Bar */}
-      <div className="card mb-4">
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+      <div className="card mb-4" style={{ padding: '14px 16px' }}>
+
+        {/* ── 第一行：Skill 生命周期操作 ─────────────────────────────── */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid var(--gray-200)' }}>
           <button className="btn btn-secondary" onClick={handleReview} disabled={reviewing || skill.status === 'reviewing'}>
-            {reviewing ? '⏳ 评审中…' : '🤖 触发 AI 评审'}
+            {reviewing ? '⏳ 评审中…' : '🤖 AI 评审'}
           </button>
           {skill.status !== 'published' && (
             <button className="btn btn-success" onClick={handlePublish}
               disabled={skill.type === 'external' && !skill.h5_config}>
-              ✅ 发布 Skill
+              ✅ 发布
             </button>
           )}
-          <button className="btn btn-danger btn-sm" onClick={() => setShowReject(true)}>❌ 拒绝</button>
+          {skill.status === 'published' && (
+            <span style={{ fontSize: '.8rem', color: 'var(--success)', fontWeight: 600 }}>✅ 已发布</span>
+          )}
+          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: '.78rem', color: 'var(--gray-400)' }}>
+            创建：{new Date(skill.created_at).toLocaleDateString('zh-CN')}
+          </span>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ color: 'var(--gray-500)', padding: '3px 8px' }}
+            onClick={() => setShowReject(true)}
+            title="拒绝这个 Skill">
+            ✗ 拒绝
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ color: 'var(--danger)', padding: '3px 8px' }}
+            onClick={async () => {
+              if (!confirm(`确定要删除 Skill「${skill.name}」吗？此操作不可恢复。`)) return;
+              try { await api.skills.delete(id!); navigate('/skills'); } catch { alert('删除失败'); }
+            }}
+            title="永久删除">
+            🗑
+          </button>
+        </div>
+
+        {/* ── 第二行：测试工具 + 模型显示/切换 ──────────────────────── */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+
+          {/* 模型标签 + 临时切换 */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: 'var(--gray-100)', borderRadius: 8,
+            padding: '4px 10px', fontSize: '.82rem', color: 'var(--gray-600)',
+            border: '1px solid var(--gray-200)',
+          }}>
+            <span title={`Skill 配置模型：${skill.preferred_model || '全局默认'}`}>
+              🤖 {overrideModel
+                ? <><s style={{ opacity: .45 }}>{MODEL_SHORT[skill.preferred_model || ''] || skill.preferred_model || '默认'}</s> → {MODEL_SHORT[overrideModel] || overrideModel}</>
+                : (MODEL_SHORT[skill.preferred_model || ''] || skill.preferred_model || '全局默认')}
+            </span>
+            <select
+              value={overrideModel}
+              onChange={e => setOverrideModel(e.target.value)}
+              disabled={sandboxing || skill.sandbox_status === 'running'}
+              title="临时切换本次沙箱测试的模型（不改 Skill 默认配置）"
+              style={{ fontSize: '.8rem', border: 'none', background: 'transparent', color: 'var(--primary)', cursor: 'pointer', padding: '0 2px' }}>
+              <option value="">（切换模型）</option>
+              {availableModels.map(m => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+            {overrideModel && (
+              <button
+                onClick={() => setOverrideModel('')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger)', fontSize: '.8rem', padding: 0 }}
+                title="恢复 Skill 默认模型">×</button>
+            )}
+          </div>
+
+          <div style={{ width: 1, height: 22, background: 'var(--gray-200)' }} />
+
+          {/* 用例数 */}
           <select
             value={caseCount}
             onChange={e => setCaseCount(Number(e.target.value))}
             disabled={sandboxing || skill.sandbox_status === 'running'}
             title="测试用例数量（默认1，最多3）"
-            style={{ fontSize: '12px', padding: '2px 6px', borderRadius: '4px', border: '1px solid #ccc', marginRight: '2px' }}>
+            style={{ fontSize: '.82rem', padding: '4px 6px', borderRadius: 6, border: '1px solid var(--gray-200)', color: 'var(--gray-700)' }}>
             <option value={1}>1 用例</option>
             <option value={2}>2 用例</option>
             <option value={3}>3 用例</option>
           </select>
+
+          {/* 沙箱测试 */}
           <button
             className="btn btn-secondary btn-sm"
             onClick={() => handleSandboxTest(false)}
             disabled={sandboxing || skill.sandbox_status === 'running'}
-            title="在 AI 沙箱中测试这个技能的 ReAct 循环">
-            {skill.sandbox_status === 'running' ? '🔄 测试运行中…' : '🐳 沙箱测试'}
+            title={overrideModel ? `用 ${MODEL_SHORT[overrideModel] || overrideModel} 跑沙箱` : '在 AI 沙箱中测试这个技能'}>
+            {skill.sandbox_status === 'running' ? '🔄 运行中…' : '🐳 沙箱测试'}
+            {overrideModel && <span style={{ fontSize: '.72rem', marginLeft: 4, opacity: .8 }}>({MODEL_SHORT[overrideModel] || overrideModel})</span>}
           </button>
+
+          {/* 手动测试 */}
+          <button
+            className="btn btn-sm"
+            style={{ background: showManualTest ? 'var(--primary)' : undefined, color: showManualTest ? '#fff' : undefined }}
+            onClick={() => { setShowManualTest(v => !v); setManualInput(''); }}
+            disabled={sandboxing || skill.sandbox_status === 'running'}
+            title="手动填写测试内容，直接发送给沙箱">
+            ✏️ 手动测试
+          </button>
+
+          {/* 停止 */}
           {skill.sandbox_status === 'running' && (
             <button
               className="btn btn-danger btn-sm"
@@ -273,6 +435,8 @@ export default function SkillDetail() {
               ⏹ 停止
             </button>
           )}
+
+          {/* Google OAuth */}
           {needsGoogleOAuth(skill) && (
             <button
               className="btn btn-sm"
@@ -282,34 +446,117 @@ export default function SkillDetail() {
               🔗 授权 Google
             </button>
           )}
-          <button
-            className="btn btn-sm"
-            style={{ color: 'var(--danger)' }}
-            onClick={async () => {
-              if (!confirm(`确定要删除 Skill「${skill.name}」吗？此操作不可恢复。`)) return;
-              try { await api.skills.delete(id!); navigate('/skills'); } catch { alert('删除失败'); }
-            }}
-            title="永久删除这个 Skill">
-            🗑️ 删除
-          </button>
-          <span className="text-muted text-xs ml-auto">
-            创建：{new Date(skill.created_at).toLocaleDateString('zh-CN')}
-            {skill.preferred_model && ` · 模型：${skill.preferred_model}`}
-          </span>
         </div>
+
+        {/* H5 配置提示 */}
         {skill.type === 'external' && !skill.h5_config && (
           <div className="alert alert-info" style={{ marginTop: 10, marginBottom: 0 }}>
             💡 外部 Skill 发布前需先确认 H5 配置。请先触发 AI 评审获取建议，然后在下方确认。
           </div>
         )}
         {showReject && (
-          <div style={{ marginTop: 14, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
             <input className="form-input" style={{ flex: 1 }} placeholder="拒绝原因…" value={rejectReason} onChange={e => setRejectReason(e.target.value)} />
             <button className="btn btn-danger btn-sm" onClick={handleReject}>确认拒绝</button>
             <button className="btn btn-ghost btn-sm" onClick={() => setShowReject(false)}>取消</button>
           </div>
         )}
       </div>
+
+
+      {/* Manual Test Panel */}
+      {showManualTest && (
+        <div className="card mb-4" style={{ borderLeft: '3px solid var(--primary)', background: 'var(--gray-50)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <div className="card-title" style={{ margin: 0 }}>✏️ 手动测试输入</div>
+            <span style={{ fontSize: '.8rem', color: 'var(--gray-400)' }}>填写内容或上传附件，直接发送给沙箱运行</span>
+          </div>
+
+          {/* 文字输入 */}
+          <div className="form-group" style={{ marginBottom: 10 }}>
+            <textarea
+              className="form-textarea"
+              rows={4}
+              placeholder={"输入测试内容（可选）…\n例如：帮我分析这份报告\n也可以只上传文件，不填文字"}
+              value={manualInput}
+              onChange={e => setManualInput(e.target.value)}
+              style={{ fontFamily: 'inherit', fontSize: '.9rem' }}
+            />
+          </div>
+
+          {/* 文件上传区 */}
+          <div className="form-group" style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginBottom: 6 }}>
+              📎 附件（可选，支持 PDF / 图片 / Word / TXT / CSV）
+              <span style={{ float: 'right', color: attachments.length >= MAX_FILES ? 'var(--danger)' : 'var(--gray-400)' }}>
+                {attachments.length} / {MAX_FILES} 个文件
+              </span>
+            </div>
+            <div
+              onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={e => { e.preventDefault(); setIsDragOver(false); addFiles(e.dataTransfer.files); }}
+              onClick={() => document.getElementById('test-file-input')?.click()}
+              style={{
+                border: `2px dashed ${isDragOver ? 'var(--primary)' : 'var(--gray-300)'}`,
+                borderRadius: 8, padding: '16px 12px', textAlign: 'center', cursor: 'pointer',
+                background: isDragOver ? 'var(--primary-light, #f0f4ff)' : 'white',
+                transition: 'all .15s', fontSize: '.85rem', color: 'var(--gray-400)',
+                display: attachments.length >= MAX_FILES ? 'none' : 'block',
+              }}
+            >
+              📂 拖拽文件到这里，或点击选择<br/>
+              <span style={{ fontSize: '.75rem' }}>支持 PDF / PNG / JPG / WEBP / DOCX / TXT / CSV · 单文件最大 {MAX_FILE_MB}MB</span>
+            </div>
+            <input
+              id="test-file-input" type="file" multiple
+              accept={ALLOWED_EXTS.join(',')}
+              style={{ display: 'none' }}
+              onChange={e => { addFiles(e.target.files!); e.target.value = ''; }}
+            />
+
+            {/* 已选文件列表 */}
+            {attachments.length > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {attachments.map((a, i) => (
+                  <div key={i} style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px',
+                    background: a.error ? '#fff0f0' : a.gcsPath ? '#f0fff4' : 'white',
+                    border: `1px solid ${a.error ? 'var(--danger)' : a.gcsPath ? 'var(--success)' : 'var(--gray-200)'}`,
+                    borderRadius: 6, fontSize: '.82rem',
+                  }}>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {a.uploading ? '⏳' : a.error ? '❌' : a.gcsPath ? '✅' : '📄'} {a.file.name}
+                    </span>
+                    <span style={{ color: 'var(--gray-400)', flexShrink: 0 }}>{formatBytes(a.file.size)}</span>
+                    {a.error && <span style={{ color: 'var(--danger)', fontSize: '.75rem' }}>{a.error}</span>}
+                    {!a.uploading && (
+                      <button
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--gray-400)', fontSize: '.9rem', padding: '0 2px' }}
+                        onClick={e => { e.stopPropagation(); setAttachments(prev => prev.filter((_, j) => j !== i)); }}
+                      >✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => handleSandboxTest(false, manualInput || undefined)}
+              disabled={sandboxing || (!manualInput.trim() && attachments.length === 0)}>
+              {sandboxing ? '⏳ 启动中…' : '▶️ 运行'}
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => { setShowManualTest(false); setManualInput(''); setAttachments([]); }}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* AI Review */}
       {review && (
@@ -513,11 +760,16 @@ export default function SkillDetail() {
                   <pre style={{ background: '#f8f9fa', border: '1px solid var(--gray-200)', borderRadius: 6, padding: '10px 12px', fontSize: '.82rem', whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{st.testInput}</pre>
                 </div>
 
-                {/* 最终输出 */}
+                {/* 最终输出 — 智能多格式渲染 */}
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: '.8rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 4 }}>📤 最终输出</div>
-                  <pre style={{ background: '#f8f9fa', border: '1px solid var(--gray-200)', borderRadius: 6, padding: '10px 12px', fontSize: '.82rem', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>{st.finalOutput}{st.notes ? `\n\n💡 ${st.notes}` : ''}</pre>
+                  <div style={{ fontSize: '.8rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    📤 最终输出
+                    <span style={{ fontSize: '.72rem', color: 'var(--gray-400)', fontWeight: 400 }}>(自动识别：文本/Markdown/图片/文件/HTML/JSON)</span>
+                  </div>
+                  <OutputRenderer text={(st.finalOutput || '') + (st.notes ? `\n\n💡 ${st.notes}` : '')} skillId={id!} />
                 </div>
+
+
 
                 {/* 逐 Test Case 详细结果 */}
                 {st.test_results?.length > 0 && (
@@ -531,7 +783,7 @@ export default function SkillDetail() {
                         <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginBottom: 4 }}>用户输入：</div>
                         <pre style={{ background: '#f0f4ff', borderRadius: 4, padding: '6px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto', margin: '0 0 8px' }}>{tr.input}</pre>
                         <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', marginBottom: 4 }}>Skill 完整回复：</div>
-                        <pre style={{ background: '#f0fff4', borderRadius: 4, padding: '6px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: '0 0 8px' }}>{tr.response}</pre>
+                        <pre style={{ background: '#f0fff4', borderRadius: 4, padding: '6px 10px', fontSize: '.8rem', whiteSpace: 'pre-wrap', maxHeight: 800, overflow: 'auto', margin: '0 0 8px' }}>{tr.response}</pre>
                         {tr.evaluation && (
                           <div style={{ fontSize: '.78rem', color: 'var(--gray-600)', fontStyle: 'italic' }}>📝 评价：{tr.evaluation}</div>
                         )}

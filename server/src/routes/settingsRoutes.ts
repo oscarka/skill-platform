@@ -91,8 +91,10 @@ settingsRouter.put('/', async (req, res) => {
 settingsRouter.get('/models', (_req, res) => {
   res.json({
     models: [
-      { id: 'gemini-2.0-flash',              provider: 'gemini',   label: 'Gemini 2.0 Flash（多模态）' },
-      { id: 'gemini-2.5-flash',              provider: 'gemini',   label: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.0-flash',                       provider: 'gemini',   label: 'Gemini 2.0 Flash（多模态）' },
+      { id: 'gemini-2.5-flash',                       provider: 'gemini',   label: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-flash-lite-preview-06-17',    provider: 'gemini',   label: 'Gemini 2.5 Flash Lite（轻量快速版）' },
+      { id: 'gemini-3.6-flash',                       provider: 'gemini',   label: 'Gemini 3.6 Flash（新一代，高性能）' },
       { id: 'doubao-seed-1-8-251228',        provider: 'doubao',   label: '豆包 Seed 1.8 ✅（推荐，速度+质量均衡）' },
       { id: 'doubao-seed-2-1-pro-260628',    provider: 'doubao',   label: '豆包 Seed 2.1 Pro（最新旗舰，推理强，较慢）' },
       { id: 'doubao-1-5-pro-32k-250115',     provider: 'doubao',   label: '豆包 1.5 Pro 32K（速度快，备用）' },
@@ -102,3 +104,80 @@ settingsRouter.get('/models', (_req, res) => {
     ]
   });
 });
+
+/**
+ * POST /api/settings/test-key
+ * Test if an API key is valid by making a minimal API call.
+ * Body: { provider: 'gemini' | 'doubao' | 'deepseek' }
+ */
+settingsRouter.post('/test-key', async (req, res) => {
+  const { provider } = req.body;
+  if (!provider || !['gemini', 'doubao', 'deepseek'].includes(provider)) {
+    return res.status(400).json({ error: 'provider must be gemini, doubao, or deepseek' });
+  }
+
+  const getSetting = (k: string) =>
+    db.getAsync<{value:string}>('SELECT value FROM settings WHERE key=?', [k]).then(r => r?.value || '');
+
+  try {
+    let apiKey: string, baseUrl: string, model: string;
+
+    if (provider === 'gemini') {
+      apiKey = await getSetting('gemini_api_key');
+      baseUrl = 'https://generativelanguage.googleapis.com/v1beta/openai';
+      model = 'gemini-2.5-flash';
+    } else if (provider === 'deepseek') {
+      apiKey = await getSetting('deepseek_api_key');
+      baseUrl = await getSetting('deepseek_base_url');
+      model = 'deepseek-chat';
+    } else {
+      apiKey = await getSetting('doubao_api_key');
+      baseUrl = await getSetting('doubao_base_url');
+      model = 'doubao-seed-1-8-251228';
+    }
+
+    if (!apiKey) {
+      return res.json({ ok: false, error: `${provider} API Key 未配置` });
+    }
+    if (provider !== 'gemini' && !baseUrl) {
+      return res.json({ ok: false, error: `${provider} Base URL 未配置` });
+    }
+
+    const t0 = Date.now();
+    const testResp = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'Hi, reply with just "ok"' }],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const elapsed = Date.now() - t0;
+
+    if (!testResp.ok) {
+      const errBody = await testResp.text();
+      let errMsg = `HTTP ${testResp.status}`;
+      try {
+        const errJson = JSON.parse(errBody);
+        errMsg += `: ${errJson.error?.message || errJson.message || errBody.slice(0, 100)}`;
+      } catch {
+        errMsg += `: ${errBody.slice(0, 100)}`;
+      }
+      return res.json({ ok: false, error: errMsg, elapsed });
+    }
+
+    const data = await testResp.json() as any;
+    const reply = data.choices?.[0]?.message?.content || '(no reply)';
+    return res.json({ ok: true, model, reply: reply.slice(0, 50), elapsed });
+
+  } catch (err: any) {
+    return res.json({ ok: false, error: err.message || String(err) });
+  }
+});
+

@@ -181,9 +181,13 @@ _MODEL_CONFIGS: dict = {
     "deepseek-chat":                {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
     "deepseek-coder":               {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
     "deepseek-reasoner":            {"context_window": 64_000,  "max_output": 16_000,  "max_input": 56_000,  "provider": "deepseek"},
-    # ── Gemini 系列（如有）─────────────────────────────────────────────────
-    "gemini-2.0-flash":             {"context_window": 1_048_576, "max_output": 8_192, "max_input": 1_040_000, "provider": "google"},
+    # ── Gemini 系列 ─────────────────────────────────────────────────────────
+    "gemini-2.0-flash":             {"context_window": 1_048_576, "max_output": 8_192, "max_input": 1_040_000, "provider": "google"},  # may be deprecated on v1beta/openai
+    "gemini-2.5-flash":             {"context_window": 1_048_576, "max_output": 65_536, "max_input": 1_000_000, "provider": "google"},
+    "gemini-2.5-flash-lite":        {"context_window": 1_048_576, "max_output": 65_536, "max_input": 1_000_000, "provider": "google"},
+    "gemini-3.6-flash":             {"context_window": 1_048_576, "max_output": 65_536, "max_input": 1_000_000, "provider": "google"},
     "gemini-1.5-pro":               {"context_window": 2_097_152, "max_output": 8_192, "max_input": 2_090_000, "provider": "google"},
+    "gemini-":                      {"context_window": 1_048_576, "max_output": 65_536, "max_input": 1_000_000, "provider": "google"},  # catch-all prefix for future Gemini models
     # ── 默认（未知模型）─────────────────────────────────────────────────────
     "_default":                     {"context_window": 128_000, "max_output": 4_096,   "max_input": 112_000, "provider": "unknown"},
 }
@@ -239,7 +243,7 @@ def resolve_model_config(model: str = None) -> dict:
 # 在模块加载时解析并缓存当前模型配置
 _CURRENT_MODEL_CONFIG = resolve_model_config(AI_MODEL)
 CONTEXT_WINDOW_TOKENS = _CURRENT_MODEL_CONFIG["context_window"]
-MAX_OUTPUT_TOKENS     = min(_CURRENT_MODEL_CONFIG["max_output"], 16_000)  # 沙箱场景下 16k 足够
+MAX_OUTPUT_TOKENS     = min(_CURRENT_MODEL_CONFIG["max_output"], 32_000)  # Gemini 支持 65k，豆包/DS 实际 16k
 print(f"[config] model={AI_MODEL!r} → context={CONTEXT_WINDOW_TOKENS//1000}k tokens "
       f"max_output={MAX_OUTPUT_TOKENS} source={_CURRENT_MODEL_CONFIG['source']}", flush=True)
 
@@ -923,6 +927,11 @@ def _parse_sse_stream(r) -> dict:
                 c["message"]["content"] += delta["content"]
             if delta.get("role"):
                 c["message"]["role"] = delta["role"]
+            # ── Gemini thinking delta ────────────────────────────────────
+            # Gemini thinking models stream thinking tokens via delta.thinking
+            thinking_delta = delta.get("thinking") or delta.get("thinking_content") or ""
+            if thinking_delta:
+                c["message"]["_thinking"] = c["message"].get("_thinking", "") + thinking_delta
             # ── tool_calls delta (OpenAI 风格) ─────────────────────────
             for tc_delta in delta.get("tool_calls", []):
                 tc_idx  = tc_delta.get("index", 0)
@@ -940,6 +949,12 @@ def _parse_sse_stream(r) -> dict:
                     tc["function"]["name"] += fn_delta["name"]
                 if fn_delta.get("arguments"):
                     tc["function"]["arguments"] += fn_delta["arguments"]
+                # ── Gemini 3.6 Flash: 保留 extra_content（含 thought_signature）────
+                # 发送 tool result 时 assistant 消息必须原样带回 thought_signature，
+                # 否则 Gemini 报 400 "Function call is missing a thought"
+                if tc_delta.get("extra_content"):
+                    tc["extra_content"] = tc_delta["extra_content"]
+
 
     # tool_calls 为空时删掉 key（和非流式格式保持一致）
     for c in choices.values():
@@ -953,7 +968,7 @@ def _parse_sse_stream(r) -> dict:
     }
 
 
-def _do_ai_call(messages: list, tools=None, first_token_timeout=45,
+def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
                 api_key: str = None, base_url: str = None, model: str = None) -> dict:
     """
     流式 SSE AI 调用（参照 OpenClaw stream:true + firstEventTimeoutMs 模式）。
@@ -974,6 +989,9 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=45,
     if tools:
         body["tools"]       = tools
         body["tool_choice"] = "auto"
+    # 注意：Gemini OpenAI 兼容端点不支持 'thinking' 字段（仅原生 Gemini API 支持）
+    # 不传该字段，模型自身内部会对应处理
+
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions",
@@ -987,7 +1005,7 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=45,
         with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
             # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
             try:
-                r.fp.raw._sock.settimeout(60)   # 每个 chunk 间隔最多 60s
+                r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
             except Exception:
                 pass
             return _parse_sse_stream(r)
@@ -1259,6 +1277,7 @@ def executor_react_loop(
 
         resp = call_ai(messages, tools=executor_tools)
         msg = resp["choices"][0]["message"]
+        msg.pop("_thinking", None)  # 清除内部字段，不影响消息历史
         messages.append(msg)
 
         tc_list = msg.get("tool_calls") or []
@@ -1405,14 +1424,14 @@ def evaluator_call(
     """
     cases_str = "\n\n".join([
         f"### 用例 {i+1}\n**用户输入**：{tc}\n\n"
-        f"**Executor 实际输出**：\n{res.get('output', '')[:3000]}\n\n"
+        f"**Executor 实际输出**：\n{res.get('output', '')[:8000]}\n\n"
         f"**实际工具调用记录**（用于判断是否真正获取了数据）：\n"
         f"{json.dumps(res.get('tool_calls_log', []), ensure_ascii=False)}"
         for i, (tc, res) in enumerate(zip(test_cases, executor_results))
     ])
 
     user_content = (
-        f"## SKILL.md\n\n{skill_md[:3000]}\n\n"
+        f"## SKILL.md\n\n{skill_md[:5000]}\n\n"
         f"## 各测试用例执行结果\n\n{cases_str}"
     )
 
@@ -1607,6 +1626,10 @@ def main():
         - ⚠️ 不要传 skill_system_prompt 参数——Skill 内容已在系统中自动加载，无需重复传入
         - invoke_skill 会以 Skill 的身份回答，返回真实的 Skill 输出
         - 每个测试用例调用一次 invoke_skill
+        - ⚠️ 【重要】如果用户消息区有"## 附件内容"部分，调用 invoke_skill 时必须把附件内容完整追加到 user_message 末尾
+          示例：user_message="请分析这份体检报告\n\n## 附件内容（共 1 个文件）\n【PDF 文件：xxx.pdf...（全文）】"
+          原因：invoke_skill 是独立子调用，附件内容不会自动传入，必须显式携带
+
 
         对 script Skill：
         - 用 exec 工具执行 Skill 的脚本
@@ -1663,6 +1686,12 @@ def main():
     """).strip()
 
 
+    # ── 提取附件列表（从 USER_INPUTS 中取出 __attachments__，不计入 CASE_COUNT）──
+    _raw_attachments: list = []
+    if isinstance(USER_INPUTS, dict) and "__attachments__" in USER_INPUTS:
+        _raw_attachments = USER_INPUTS.pop("__attachments__", []) or []
+        print(f"[main] Found {len(_raw_attachments)} attachment(s): {_raw_attachments}", flush=True)
+
     # 按 CASE_COUNT 截取测试用例（prompt 路径和 mcp 路径共用）
     if isinstance(USER_INPUTS, dict):
         _all_kv = list(USER_INPUTS.items())[:CASE_COUNT]
@@ -1675,14 +1704,87 @@ def main():
     _lim_len  = len(_limited_inputs) if isinstance(_limited_inputs, (dict, list)) else 1
     print(f"[main] CASE_COUNT={CASE_COUNT}, cases: {_orig_len} → {_lim_len}", flush=True)
 
-    user_msg = f"""## SKILL.md 内容
-{SKILL_MD}
+    # ── 解析附件内容 ──────────────────────────────────────────────────────────
+    def _extract_attachment_content(gcs_path: str) -> str:
+        """从 GCS 下载文件并提取文本内容，返回格式化字符串"""
+        import os as _os, tempfile as _tmp
+        filename = gcs_path.split("/")[-1]
+        ext = _os.path.splitext(filename)[1].lower()
+        tmp_path = _os.path.join(_tmp.gettempdir(), f"_attach_{filename}")
+        try:
+            from google.cloud import storage as gcs_lib
+            client = gcs_lib.Client()
+            bucket_name = gcs_path.replace("gs://", "").split("/")[0]
+            blob_name = "/".join(gcs_path.replace("gs://", "").split("/")[1:])
+            blob = client.bucket(bucket_name).blob(blob_name)
+            blob.download_to_filename(tmp_path)
+            print(f"[attachment] downloaded {filename} ({_os.path.getsize(tmp_path)} bytes)", flush=True)
+        except Exception as _e:
+            print(f"[attachment] GCS download failed for {filename}: {_e}", flush=True)
+            return f"[附件 {filename} 下载失败: {_e}]"
+        try:
+            if ext == ".pdf":
+                import pdfplumber
+                pages_text = []
+                with pdfplumber.open(tmp_path) as pdf:
+                    total = len(pdf.pages)
+                    for i, page in enumerate(pdf.pages[:30], 1):
+                        text = page.extract_text() or ""
+                        if text.strip():
+                            pages_text.append(f"--- 第 {i}/{total} 页 ---\n{text.strip()}")
+                content = "\n\n".join(pages_text) or "[PDF 内容为空或无法提取文字]"
+                return f"【PDF 文件：{filename}，共 {total} 页】\n{content}"
+            elif ext == ".docx":
+                import docx as _docx
+                doc = _docx.Document(tmp_path)
+                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+                content = "\n".join(paragraphs) or "[Word 文档内容为空]"
+                return f"【Word 文件：{filename}】\n{content}"
+            elif ext == ".doc":
+                return f"[附件 {filename} 为旧版 .doc 格式，请转为 .docx 或 PDF]"
+            elif ext in (".txt", ".md", ".csv"):
+                with open(tmp_path, "r", encoding="utf-8", errors="replace") as _f:
+                    text = _f.read(50000)
+                return f"【文本文件：{filename}】\n{text}"
+            elif ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                import base64 as _b64
+                with open(tmp_path, "rb") as _f:
+                    b64_data = _b64.b64encode(_f.read()).decode()
+                mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                            ".webp": "image/webp", ".gif": "image/gif"}
+                mime = mime_map.get(ext, "image/jpeg")
+                return f"__IMAGE_ATTACHMENT__:{mime}:{b64_data}"
+            else:
+                return f"[附件 {filename} 格式暂不支持：{ext}]"
+        except Exception as _e:
+            print(f"[attachment] parse error for {filename}: {_e}", flush=True)
+            return f"[附件 {filename} 解析出错: {_e}]"
+        finally:
+            try:
+                _os.remove(tmp_path)
+            except Exception:
+                pass
 
-## 测试输入
-{json.dumps(_limited_inputs, ensure_ascii=False, indent=2)}
+    _attachment_blocks: list = []
+    for _gcs_path in _raw_attachments:
+        _attachment_blocks.append(_extract_attachment_content(_gcs_path))
 
-请开始测试这个 Skill。
-    """.strip()
+    _attachment_section = ""
+    if _attachment_blocks:
+        _attachment_section = "\n\n## 附件内容（共 {} 个文件）\n{}".format(
+            len(_attachment_blocks), "\n\n".join(_attachment_blocks))
+        print(f"[main] Attachment section: {len(_attachment_section)} chars total", flush=True)
+
+    _is_manual = _lim_len > 0 and isinstance(_limited_inputs, dict) and "用户输入" in _limited_inputs
+    _inputs_json = json.dumps(_limited_inputs, ensure_ascii=False, indent=2)
+    _manual_warning = "\n⚠️ [手工指定] 请严格只使用下方这一个场景进行测试，不要自行添加其他用户或测试用例。" if _is_manual else ""
+    _manual_suffix = " (加载以上手工填写的输入，只跑这一个用例)" if _is_manual else ""
+    user_msg = (
+        f"## SKILL.md 内容\n{SKILL_MD}\n\n"
+        f"## 测试输入{_manual_warning}\n{_inputs_json}"
+        f"{_attachment_section}\n\n"
+        f"请开始测试这个 Skill{_manual_suffix}."
+    ).strip()
 
     tm: Optional[TranscriptManager] = None
     result: dict = {

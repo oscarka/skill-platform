@@ -259,8 +259,9 @@ export default function SkillNew() {
                   onDrop={e => {
                     e.preventDefault(); setDragOver(false);
                     const f = e.dataTransfer.files[0];
-                    if (f?.name.endsWith('.zip')) setZipFile(f);
-                    else setErr('请上传 .zip 格式文件');
+                    const name = f?.name.toLowerCase() || '';
+                    if (name.endsWith('.zip') || name.endsWith('.tar.gz') || name.endsWith('.tgz')) setZipFile(f);
+                    else setErr('请上传 .zip / .tar.gz / .tgz 格式文件');
                   }}
                   onClick={() => document.getElementById('zip-file-input')?.click()}
                   style={{
@@ -282,16 +283,16 @@ export default function SkillNew() {
                     </>
                   ) : (
                     <>
-                      <div style={{ fontWeight: 600, color: 'var(--gray-600)' }}>拖拽 .zip 文件到此处，或点击选择</div>
+                      <div style={{ fontWeight: 600, color: 'var(--gray-600)' }}>拖拽压缩包到此处，或点击选择</div>
                       <div style={{ fontSize: '.8rem', color: 'var(--gray-400)', marginTop: 4 }}>
-                        支持从 OpenClaw、ClaWHub 等平台下载的 Skill 压缩包（最大 20MB）
+                        支持 .zip / .tar.gz / .tgz（最大 50MB）
                       </div>
                     </>
                   )}
                   <input
                     id="zip-file-input"
                     type="file"
-                    accept=".zip"
+                    accept=".zip,.tar.gz,.tgz"
                     style={{ display: 'none' }}
                     onChange={e => {
                       const f = e.target.files?.[0];
@@ -354,10 +355,11 @@ export default function SkillNew() {
             <div className="card mb-4" style={{ background: 'linear-gradient(135deg, #ecfeff, #cffafe)' }}>
               <div className="card-title" style={{ color: '#0891b2' }}>📦 压缩包格式说明</div>
               <div style={{ fontSize: '.84rem', color: 'var(--gray-600)', lineHeight: 2 }}>
-                <div>① 在其他平台下载 Skill 压缩包（.zip）</div>
-                <div>② 将 .zip 拖入左侧上传区</div>
-                <div>③ 平台自动识别 <strong>SKILL.md</strong> 并解析</div>
-                <div>④ 进入正常 AI 审核 → 发布流程</div>
+                <div>① 在其他平台下载 Skill 压缩包</div>
+                <div>② 支持 <strong>.zip</strong> / <strong>.tar.gz</strong> / <strong>.tgz</strong></div>
+                <div>③ 将文件拖入左侧上传区</div>
+                <div>④ 平台自动识别 <strong>SKILL.md</strong> 并解析</div>
+                <div>⑤ 进入正常 AI 审核 → 发布流程</div>
               </div>
             </div>
             <div className="card">

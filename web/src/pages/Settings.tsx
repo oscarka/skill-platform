@@ -12,25 +12,32 @@ const KEY_LABELS: Record<string, string> = {
   h5_base_url: 'H5 客户端地址',
 };
 
+// API key → provider 映射
+const KEY_PROVIDER: Record<string, string> = {
+  gemini_api_key: 'gemini',
+  doubao_api_key: 'doubao',
+  deepseek_api_key: 'deepseek',
+};
+
 export default function Settings() {
   const [settings, setSettings] = useState<any[]>([]);
   const [models, setModels] = useState<any[]>([]);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  // 测试连接状态
+  const [testResults, setTestResults] = useState<Record<string, any>>({});
 
   useEffect(() => {
     api.settings.list().then(d => setSettings(d.settings));
     api.settings.models().then(d => setModels(d.models));
   }, []);
 
-  const getValue = (key: string) => edits[key] ?? (settings.find(s => s.key === key)?.configured ? '••••' : '');
   const handleChange = (key: string, val: string) => setEdits(e => ({ ...e, [key]: val }));
 
   const handleSave = async () => {
     const toSave: Record<string, string> = {};
     for (const [k, v] of Object.entries(edits)) {
-      // 过滤空值、占位符、掩码值（防止 ****xxxx 被写回 DB）
       if (v && v !== '••••' && !v.startsWith('****')) toSave[k] = v;
     }
     if (!Object.keys(toSave).length) return;
@@ -46,6 +53,21 @@ export default function Settings() {
     } finally {
       setSaving(false);
       setTimeout(() => setMsg(null), 3000);
+    }
+  };
+
+  const handleTestKey = async (provider: string) => {
+    setTestResults(prev => ({ ...prev, [provider]: { testing: true } }));
+    try {
+      const res = await fetch('/api/settings/test-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider }),
+      });
+      const data = await res.json();
+      setTestResults(prev => ({ ...prev, [provider]: { ...data, testing: false } }));
+    } catch (err: any) {
+      setTestResults(prev => ({ ...prev, [provider]: { ok: false, error: err.message, testing: false } }));
     }
   };
 
@@ -77,14 +99,48 @@ export default function Settings() {
               {group.keys.map(key => {
                 const s = settings.find(x => x.key === key);
                 const isModel = key === 'default_model';
+                const provider = KEY_PROVIDER[key];
+                const testResult = provider ? testResults[provider] : null;
                 return (
                   <div className="form-group" key={key}>
-                    <label className="form-label">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       {KEY_LABELS[key] || key}
                       {s?.configured && (
-                        <span style={{ marginLeft: 6, fontSize: '.72rem', color: 'var(--success)', fontWeight: 400 }}>✓ 已配置</span>
+                        <span style={{ fontSize: '.72rem', color: 'var(--success)', fontWeight: 400 }}>✓ 已配置</span>
+                      )}
+                      {/* 测试连接按钮 */}
+                      {provider && s?.configured && (
+                        <button
+                          onClick={() => handleTestKey(provider)}
+                          disabled={testResult?.testing}
+                          style={{
+                            marginLeft: 'auto', fontSize: '.75rem', padding: '2px 10px',
+                            border: '1px solid var(--gray-200)', borderRadius: 6,
+                            background: testResult?.ok === true ? '#e6f9e6' : testResult?.ok === false ? '#ffeaea' : 'var(--gray-50)',
+                            color: testResult?.ok === true ? 'var(--success)' : testResult?.ok === false ? 'var(--danger)' : 'var(--gray-600)',
+                            cursor: testResult?.testing ? 'wait' : 'pointer',
+                          }}>
+                          {testResult?.testing ? '⏳ 测试中…' :
+                           testResult?.ok === true ? `✅ 连通 (${testResult.elapsed}ms)` :
+                           testResult?.ok === false ? '❌ 失败' :
+                           '🔌 测试连接'}
+                        </button>
                       )}
                     </label>
+                    {/* 测试结果详情 */}
+                    {testResult && !testResult.testing && (
+                      <div style={{
+                        fontSize: '.78rem', padding: '6px 10px', marginBottom: 6, borderRadius: 6,
+                        background: testResult.ok ? '#f0faf0' : '#fef2f2',
+                        color: testResult.ok ? '#166534' : '#991b1b',
+                        border: `1px solid ${testResult.ok ? '#bbf7d0' : '#fecaca'}`,
+                      }}>
+                        {testResult.ok
+                          ? <>✅ 连接成功 · 模型: {testResult.model} · 延迟: {testResult.elapsed}ms · 回复: &quot;{testResult.reply}&quot;</>
+                          : <>❌ {testResult.error}</>
+                        }
+                      </div>
+                    )}
                     {isModel ? (
                       <select className="form-select" value={edits[key] ?? (s?.value || '')} onChange={e => handleChange(key, e.target.value)}>
                         <option value="">选择默认模型…</option>
