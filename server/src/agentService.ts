@@ -230,9 +230,10 @@ async function callGeminiMessages(
 
 async function routeMessage(content: string, notes: string, apiKey: string): Promise<'chat' | 'health'> {
   const systemPrompt = `你是一个智能分诊助手。根据客户消息判断属于哪一类：
-- "chat"：普通问候、闲聊、非健康相关问题、一般性商务咨询、价格询问等
-- "health"：涉及健康症状、疾病询问、饮食调理建议、用药、身体指标解读、体检报告、健身康复等
+- "chat"：普通问候、闲聊、询问服务范围/是否可以咨询、非健康相关问题、一般性商务咨询、价格询问等
+- "health"：客户本人或家人有具体的健康症状/指标需要分析，包括：健康症状描述、体检报告解读、饮食调理、用药咨询、身体指标数值解读等
 
+注意："可以问家人问题吗""你们能帮我看xx吗"等询问服务能力的句子属于"chat"，不是"health"。
 只返回 JSON，不要有其他任何内容：{"type":"chat"} 或 {"type":"health"}`;
 
   const userMsg = `客户备注：${notes || '（无）'}\n客户消息：${content}`;
@@ -322,23 +323,15 @@ async function buildReassuranceMessage(
   content: string,
   skillName: string | null,
   profile: AgentProfile,
-  apiKey: string,
+  _apiKey: string,
 ): Promise<string> {
   if (profile.reassurance_mode === 'template' && profile.reassurance_tpl) {
     return profile.reassurance_tpl.replace('{客户姓名}', fromName);
   }
-  // AI 自动生成
-  try {
-    const prompt = `请为以下场景生成一条简短的安抚等待消息（20字以内，亲切自然）：
-客户姓名：${fromName}
-客户问题：${content.slice(0, 100)}
-正在调用的服务：${skillName || '智能分析'}
-要求：不要用 Markdown，直接给出消息内容`;
-    const result = await callGeminiMessages('你是一个服务助理，正在给客户发等待提示。', [{ role: 'user', content: prompt }], apiKey, 100);
-    return result.trim() || `${fromName}您好，稍等片刻，我正在为您分析～`;
-  } catch {
-    return `${fromName}您好，我正在为您分析健康情况，请稍等约 2 分钟，马上回复您～`;
-  }
+  // AI 模式：用智能模板（基于 skillName 动态生成，稳定可靠）
+  // 避免直接调 Gemini 生成短句——maxTokens=100 时返回结果不稳定
+  const verb = skillName ? `为您进行「${skillName}」分析` : '为您分析';
+  return `${fromName}您好，我正在${verb}，请稍等约 2 分钟，马上回复您～`;
 }
 
 // ─── 4. 普通聊天：直接 AI 回复 ────────────────────────────────────────────────
