@@ -293,8 +293,14 @@ ${skillList}
 
   try {
     const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content }], apiKey, 512);
-    const match = result.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('no JSON in response');
+    console.log(`[AgentService] Skill route raw response: "${result.slice(0, 300)}"`);
+
+    // 去掉 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
+    const cleaned = result.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+
+    // 尝试提取 JSON 对象
+    const match = cleaned.match(/\{[\s\S]*?\}/);
+    if (!match) throw new Error(`no JSON in response: "${result.slice(0, 100)}"`);
     const parsed = JSON.parse(match[0]);
     const skillId = parsed.skill_id || null;
     const skillName = parsed.skill_name || null;
