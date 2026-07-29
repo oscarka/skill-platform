@@ -113,5 +113,21 @@ INSERT INTO skill_platform.settings (key, value, updated_at) VALUES
   ('default_model', 'doubao-seed-1-8-251228', extract(epoch from now())::bigint * 1000)
 ON CONFLICT (key) DO NOTHING;
 
+-- Agent Profile 表（v2）
+CREATE TABLE IF NOT EXISTS skill_platform.agent_profiles (
+  id                  TEXT PRIMARY KEY,
+  name                TEXT NOT NULL DEFAULT '服务助理',
+  role_desc           TEXT NOT NULL DEFAULT '',
+  reply_style         TEXT NOT NULL DEFAULT '',
+  service_flow        TEXT NOT NULL DEFAULT '',
+  taboos              TEXT NOT NULL DEFAULT '[]',
+  reassurance_mode    TEXT NOT NULL DEFAULT 'ai',
+  reassurance_tpl     TEXT NOT NULL DEFAULT '',
+  skill_mode          TEXT NOT NULL DEFAULT 'auto',
+  skill_ids           TEXT NOT NULL DEFAULT '[]',
+  created_at          BIGINT NOT NULL,
+  updated_at          BIGINT NOT NULL
+);
+
 -- 验证
 SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'skill_platform' ORDER BY tablename;

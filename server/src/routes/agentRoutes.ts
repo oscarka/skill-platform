@@ -3,10 +3,14 @@
  *
  * POST /api/v1/agent/chat                   — 主入口：接收消息，路由处理，返回 AgentResponse
  * POST /api/v1/agent/job-callback/:requestId — Cloud Run Job 完成时的内部回调
+ * GET  /api/v1/agent/profile                 — 读取 Agent Profile 配置
+ * PUT  /api/v1/agent/profile                 — 保存 Agent Profile 配置
+ * GET  /api/v1/agent/skills/available        — 读取所有已发布 skill（供前端配置页使用）
  */
 
 import express from 'express';
-import { processAgentChat, handleJobCallback } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile } from '../agentService';
+import * as db from '../db';
 
 export const agentRouter = express.Router();
 
@@ -16,7 +20,6 @@ agentRouter.post('/chat', async (req, res) => {
   try {
     const { content, source, session_id, meta, context } = req.body;
 
-    // Validate required fields
     if (!content || typeof content !== 'string') {
       return res.status(400).json({ error: 'invalid_request', message: 'content is required (string)' });
     }
@@ -48,8 +51,6 @@ agentRouter.post('/chat', async (req, res) => {
 });
 
 // ─── POST /api/v1/agent/job-callback/:requestId ───────────────────────────────
-// Receives Cloud Run Job result (via TICKET_MODE CALLBACK_URL)
-// Verifies sandbox secret, then forwards to the original caller's callback_url
 
 agentRouter.post('/job-callback/:requestId', async (req, res) => {
   const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
@@ -63,11 +64,68 @@ agentRouter.post('/job-callback/:requestId', async (req, res) => {
   const { requestId } = req.params;
   console.log(`[AgentRoute] job-callback received for requestId=${requestId}`);
 
-  // Respond immediately so the Cloud Run Job doesn't time out waiting
   res.json({ ok: true });
 
-  // Forward result to caller asynchronously
   handleJobCallback(requestId, req.body).catch(err =>
     console.error(`[AgentRoute] job-callback forward error for ${requestId}:`, err)
   );
+});
+
+// ─── GET /api/v1/agent/profile ────────────────────────────────────────────────
+
+agentRouter.get('/profile', async (_req, res) => {
+  try {
+    const row = await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', ['default']);
+    if (!row) {
+      // 返回默认 profile
+      return res.json({
+        id:               'default',
+        name:             '服务助理',
+        role_desc:        '专业健康顾问助理，协助客户了解检查报告和日常健康管理',
+        reply_style:      '亲切、专业，回复简洁不超过200字',
+        service_flow:     '1. 判断是否为健康相关问题\n2. 健康问题优先调用对应 skill 深度分析\n3. 非健康问题礼貌回复并适当引导',
+        taboos:           ['不诊断疾病', '不推荐具体药物品牌', '不承诺治疗效果'],
+        reassurance_mode: 'ai',
+        reassurance_tpl:  '',
+        skill_mode:       'auto',
+        skill_ids:        [],
+      });
+    }
+    res.json({
+      ...row,
+      taboos:    JSON.parse(row.taboos || '[]'),
+      skill_ids: JSON.parse(row.skill_ids || '[]'),
+    });
+  } catch (err: any) {
+    console.error('[AgentRoute] GET /profile error:', err.message);
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+// ─── PUT /api/v1/agent/profile ────────────────────────────────────────────────
+
+agentRouter.put('/profile', async (req, res) => {
+  try {
+    const profile = await saveAgentProfile(req.body);
+    console.log(`[AgentRoute] Profile saved: skill_mode=${profile.skill_mode}`);
+    res.json(profile);
+  } catch (err: any) {
+    console.error('[AgentRoute] PUT /profile error:', err.message);
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+// ─── GET /api/v1/agent/skills/available ────────────────────────────────────────
+
+agentRouter.get('/skills/available', async (_req, res) => {
+  try {
+    const skills = await db.allAsync<any>(
+      "SELECT id, name, description, category FROM skills WHERE status = 'published' ORDER BY name",
+      []
+    );
+    res.json(skills);
+  } catch (err: any) {
+    console.error('[AgentRoute] GET /skills/available error:', err.message);
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
 });

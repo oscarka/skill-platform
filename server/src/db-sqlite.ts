@@ -141,6 +141,21 @@ export function initDb(): void {
     `ALTER TABLE skills ADD COLUMN sandbox_test TEXT`,
     `ALTER TABLE skills ADD COLUMN scripts_path TEXT`,
     `ALTER TABLE skills ADD COLUMN plugin_config TEXT`,
+    // Agent Profile 表（v2）
+    `CREATE TABLE IF NOT EXISTS agent_profiles (
+      id                  TEXT PRIMARY KEY,
+      name                TEXT NOT NULL DEFAULT '服务助理',
+      role_desc           TEXT NOT NULL DEFAULT '',
+      reply_style         TEXT NOT NULL DEFAULT '',
+      service_flow        TEXT NOT NULL DEFAULT '',
+      taboos              TEXT NOT NULL DEFAULT '[]',
+      reassurance_mode    TEXT NOT NULL DEFAULT 'ai',
+      reassurance_tpl     TEXT NOT NULL DEFAULT '',
+      skill_mode          TEXT NOT NULL DEFAULT 'auto',
+      skill_ids           TEXT NOT NULL DEFAULT '[]',
+      created_at          INTEGER NOT NULL,
+      updated_at          INTEGER NOT NULL
+    )`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

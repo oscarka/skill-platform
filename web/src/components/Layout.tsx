@@ -24,6 +24,7 @@ const NAV = [
   {
     section: '系统',
     items: [
+      { to: '/agent-profile', label: '服务配置', icon: '🤖' },
       { to: '/mcp-configs', label: 'MCP 配置', icon: '🔌' },
       { to: '/oauth', label: '授权管理', icon: '🔑' },
       { to: '/settings', label: '平台设置', icon: '⚙️' },
