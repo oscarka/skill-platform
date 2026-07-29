@@ -1,20 +1,21 @@
 /**
  * agentService.ts — Skill Platform 通用 Agent 服务 v2
  *
- * 新增：
- * 1. Agent Profile：从 DB 读取服务配置（角色、流程、禁忌、可用 skill）
- * 2. 自动 Skill 路由：Gemini 从可用 skill 中选最合适的一个
- * 3. 安抚消息：支持 AI 动态生成 或 固定模板
- * 4. skill_route 日志事件：记录路由决策过程
+ * 功能：
+ * 1. Gemini 3.6 Flash 轻量路由（chat vs health）< 2s
+ * 2. 普通聊天：直接 AI 回复（带历史/备注）< 10s，同步返回
+ * 3. 健康咨询：Agent Profile 决定用哪个 skill（自动路由），异步 callback
+ * 4. 健康咨询（无匹配 skill）：直接 AI 回复（带健康档案），同步返回
+ *
+ * 新增（v2）：
+ * - Agent Profile：从 DB 读取配置（角色/流程/禁忌/可用skill/安抚消息模式）
+ * - 自动 Skill 路由：Gemini 从可用 skill 中选最合适的一个
+ * - skill_route 字段：记录路由决策日志，透传给调用方
  */
 
 import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
 import { submitSandboxJob } from './cloudRunJobsClient';
-
-// ─── 常量 ─────────────────────────────────────────────────────────────────────
-
-const DEFAULT_PROFILE_ID = 'default';
 
 // ─── In-memory store for pending async health queries ─────────────────────────
 const pendingRequests = new Map<string, {
@@ -50,7 +51,7 @@ export interface AgentResponse {
   reply:        string;
   delivery:     AgentDelivery;
   reasoning?:   string;
-  skill_route?: SkillRouteLog;  // 新增：路由决策日志
+  skill_route?: SkillRouteLog;  // 路由决策日志
 }
 
 export interface SkillRouteLog {
@@ -62,6 +63,8 @@ export interface SkillRouteLog {
 
 // ─── Agent Profile ────────────────────────────────────────────────────────────
 
+const DEFAULT_PROFILE_ID = 'default';
+
 interface AgentProfile {
   id:               string;
   name:             string;
@@ -72,7 +75,7 @@ interface AgentProfile {
   reassurance_mode: 'ai' | 'template';
   reassurance_tpl:  string;
   skill_mode:       'auto' | 'manual';
-  skill_ids:        string[];  // manual 模式下的 skill 白名单
+  skill_ids:        string[];
 }
 
 async function loadAgentProfile(): Promise<AgentProfile> {
@@ -162,26 +165,6 @@ function defaultProfile(): AgentProfile {
   };
 }
 
-// ─── 获取可用 skill 列表 ───────────────────────────────────────────────────────
-
-async function getAvailableSkills(profile: AgentProfile): Promise<{ id: string; name: string; description: string }[]> {
-  let skills: any[];
-  if (profile.skill_mode === 'auto') {
-    skills = await db.allAsync<any>(
-      "SELECT id, name, description FROM skills WHERE status = 'published' ORDER BY name",
-      []
-    );
-  } else {
-    if (!profile.skill_ids.length) return [];
-    const placeholders = profile.skill_ids.map(() => '?').join(',');
-    skills = await db.allAsync<any>(
-      `SELECT id, name, description FROM skills WHERE status = 'published' AND id IN (${placeholders}) ORDER BY name`,
-      profile.skill_ids
-    );
-  }
-  return skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
-}
-
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
 async function getSetting(key: string): Promise<string> {
@@ -193,7 +176,18 @@ async function getGeminiKey(): Promise<string> {
   return (await getSetting('gemini_api_key')) || process.env.GEMINI_API_KEY || '';
 }
 
-// ─── Gemini Flash 通用调用 ────────────────────────────────────────────────────
+async function getSandboxSettings() {
+  const [model, doubaoKey, doubaoBase, deepseekKey, deepseekBase] = await Promise.all([
+    getSetting('ai_model'),
+    getSetting('doubao_api_key'),
+    getSetting('doubao_base_url'),
+    getSetting('deepseek_api_key'),
+    getSetting('deepseek_base_url'),
+  ]);
+  return { model, doubaoKey, doubaoBase, deepseekKey, deepseekBase };
+}
+
+// ─── Gemini 3.6 Flash multi-turn call (OpenAI-compat endpoint) ───────────────
 
 async function callGeminiMessages(
   systemPrompt: string,
@@ -202,6 +196,7 @@ async function callGeminiMessages(
   maxTokens = 4096,
 ): Promise<string> {
   const BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
   const res = await fetch(`${BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -209,7 +204,7 @@ async function callGeminiMessages(
       'Content-Type':  'application/json',
     },
     body: JSON.stringify({
-      model:      'gemini-2.5-flash',
+      model:      'gemini-3.6-flash',
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages,
@@ -231,7 +226,48 @@ async function callGeminiMessages(
   return content;
 }
 
-// ─── 1. Skill 自动路由（核心新功能）─────────────────────────────────────────
+// ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
+
+async function routeMessage(content: string, notes: string, apiKey: string): Promise<'chat' | 'health'> {
+  const systemPrompt = `你是一个智能分诊助手。根据客户消息判断属于哪一类：
+- "chat"：普通问候、闲聊、非健康相关问题、一般性商务咨询、价格询问等
+- "health"：涉及健康症状、疾病询问、饮食调理建议、用药、身体指标解读、体检报告、健身康复等
+
+只返回 JSON，不要有其他任何内容：{"type":"chat"} 或 {"type":"health"}`;
+
+  const userMsg = `客户备注：${notes || '（无）'}\n客户消息：${content}`;
+
+  try {
+    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: userMsg }], apiKey, 1024);
+    const match = result.match(/"type"\s*:\s*"(chat|health)"/);
+    const type = match?.[1] as 'chat' | 'health' | undefined;
+    console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'}`);
+    return type || 'chat';
+  } catch (err) {
+    console.warn('[AgentService] Route call failed, defaulting to chat:', err);
+    return 'chat';
+  }
+}
+
+// ─── 2. 自动 Skill 路由（从可用 skill 中选最合适的一个）────────────────────────
+
+async function getAvailableSkills(profile: AgentProfile): Promise<{ id: string; name: string; description: string }[]> {
+  let skills: any[];
+  if (profile.skill_mode === 'auto') {
+    skills = await db.allAsync<any>(
+      "SELECT id, name, description FROM skills WHERE status = 'published' ORDER BY name",
+      []
+    );
+  } else {
+    if (!profile.skill_ids.length) return [];
+    const placeholders = profile.skill_ids.map(() => '?').join(',');
+    skills = await db.allAsync<any>(
+      `SELECT id, name, description FROM skills WHERE status = 'published' AND id IN (${placeholders}) ORDER BY name`,
+      profile.skill_ids
+    );
+  }
+  return skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
+}
 
 async function routeSkill(
   content: string,
@@ -262,7 +298,6 @@ ${skillList}
     const parsed = JSON.parse(match[0]);
     const skillId = parsed.skill_id || null;
     const skillName = parsed.skill_name || null;
-    // 验证 skill_id 确实在列表中
     if (skillId && !availableSkills.find(s => s.id === skillId)) {
       console.warn(`[AgentService] skill route returned unknown id=${skillId}, falling back to null`);
       return { skillId: null, skillName: null, reason: '路由返回了未知 skill，降级直接回复' };
@@ -275,7 +310,7 @@ ${skillList}
   }
 }
 
-// ─── 2. 安抚消息生成 ──────────────────────────────────────────────────────────
+// ─── 3. 安抚消息生成 ──────────────────────────────────────────────────────────
 
 async function buildReassuranceMessage(
   fromName: string,
@@ -297,13 +332,57 @@ async function buildReassuranceMessage(
     const result = await callGeminiMessages('你是一个服务助理，正在给客户发等待提示。', [{ role: 'user', content: prompt }], apiKey, 100);
     return result.trim() || `${fromName}您好，稍等片刻，我正在为您分析～`;
   } catch {
-    return `${fromName}您好，我正在为您分析，请稍等约 2 分钟，马上回复您～`;
+    return `${fromName}您好，我正在为您分析健康情况，请稍等约 2 分钟，马上回复您～`;
   }
 }
 
-// ─── 3. 普通 AI 回复（无 skill）────────────────────────────────────────────────
+// ─── 4. 普通聊天：直接 AI 回复 ────────────────────────────────────────────────
 
-async function handleDirectReply(
+async function handleChatReply(
+  req: AgentChatRequest,
+  apiKey: string,
+  requestId: string,
+  delivery: AgentDelivery,
+  profile: AgentProfile,
+): Promise<AgentResponse> {
+  const { content, meta, history = [], notes = '' } = req;
+  const fromName = meta.from_name || '您';
+  const { app } = delivery;
+
+  const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
+  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问助理'}，正在通过${app}与客户${fromName}沟通。
+
+回复风格：${profile.reply_style || '亲切、专业，回复简洁，通常不超过150字'}
+${profile.service_flow ? `\n服务流程：\n${profile.service_flow}` : ''}${tabooText}
+
+关于该客户的备注信息：
+${notes || '（无特殊备注）'}
+
+任务：用自然、亲切的语气回复客户消息。
+要求：
+- 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
+- 直接称呼客户为"${fromName}"
+- 如客户涉及具体健康问题，告知正在为其准备专业分析，请稍等`;
+
+  const messages = [
+    ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
+    { role: 'user', content },
+  ];
+
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024);
+
+  return {
+    request_id: requestId,
+    status:     'done',
+    reply:      reply.trim(),
+    delivery,
+    reasoning:  '普通聊天，Gemini 直接回复',
+  };
+}
+
+// ─── 5. 健康咨询（无匹配 skill）：带档案的直接 AI 回复 ──────────────────────
+
+async function handleHealthDirect(
   req: AgentChatRequest,
   apiKey: string,
   requestId: string,
@@ -315,34 +394,40 @@ async function handleDirectReply(
   const fromName = meta.from_name || '您';
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
-  const systemPrompt = `你是${profile.name}。${profile.role_desc}
+  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}
 
-回复风格：${profile.reply_style || '亲切、专业'}
-${profile.service_flow ? `\n服务流程：\n${profile.service_flow}` : ''}${tabooText}
+要求：
+- 不要使用 Markdown 格式
+- 亲切专业，直接称呼客户为"${fromName}"
+- 如无健康档案，基于对话内容给出通用建议`;
 
-当前正在通过${delivery.app}与客户${fromName}沟通。
-${notes ? `\n关于该客户的备注：\n${notes}` : ''}
-${health_profile ? `\n客户健康档案：\n${health_profile}` : ''}`;
+  const contextBlock = [
+    notes          ? `【客户备注】\n${notes}` : '',
+    health_profile ? `【健康档案】\n${health_profile}` : '',
+    `【当前问题】\n${content}`,
+  ].filter(Boolean).join('\n\n');
 
   const messages = [
-    ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
-    { role: 'user', content },
+    ...history.slice(-6).map(h => ({ role: h.role, content: h.content })),
+    { role: 'user', content: contextBlock },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024);
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048);
+
   return {
-    request_id:   requestId,
-    status:       'done',
-    reply:        reply.trim(),
+    request_id:  requestId,
+    status:      'done',
+    reply:       reply.trim(),
     delivery,
-    reasoning:    '无匹配 skill，直接 AI 回复',
-    skill_route:  skillRouteLog,
+    reasoning:   '健康咨询（无匹配 Skill），带档案直接 AI 回复',
+    skill_route: skillRouteLog,
   };
 }
 
-// ─── 4. 调用 Skill（异步 Cloud Run Job）──────────────────────────────────────
+// ─── 6. 健康咨询（有匹配 skill）：提交 Cloud Run Job ────────────────────────
 
-async function handleSkillExecution(
+async function handleHealthSkill(
   req: AgentChatRequest,
   apiKey: string,
   requestId: string,
@@ -382,8 +467,9 @@ async function handleSkillExecution(
     await submitSandboxJob({
       skillId,
       userInputs:    { ticket: sandboxUserMessage },
-      model:         'gemini-2.5-flash',
+      model:         'gemini-3.6-flash',
       aiKey:         apiKey,
+      // Gemini OpenAI 兼容端点 — Cloud Run Job 需要完整 base URL 才能拼出 /chat/completions
       aiBaseUrl:     'https://generativelanguage.googleapis.com/v1beta/openai',
       callbackUrl:   jobCallbackUrl,
       sandboxSecret: process.env.SANDBOX_SECRET || 'sandbox-secret-2024',
@@ -396,16 +482,16 @@ async function handleSkillExecution(
     throw err;
   }
 
-  // 生成安抚消息
+  // 安抚消息
   const reassuranceMsg = await buildReassuranceMessage(fromName, content, skillName, profile, apiKey);
 
   return {
-    request_id:   requestId,
-    status:       'processing',
-    reply:        reassuranceMsg,
+    request_id:  requestId,
+    status:      'processing',
+    reply:       reassuranceMsg,
     delivery,
-    reasoning:    `自动路由到 Skill「${skillName}」(${skillId})，异步执行中`,
-    skill_route:  skillRouteLog,
+    reasoning:   `自动路由到 Skill「${skillName}」(${skillId})，异步执行中`,
+    skill_route: skillRouteLog,
   };
 }
 
@@ -428,7 +514,7 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
     status:     'done',
     reply:      agentOutput,
     delivery,
-    reasoning:  'Skill 执行完成',
+    reasoning:  '健康 Skill 执行完成',
   };
 
   console.log(`[AgentService] Job done for ${requestId}, output length=${agentOutput.length}`);
@@ -438,6 +524,7 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
     return;
   }
 
+  // Retry up to 2 times
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await fetch(callbackUrl, {
@@ -474,15 +561,24 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   console.log(`[AgentService] request_id=${requestId} session=${req.session_id} source=${req.source}`);
 
-  // ── Step 1: 加载 Agent Profile ────────────────────────────────────────────
-  const profile = await loadAgentProfile();
-  console.log(`[AgentService] Profile loaded: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+  // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
+  const routeType = await routeMessage(req.content, req.notes || '', apiKey);
+  console.log(`[AgentService] → routed as: ${routeType}`);
 
-  // ── Step 2: 获取可用 skill 列表 ────────────────────────────────────────────
+  // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
+  if (routeType !== 'health') {
+    const profile = await loadAgentProfile();
+    return handleChatReply(req, apiKey, requestId, delivery, profile);
+  }
+
+  // ── Step 3: 健康问题 — 加载 Agent Profile + 可用 skill ─────────────────────
+  const profile = await loadAgentProfile();
+  console.log(`[AgentService] Profile: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+
   const availableSkills = await getAvailableSkills(profile);
   console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
 
-  // ── Step 3: 决定使用哪个 skill ──────────────────────────────────────────────
+  // ── Step 4: 决定使用哪个 skill ──────────────────────────────────────────────
   let selectedSkillId: string | null = null;
   let selectedSkillName: string | null = null;
   let routeReason = '';
@@ -492,17 +588,15 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     const found = availableSkills.find(s => s.id === req.skill_id)
       || await db.getAsync<any>('SELECT id, name FROM skills WHERE id=?', [req.skill_id]);
     selectedSkillId   = req.skill_id;
-    selectedSkillName = found?.name || req.skill_id;
+    selectedSkillName = (found as any)?.name || req.skill_id;
     routeReason = `前端强制指定 skill_id=${req.skill_id}`;
     console.log(`[AgentService] skill_id forced by caller: ${selectedSkillId}`);
-  } else if (availableSkills.length > 0) {
+  } else {
     // Agent 自动路由
     const route = await routeSkill(req.content, availableSkills, apiKey);
     selectedSkillId   = route.skillId;
     selectedSkillName = route.skillName;
     routeReason = route.reason;
-  } else {
-    routeReason = '无可用 skill，直接 AI 回复';
   }
 
   const skillRouteLog: SkillRouteLog = {
@@ -512,15 +606,16 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     reason:           routeReason,
   };
 
-  // ── Step 4: 执行 ─────────────────────────────────────────────────────────
+  // ── Step 5: 执行 ─────────────────────────────────────────────────────────────
   if (selectedSkillId && selectedSkillName) {
-    return handleSkillExecution(
+    return handleHealthSkill(
       req, apiKey, requestId, delivery,
       profile, selectedSkillId, selectedSkillName,
       skillRouteLog, serviceUrl
     );
   } else {
-    return handleDirectReply(req, apiKey, requestId, delivery, profile, skillRouteLog);
+    // 无匹配 skill，降级为带档案的直接 AI 回复
+    return handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
   }
 }
 
