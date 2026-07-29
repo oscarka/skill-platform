@@ -276,6 +276,7 @@ async function getAvailableSkills(profile: AgentProfile): Promise<{ id: string; 
 async function routeSkill(
   content: string,
   availableSkills: { id: string; name: string; description: string }[],
+  history: { role: string; content: string }[],
   apiKey: string,
 ): Promise<{ skillId: string | null; skillName: string | null; reason: string }> {
   if (!availableSkills.length) {
@@ -287,7 +288,11 @@ async function routeSkill(
     .map((s, i) => `${i + 1}. ID="${s.id}" 名称="${s.name}" 描述="${s.description.slice(0, 80)}"`)
     .join('\n');
 
-  const systemPrompt = `你是一个智能路由助手。根据客户消息，从以下可用 skill 中选出最匹配的一个。如果没有合适的 skill，返回 null。
+  const recentHistory = history.slice(-4).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
+  const contextMsg = `${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
+
+  const systemPrompt = `你是一个智能路由助手。根据客户消息和对话历史，从以下可用 skill 中选出最匹配的一个。如果没有合适的 skill，返回 null。
+如果当前消息较短（如纠正错别字、补充说明），请结合近期对话历史判断真实意图。
 
 可用 skill 列表：
 ${skillList}
@@ -295,7 +300,7 @@ ${skillList}
 只返回 JSON，不要有其他任何内容：{"skill_id": "xxx" 或 null, "skill_name": "xxx" 或 null, "reason": "一句话理由"}`;
 
   try {
-    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content }], apiKey, 1024);
+    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: contextMsg }], apiKey, 1024);
     console.log(`[AgentService] Skill route raw response: "${result.slice(0, 300)}"`);
 
     // 直接找第一个 { 和最后一个 }，无视 markdown 代码块包裹
@@ -594,7 +599,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     console.log(`[AgentService] skill_id forced by caller: ${selectedSkillId}`);
   } else {
     // Agent 自动路由
-    const route = await routeSkill(req.content, availableSkills, apiKey);
+    const route = await routeSkill(req.content, availableSkills, req.history || [], apiKey);
     selectedSkillId   = route.skillId;
     selectedSkillName = route.skillName;
     routeReason = route.reason;
