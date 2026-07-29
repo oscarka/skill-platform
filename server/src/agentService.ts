@@ -278,21 +278,20 @@ async function routeSkill(
     return { skillId: null, skillName: null, reason: '无可用 skill，直接 AI 回复' };
   }
 
+  // 描述截断 80 字，避免 prompt 过长
   const skillList = availableSkills
-    .map((s, i) => `${i + 1}. ID="${s.id}" 名称="${s.name}" 描述="${s.description}"`)
+    .map((s, i) => `${i + 1}. ID="${s.id}" 名称="${s.name}" 描述="${s.description.slice(0, 80)}"`)
     .join('\n');
 
-  const systemPrompt = `你是一个智能路由助手。根据客户消息，从以下可用 skill 中选出最匹配的一个。
-如果没有合适的 skill，返回 null。
+  const systemPrompt = `你是一个智能路由助手。根据客户消息，从以下可用 skill 中选出最匹配的一个。如果没有合适的 skill，返回 null。
 
 可用 skill 列表：
 ${skillList}
 
-只返回 JSON，不要有其他任何内容：
-{"skill_id": "xxx-xxx-xxx" 或 null, "skill_name": "skill名称" 或 null, "reason": "简短的选择理由（一句话）"}`;
+只返回 JSON，不要有其他任何内容：{"skill_id": "xxx" 或 null, "skill_name": "xxx" 或 null, "reason": "一句话理由"}`;
 
   try {
-    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content }], apiKey, 512);
+    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content }], apiKey, 1024);
     console.log(`[AgentService] Skill route raw response: "${result.slice(0, 300)}"`);
 
     // 直接找第一个 { 和最后一个 }，无视 markdown 代码块包裹
