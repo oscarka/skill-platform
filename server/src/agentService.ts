@@ -228,15 +228,18 @@ async function callGeminiMessages(
 
 // ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
 
-async function routeMessage(content: string, notes: string, apiKey: string): Promise<'chat' | 'health'> {
-  const systemPrompt = `你是一个智能分诊助手。根据客户消息判断属于哪一类：
+async function routeMessage(content: string, notes: string, history: { role: string; content: string }[], apiKey: string): Promise<'chat' | 'health'> {
+  const systemPrompt = `你是一个智能分诊助手。根据客户消息和近期对话历史判断属于哪一类：
 - "chat"：普通问候、闲聊、询问服务范围/是否可以咨询、非健康相关问题、一般性商务咨询、价格询问等
 - "health"：客户本人或家人有具体的健康症状/指标需要分析，包括：健康症状描述、体检报告解读、饮食调理、用药咨询、身体指标数值解读等
 
-注意："可以问家人问题吗""你们能帮我看xx吗"等询问服务能力的句子属于"chat"，不是"health"。
+注意：
+- "可以问家人问题吗""你们能帮我看xx吗"等询问服务能力的句子属于"chat"，不是"health"。
+- 如果当前消息较短（如纠正错别字、补充说明），请结合近期对话历史判断真实意图。
 只返回 JSON，不要有其他任何内容：{"type":"chat"} 或 {"type":"health"}`;
 
-  const userMsg = `客户备注：${notes || '（无）'}\n客户消息：${content}`;
+  const recentHistory = history.slice(-4).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
+  const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
   try {
     const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: userMsg }], apiKey, 1024);
@@ -560,7 +563,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   console.log(`[AgentService] request_id=${requestId} session=${req.session_id} source=${req.source}`);
 
   // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
-  const routeType = await routeMessage(req.content, req.notes || '', apiKey);
+  const routeType = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);
   console.log(`[AgentService] → routed as: ${routeType}`);
 
   // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
