@@ -221,7 +221,25 @@ async function callGeminiMessages(
   }
 
   const data = await res.json() as any;
-  const content: string = data.choices?.[0]?.message?.content || '';
+  const choice = data.choices?.[0];
+  const content: string = choice?.message?.content || '';
+  const finishReason: string = choice?.finish_reason || 'unknown';
+  const usage = data.usage || {};
+
+  // ─── 日志：每次 Gemini 调用都记录 finish_reason + token 用量 ──────────────
+  const logLevel = finishReason !== 'stop' ? 'WARN' : 'INFO';
+  console.log(
+    `[Gemini][${logLevel}] finish_reason=${finishReason}` +
+    ` prompt_tokens=${usage.prompt_tokens ?? '?'}` +
+    ` completion_tokens=${usage.completion_tokens ?? '?'}` +
+    ` content_len=${content.length}` +
+    ` max_tokens=${maxTokens}` +
+    ` preview="${content.slice(0, 60).replace(/\n/g, '↵')}..."`
+  );
+  if (finishReason === 'MAX_TOKENS' || finishReason === 'max_tokens') {
+    console.warn(`[Gemini] ⚠️ 输出被 max_tokens(${maxTokens}) 截断！content_len=${content.length}，末尾："${content.slice(-30)}"`);  
+  }
+
   if (!content) throw new Error('Gemini returned empty content');
   return content;
 }
@@ -238,7 +256,7 @@ async function routeMessage(content: string, notes: string, history: { role: str
 - 如果当前消息较短（如纠正错别字、补充说明），请结合近期对话历史判断真实意图。
 只返回 JSON，不要有其他任何内容：{"type":"chat"} 或 {"type":"health"}`;
 
-  const recentHistory = history.slice(-4).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
+  const recentHistory = history.slice(-20).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
   try {
@@ -288,7 +306,7 @@ async function routeSkill(
     .map((s, i) => `${i + 1}. ID="${s.id}" 名称="${s.name}" 描述="${s.description.slice(0, 80)}"`)
     .join('\n');
 
-  const recentHistory = history.slice(-4).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
+  const recentHistory = history.slice(-20).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
   const contextMsg = `${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
   const systemPrompt = `你是一个智能路由助手。根据客户消息和对话历史，从以下可用 skill 中选出最匹配的一个。如果没有合适的 skill，返回 null。
@@ -371,7 +389,7 @@ ${notes || '（无特殊备注）'}
 - 如客户涉及具体健康问题，告知正在为其准备专业分析，请稍等`;
 
   const messages = [
-    ...history.slice(-10).map(h => ({ role: h.role, content: h.content })),
+    ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content },
   ];
 
@@ -415,7 +433,7 @@ async function handleHealthDirect(
   ].filter(Boolean).join('\n\n');
 
   const messages = [
-    ...history.slice(-6).map(h => ({ role: h.role, content: h.content })),
+    ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content: contextBlock },
   ];
 
@@ -453,7 +471,7 @@ async function handleHealthSkill(
     delivery,
   });
 
-  const recentHistory = history.slice(-6)
+  const recentHistory = history.slice(-20)
     .map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`)
     .join('\n');
 
