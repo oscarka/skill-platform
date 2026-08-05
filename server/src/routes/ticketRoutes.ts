@@ -209,7 +209,50 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
     if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
 
     const body = req.body as any;
-    // runner.py sends: { passed, output, transcript, duration_ms, test_results, ... }
+
+    // ─── 实时流式进度上报 (Real-time CUA Transcript Streaming) ─────────────────────
+    if (body?.type === 'progress' || body?.type === 'transcript_step') {
+      const stepEntry = body.entry || {
+        type: 'event',
+        event: body.event?.step || 'progress',
+        detail: body.event?.detail || '',
+        ts: body.event?.ts || new Date().toISOString()
+      };
+
+      const now = Date.now();
+      const existing = await db.getAsync<any>('SELECT * FROM ticket_results WHERE ticket_id=?', [ticketId]);
+      let currentLog: any[] = [];
+      if (existing?.ai_log) {
+        try { currentLog = JSON.parse(existing.ai_log); } catch { currentLog = []; }
+      }
+
+      // 避免基于 ID 重复添加
+      if (!stepEntry.id || !currentLog.some(e => e.id === stepEntry.id)) {
+        currentLog.push(stepEntry);
+      }
+
+      const updatedAiLog = JSON.stringify(currentLog, null, 2);
+      if (existing) {
+        await db.runAsync(
+          `UPDATE ticket_results SET ai_log=?, updated_at=? WHERE ticket_id=?`,
+          [updatedAiLog, now, ticketId]
+        );
+      } else {
+        const { v4: uuidv4 } = require('uuid');
+        await db.runAsync(
+          `INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
+          [uuidv4(), ticketId, '(处理中...)', updatedAiLog, now, now]
+        );
+      }
+
+      if (ticket.status !== 'processing') {
+        await db.runAsync(`UPDATE tickets SET status='processing', updated_at=? WHERE id=?`, [now, ticketId]);
+      }
+
+      return res.json({ ok: true, streamed: true });
+    }
+
+    // ─── 最终回调（Agent 执行完成或失败）────────────────────────────────────────
     const passed = body?.passed ?? false;
     let rawResult: string = body?.output || '';
     if (!rawResult && Array.isArray(body?.test_results) && body.test_results.length > 0) {

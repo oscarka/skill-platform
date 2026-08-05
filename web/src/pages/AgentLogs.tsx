@@ -51,6 +51,7 @@ export default function AgentLogs() {
   const [expandAll, setExpandAll] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detailPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadList = async (autoSelect = false) => {
     try {
@@ -87,6 +88,13 @@ export default function AgentLogs() {
     }
   };
 
+  const refreshDetailSilent = async (id: string) => {
+    try {
+      const res = await api.tickets.get(id);
+      setDetailData(res);
+    } catch {}
+  };
+
   useEffect(() => {
     loadList(true);
     return () => {
@@ -101,6 +109,29 @@ export default function AgentLogs() {
       setDetailData(null);
     }
   }, [selectedId]);
+
+  // Real-time detail polling (1.5s interval) while ticket is processing or submitted
+  useEffect(() => {
+    const status = detailData?.ticket?.status;
+    if (selectedId && (status === 'processing' || status === 'submitted')) {
+      if (!detailPollRef.current) {
+        detailPollRef.current = setInterval(() => {
+          refreshDetailSilent(selectedId);
+        }, 1500);
+      }
+    } else {
+      if (detailPollRef.current) {
+        clearInterval(detailPollRef.current);
+        detailPollRef.current = null;
+      }
+    }
+    return () => {
+      if (detailPollRef.current) {
+        clearInterval(detailPollRef.current);
+        detailPollRef.current = null;
+      }
+    };
+  }, [selectedId, detailData?.ticket?.status]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -342,12 +373,52 @@ export default function AgentLogs() {
                 {activeTab === 'transcript' && (
                   <div>
                     {transcript.length === 0 ? (
-                      <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8', fontSize: '.85rem' }}>
-                        {detailData.result ? '暂无详细思考与工具调用日志（可能是传统 prompt/code 模式）' : '工单尚未执行完成'}
+                      <div style={{ textAlign: 'center', padding: '40px 20px', background: '#fafafa', borderRadius: '12px', border: '1px dashed #cbd5e1' }}>
+                        {detailData.ticket?.status === 'processing' ? (
+                          <div>
+                            <div style={{ fontSize: '2rem', marginBottom: 8 }}>⏳</div>
+                            <div style={{ fontWeight: 700, color: '#4f46e5', fontSize: '1rem', marginBottom: 4 }}>
+                              Agent 正在实时思考与调用工具中…
+                            </div>
+                            <div style={{ fontSize: '.82rem', color: '#64748b' }}>
+                              已开启 1.5s 实时捕获，最新产生步骤与工具 Response 将流式刷新在下方
+                            </div>
+                          </div>
+                        ) : ['created', 'submitted', 'waiting_input', 'returned'].includes(detailData.ticket?.status) ? (
+                          <div>
+                            <div style={{ fontSize: '2rem', marginBottom: 8 }}>📋</div>
+                            <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '1rem', marginBottom: 4 }}>
+                              该工单处于「{STATUS_CONFIG[detailData.ticket?.status]?.label || detailData.ticket?.status}」状态
+                            </div>
+                            <div style={{ fontSize: '.82rem', color: '#64748b', marginBottom: 14 }}>
+                              尚在队列中，未触发 AI 引擎运行。您可以点击下方按钮立即触发全链条分析
+                            </div>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              onClick={handleReprocess}
+                              disabled={reprocessing}
+                              style={{ boxShadow: '0 2px 8px rgba(79,70,229,0.25)' }}
+                            >
+                              {reprocessing ? '⏳ 启动中...' : '🚀 立即启动 Agent 分析与预测'}
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ color: '#94a3b8', fontSize: '.85rem' }}>
+                            暂无详细思考与工具调用日志（可能是传统 prompt 模式或未录入）
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div style={{ position: 'relative', paddingLeft: 24, display: 'flex', flexDirection: 'column', gap: 14 }}>
                         
+                        {/* Live Processing Indicator Header if still running */}
+                        {(detailData.ticket?.status === 'processing' || detailData.ticket?.status === 'submitted') && (
+                          <div style={{ background: '#f5f3ff', border: '1px solid #c7d2fe', borderRadius: '10px', padding: '8px 12px', fontSize: '.8rem', color: '#4338ca', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⚡</span>
+                            <span>Agent 正在实时执行中 (已捕获 <strong>{transcript.length}</strong> 条实时步骤，自动刷新中…)</span>
+                          </div>
+                        )}
+
                         {/* Timeline Vertical Guide Line */}
                         <div
                           style={{

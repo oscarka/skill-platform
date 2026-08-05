@@ -326,6 +326,19 @@ class TranscriptManager:
         except Exception as e:
             print(f"[transcript] file write error: {e}", flush=True)
 
+        # ─── 实时上报到平台 DB (支持 CUA Real-time Stream Display) ─────────
+        try:
+            callback_url = os.getenv("CALLBACK_URL", "")
+            secret = os.getenv("SANDBOX_SECRET", "sandbox-secret-2024")
+            if callback_url:
+                import urllib.request as _ur
+                payload = json.dumps({"type": "transcript_step", "entry": display_entry, "secret": secret}).encode()
+                req = _ur.Request(callback_url, data=payload,
+                                  headers={"Content-Type": "application/json", "X-Sandbox-Secret": secret}, method="POST")
+                _ur.urlopen(req, timeout=3)
+        except Exception:
+            pass
+
     def _spill_output(self, entry_id: str, content: str) -> str:
         """
         参照 OpenClaw writePrivateTempFile：
