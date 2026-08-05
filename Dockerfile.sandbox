@@ -54,4 +54,5 @@ USER sandbox
 
 # 默认 CMD：Cloud Run Service 模式（gunicorn 启动 HTTP 服务）
 # Cloud Run Job 模式：提交 Execution 时通过 overrides.containerOverrides[].command 覆盖为 ["python3", "/runner.py"]
-CMD ["gunicorn", "--workers=4", "--threads=2", "--bind=0.0.0.0:8080", "--timeout=2100", "server:app"]
+WORKDIR /
+CMD ["gunicorn", "--workers=4", "--threads=2", "--bind=0.0.0.0:8080", "--timeout=2100", "--chdir=/", "server:app"]
