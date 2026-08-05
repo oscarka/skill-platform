@@ -52,11 +52,17 @@ export default function SkillDetail() {
   const MAX_FILE_MB = 20;
   const ALLOWED_EXTS = ['.pdf','.png','.jpg','.jpeg','.webp','.gif','.docx','.doc','.txt','.csv','.md'];
   const formatBytes = (b: number) => b < 1024*1024 ? `${(b/1024).toFixed(1)} KB` : `${(b/1024/1024).toFixed(1)} MB`;
+  // MCP 配置选择器
+  const [mcpNames, setMcpNames] = useState<string[]>([]);          // 当前 skill 已选的 MCP
+  const [availableMcps, setAvailableMcps] = useState<any[]>([]);   // 平台全量 MCP 列表
+  const [savingMcp, setSavingMcp] = useState(false);
 
 
   const load = () => {
     api.skills.get(id!).then(d => {
       setSkill(d.skill);
+      // 初始化 MCP 选择（null 表示未配置，展示为空数组）
+      setMcpNames(Array.isArray(d.skill.mcp_names) ? d.skill.mcp_names : []);
       if (d.skill.h5_config) setH5Config(d.skill.h5_config);
       else if (d.skill.ai_review?.h5_config_suggestion) setH5Config(d.skill.ai_review.h5_config_suggestion);
     }).finally(() => setLoading(false));
@@ -68,6 +74,13 @@ export default function SkillDetail() {
   useEffect(() => {
     fetch('/api/settings/models').then(r => r.json()).then(d => {
       if (d.models) setAvailableModels(d.models);
+    }).catch(() => {});
+  }, []);
+
+  // 加载平台已配置的 MCP 列表
+  useEffect(() => {
+    fetch('/api/mcp-configs').then(r => r.json()).then(d => {
+      if (d.configs) setAvailableMcps(d.configs);
     }).catch(() => {});
   }, []);
 
@@ -593,6 +606,82 @@ export default function SkillDetail() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MCP 配置（plugin skill 标签页下） */}
+      {skill.skill_type === 'plugin' && (
+        <div className="card mb-4">
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+            <div className="card-title" style={{ margin: 0 }}>🔌 MCP 工具配置</div>
+            <span style={{ fontSize: '.75rem', color: 'var(--gray-500)', marginLeft: 8 }}>
+              只加载这个 Skill 需要的 MCP，未勾选 = 不加载（节省 60s 启动）
+            </span>
+          </div>
+          {availableMcps.length === 0 ? (
+            <div style={{ fontSize: '.85rem', color: 'var(--gray-500)' }}>暂无已配置的 MCP，请先到「MCP 配置」页添加</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {availableMcps.map((mcp: any) => {
+                const checked = mcpNames.includes(mcp.name);
+                return (
+                  <label key={mcp.id} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
+                    padding: '10px 12px', borderRadius: 8,
+                    background: checked ? 'var(--primary-50, #eff6ff)' : 'var(--gray-50)',
+                    border: `1px solid ${checked ? 'var(--primary)' : 'var(--border)'}`,
+                    transition: 'all .15s',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      style={{ marginTop: 2, accentColor: 'var(--primary)' }}
+                      onChange={e => {
+                        setMcpNames(prev =>
+                          e.target.checked ? [...prev, mcp.name] : prev.filter(n => n !== mcp.name)
+                        );
+                      }}
+                    />
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '.9rem', color: 'var(--gray-800)' }}>
+                        {mcp.name}
+                        <code style={{ marginLeft: 6, fontSize: '.75rem', color: 'var(--gray-500)', fontWeight: 400 }}>
+                          {mcp.command} {mcp.args}
+                        </code>
+                      </div>
+                      {mcp.description && (
+                        <div style={{ fontSize: '.8rem', color: 'var(--gray-600)', marginTop: 2 }}>
+                          {mcp.description}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={savingMcp}
+              onClick={async () => {
+                setSavingMcp(true);
+                try {
+                  await api.skills.update(id!, { mcp_names: mcpNames });
+                  flash('success', `MCP 配置已保存：${mcpNames.length === 0 ? '不加载任何 MCP' : mcpNames.join(', ')}`);
+                  load();
+                } catch (e: any) { flash('error', e.message); }
+                finally { setSavingMcp(false); }
+              }}
+            >
+              {savingMcp ? '保存中…' : '💾 保存 MCP 配置'}
+            </button>
+            <span style={{ fontSize: '.8rem', color: 'var(--gray-500)' }}>
+              {mcpNames.length === 0
+                ? '⚠️ 未勾选任何 MCP，该 Skill 不会加载任何外部工具'
+                : `将加载: ${mcpNames.join(', ')}`}
+            </span>
           </div>
         </div>
       )}

@@ -897,15 +897,25 @@ Skill 正文摘要：${parsed.body.slice(0, 500)}
   }
 
 
-  // ── 读取已保存的 MCP 配置，注入到沙箱 ──────────────────────────────────────
+  // ── 按 skill.mcp_names 过滤 MCP 配置，只注入该 skill 需要的 ────────────────
   let mcpConfigsJson = '[]';
   try {
-    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
-    if (mcpRows.length > 0) {
-      mcpConfigsJson = JSON.stringify(mcpRows);
-      console.log(`[SandboxService] Injecting ${mcpRows.length} MCP configs:`, mcpRows.map(r => r.name));
+    const skillMcpNames: string[] = JSON.parse((skill as any).mcp_names || 'null') ?? [];
+    if (skillMcpNames.length > 0) {
+      const placeholders = skillMcpNames.map(() => '?').join(',');
+      const mcpRows = await db.allAsync<any>(
+        `SELECT name, command, args FROM mcp_configs WHERE name IN (${placeholders})`,
+        skillMcpNames
+      );
+      if (mcpRows.length > 0) {
+        mcpConfigsJson = JSON.stringify(mcpRows);
+        console.log(`[SandboxService] skill ${skill.id} mcp_names=${JSON.stringify(skillMcpNames)} → loaded ${mcpRows.length} configs:`, mcpRows.map((r: any) => r.name));
+      }
+    } else {
+      console.log(`[SandboxService] skill ${skill.id} mcp_names=[] → no MCP loaded (skip 60s discover)`);
     }
   } catch { /* ignore if table doesn't exist yet */ }
+
 
   // ── 注入附件信息（如有）─────────────────────────────────────────────────────
   if (attachmentGcsPaths && attachmentGcsPaths.length > 0) {

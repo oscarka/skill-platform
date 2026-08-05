@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS skills (
   sandbox_status  TEXT NOT NULL DEFAULT 'none',
   sandbox_test    TEXT,
   sandbox_progress TEXT,
-  scripts_path    TEXT
+  scripts_path    TEXT,
+  mcp_names       TEXT DEFAULT NULL  -- JSON 数组：该 skill 需要哪些 MCP，如 ["fetch"]；NULL/[] = 不加载任何 MCP
 );
 
 CREATE TABLE IF NOT EXISTS tickets (
@@ -301,10 +302,35 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS scripts_path TEXT`,
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS plugin_config TEXT`,
       `ALTER TABLE ticket_results ADD COLUMN IF NOT EXISTS ai_log TEXT`,
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS mcp_names TEXT DEFAULT NULL`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
     }
+
+    // 数据迁移：为已有 plugin skill 设置 mcp_names（一次性，只在 NULL 时执行）
+    // Web Researcher 依赖 fetch MCP；Stitch UI Designer 依赖 stitch MCP；其余不需要 MCP
+    const dataMigrations = [
+      `UPDATE skills SET mcp_names='["fetch"]'  WHERE mcp_names IS NULL AND name='Web Researcher'`,
+      `UPDATE skills SET mcp_names='["stitch"]' WHERE mcp_names IS NULL AND name='Stitch Ui Designer'`,
+      `UPDATE skills SET mcp_names='[]'          WHERE mcp_names IS NULL AND skill_type='plugin'`,
+      `UPDATE skills SET mcp_names='[]'          WHERE mcp_names IS NULL AND skill_type='prompt'`,
+      `UPDATE skills SET mcp_names='[]'          WHERE mcp_names IS NULL AND skill_type='code'`,
+    ];
+    for (const sql of dataMigrations) {
+      try { await pool.query(sql); } catch { /* ignore */ }
+    }
+
+    // 补全 MCP 描述（用于 Skill 详情页 MCP 选择器的说明文字）
+    const mcpDescriptions = [
+      [`UPDATE mcp_configs SET description='网页抓取工具：让 AI 可以访问和解析任意网页内容，适用于需要实时网络信息的 Skill' WHERE name='fetch' AND (description IS NULL OR description='')`,],
+      [`UPDATE mcp_configs SET description='Google Workspace 工具：可操作 Google Sheets、Docs、Slides、Calendar 等，需要 Google OAuth 授权' WHERE name='stitch' AND (description IS NULL OR description='')`,],
+      [`UPDATE mcp_configs SET description='Google Workspace 工具：可操作 Google Sheets、Docs、Slides、Calendar 等，需要 Google OAuth 授权' WHERE name='stitch-mcp-auto' AND (description IS NULL OR description='')`,],
+    ];
+    for (const [sql] of mcpDescriptions) {
+      try { await pool.query(sql); } catch { /* ignore */ }
+    }
+
 
     console.log('[DB] PostgreSQL schema initialized.');
   } catch (err: any) {

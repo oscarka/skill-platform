@@ -282,10 +282,22 @@ async function submitTicketToSandboxService(
     getSetting('doubao_base_url').then(u => u ? getSetting('deepseek_base_url') : getSetting('doubao_base_url')),
   ]);
 
+  // 按 skill 的 mcp_names 过滤：只加载该 skill 声明需要的 MCP
+  // 空数组 [] 或 null = 不加载任何 MCP（runner.py 跳过 discover，省 60s 超时）
   let mcpConfigsJson = '[]';
   try {
-    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
-    if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+    const skillMcpNames: string[] = JSON.parse((skill as any).mcp_names || 'null') ?? [];
+    if (skillMcpNames.length > 0) {
+      const placeholders = skillMcpNames.map(() => '?').join(',');
+      const mcpRows = await db.allAsync<any>(
+        `SELECT name, command, args FROM mcp_configs WHERE name IN (${placeholders})`,
+        skillMcpNames
+      );
+      if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+      console.log(`[MCP] skill ${skill.id} mcp_names=${JSON.stringify(skillMcpNames)} → loaded ${mcpRows.length} configs`);
+    } else {
+      console.log(`[MCP] skill ${skill.id} mcp_names=[] → no MCP loaded (skip 60s discover)`);
+    }
   } catch { /* ignore */ }
 
   let oauthTokens = '';
@@ -369,11 +381,21 @@ async function submitTicketAgentJob(
       : getSetting('doubao_base_url')),
   ]);
 
-  // Load MCP configs
+  // 按 skill 的 mcp_names 过滤：只加载该 skill 声明需要的 MCP
   let mcpConfigsJson = '[]';
   try {
-    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
-    if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+    const skillMcpNames: string[] = JSON.parse((skill as any).mcp_names || 'null') ?? [];
+    if (skillMcpNames.length > 0) {
+      const placeholders = skillMcpNames.map(() => '?').join(',');
+      const mcpRows = await db.allAsync<any>(
+        `SELECT name, command, args FROM mcp_configs WHERE name IN (${placeholders})`,
+        skillMcpNames
+      );
+      if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+      console.log(`[MCP] skill ${skill.id} mcp_names=${JSON.stringify(skillMcpNames)} → loaded ${mcpRows.length} configs`);
+    } else {
+      console.log(`[MCP] skill ${skill.id} mcp_names=[] → no MCP loaded (skip 60s discover)`);
+    }
   } catch { /* ignore */ }
 
   // Load OAuth tokens

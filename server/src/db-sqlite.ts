@@ -53,7 +53,8 @@ export function initDb(): void {
       published_at    INTEGER,
       sandbox_status  TEXT NOT NULL DEFAULT 'none',
       sandbox_test    TEXT,
-      scripts_path    TEXT
+      scripts_path    TEXT,
+      mcp_names       TEXT DEFAULT NULL
     );
 
     CREATE TABLE IF NOT EXISTS tickets (
@@ -141,6 +142,7 @@ export function initDb(): void {
     `ALTER TABLE skills ADD COLUMN sandbox_test TEXT`,
     `ALTER TABLE skills ADD COLUMN scripts_path TEXT`,
     `ALTER TABLE skills ADD COLUMN plugin_config TEXT`,
+    `ALTER TABLE skills ADD COLUMN mcp_names TEXT DEFAULT NULL`,
     // Agent Profile 表（v2）
     `CREATE TABLE IF NOT EXISTS agent_profiles (
       id                  TEXT PRIMARY KEY,

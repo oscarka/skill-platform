@@ -48,6 +48,7 @@ export interface SkillRecord {
   bundle_path?: string;
   bundle_status?: 'none' | 'building' | 'ready' | 'failed';
   installed_at?: number;
+  mcp_names?: string;  // JSON array e.g. '["fetch"]' | '[]' | null
 }
 
 // ─── ClaWHub API client ────────────────────────────────────────────────────────
@@ -109,6 +110,7 @@ function sanitize(skill: SkillRecord, full = false) {
     bundle_version: skill.bundle_version || 0,
     bundle_path: skill.bundle_path || null,
     installed_at: skill.installed_at || null,
+    mcp_names: skill.mcp_names != null ? JSON.parse(skill.mcp_names) : null,
   };
   if (full) {
     return {
@@ -560,17 +562,24 @@ skillRouter.put('/:id', async (req, res) => {
       return res.status(400).json({ error: 'Cannot edit a published skill. Create a new version.' });
 
     const { name, description, category, author_name,
-            prompt_template, code, preferred_model, fallback_model, test_inputs } = req.body;
+            prompt_template, code, preferred_model, fallback_model, test_inputs, mcp_names } = req.body;
+    // mcp_names 可以是数组（前端传来）或 null；序列化为 JSON 字符串存储
+    const mcpNamesJson = mcp_names !== undefined
+      ? JSON.stringify(Array.isArray(mcp_names) ? mcp_names : [])
+      : null;
     await db.runAsync(
       `UPDATE skills SET name=COALESCE(?,name), description=COALESCE(?,description),
        category=COALESCE(?,category), author_name=COALESCE(?,author_name),
        prompt_template=COALESCE(?,prompt_template), code=COALESCE(?,code),
        preferred_model=COALESCE(?,preferred_model), fallback_model=COALESCE(?,fallback_model),
-       test_inputs=COALESCE(?,test_inputs), updated_at=?
+       test_inputs=COALESCE(?,test_inputs),
+       mcp_names=CASE WHEN ?::text IS NOT NULL THEN ?::text ELSE mcp_names END,
+       updated_at=?
        WHERE id=?`,
       [name||null, description||null, category||null, author_name||null,
        prompt_template||null, code||null, preferred_model||null, fallback_model||null,
        test_inputs ? JSON.stringify(test_inputs) : null,
+       mcpNamesJson, mcpNamesJson,
        Date.now(), req.params.id]
     );
     const updated = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);

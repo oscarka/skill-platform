@@ -299,6 +299,12 @@ _MCP_TOOL_REGISTRY: dict = {}  # { "server__tool": {"server": str, "tool": str, 
 def discover_mcp_tools() -> list:
     """运行 mcporter list --schema --json，解析工具列表，注册为 native tools。
     返回新增的 TOOLS 条目列表。"""
+    # 如果 MCP_CONFIGS 为空数组，跳过 discover（省 60s timeout）
+    try:
+        if not json.loads(MCP_CONFIGS):
+            return []
+    except Exception:
+        return []
     try:
         result = subprocess.run(
             "mcporter list --schema --json",
