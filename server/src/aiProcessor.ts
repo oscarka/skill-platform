@@ -200,8 +200,9 @@ export async function processTicket(ticketId: string): Promise<void> {
       // 其他（pending/rejected 或未配置 Service URL）
       //   → 走 Cloud Run Job（原逻辑，保持不变）
       const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
-      if (skill.status === 'approved' && sandboxServiceUrl) {
-        console.log(`[TicketAgent] skill=${skill.id} status=approved → Sandbox Service`);
+      const isVerified = skill.status === 'approved' || skill.status === 'published';
+      if (isVerified && sandboxServiceUrl) {
+        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Sandbox Service`);
         await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl);
       } else {
         console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Cloud Run Job`);
