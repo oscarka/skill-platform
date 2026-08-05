@@ -17,11 +17,180 @@ import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
 import { submitSandboxJob } from './cloudRunJobsClient';
 
+// ─── LLMWiki Integration ──────────────────────────────────────────────────────
+const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
+
+/**
+ * 30 轮计数器：每个用户独立，满 30 轮自动触发 wiki sync
+ * 对应 wiki_sync_trigger.cjs 的 WikiSyncTrigger 逻辑
+ */
+const syncCounters = new Map<string, number>();
+const SYNC_COUNTER_LIMIT = 30;
+
+/**
+ * 后台静默写对话日志到 LLMWiki + 30 轮计数器自动 sync
+ * fire-and-forget，不阻塞主流程
+ */
+function backgroundPostLog(userId: string, userMsg: string, aiReply: string): void {
+  if (!LLMWIKI_BASE || !userId) {
+    console.log(`[WikiLog] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
+    return;
+  }
+  const logContent = `用户：${userMsg}\nAI：${aiReply}`;
+  const url = `${LLMWIKI_BASE}/api/clients/${userId}/logs`;
+  const body = JSON.stringify({
+    type: 'wechat',
+    content: logContent,
+    title: `对话记录 ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+  });
+  console.log(`[WikiLog] POST ${url} userId=${userId} contentLen=${logContent.length}`);
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(10_000),
+  })
+    .then(res => {
+      console.log(`[WikiLog] ✓ 日志写入成功 userId=${userId} HTTP ${res.status}`);
+      // ── 30 轮计数器 ──
+      const count = (syncCounters.get(userId) || 0) + 1;
+      syncCounters.set(userId, count);
+      console.log(`[WikiSync] 计数器 userId=${userId} count=${count}/${SYNC_COUNTER_LIMIT}`);
+      if (count >= SYNC_COUNTER_LIMIT) {
+        console.log(`[WikiSync] 📊 ${SYNC_COUNTER_LIMIT} 轮计数器触发 sync userId=${userId}`);
+        syncCounters.set(userId, 0);
+        triggerWikiSync(userId, 'counter_30');
+      }
+    })
+    .catch(err => console.warn(`[WikiLog] ✗ 日志写入失败（不影响主流程）userId=${userId}:`, err.message));
+}
+
+/**
+ * 后台触发 LLMWiki Wiki sync Pipeline（Skill 完成后调用）
+ */
+function triggerWikiSync(userId: string, reason: string): void {
+  if (!LLMWIKI_BASE || !userId) {
+    console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
+    return;
+  }
+  const url = `${LLMWIKI_BASE}/api/clients/${userId}/sync`;
+  console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId}`);
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(60_000),  // sync 可能需要较长时间（LLM 调用）
+  })
+    .then(async res => {
+      const data = await res.json().catch(() => ({}));
+      console.log(`[WikiSync] ✓ sync完成 userId=${userId} HTTP ${res.status} wikiUpdated=${(data as any).wikiUpdated ?? '?'}`);
+    })
+    .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message));
+}
+
+/**
+ * 自动从 LLMWiki 拉取用户的健康上下文（index.md 摘要 + user_profile）
+ * 在 processAgentChat 入口处调用，作为公共服务层
+ * 
+ * 当用户不存在时（404），自动在 LLMWiki 创建档案，确保每个聊天用户都有 wiki
+ */
+async function fetchWikiContext(userId: string, query: string, fromName?: string): Promise<{ user_profile: string; health_wiki: string; mode: string }> {
+  if (!LLMWIKI_BASE || !userId) {
+    return { user_profile: '', health_wiki: '', mode: 'none' };
+  }
+  try {
+    const url = `${LLMWIKI_BASE}/api/clients/${userId}/context-inject?query=${encodeURIComponent(query)}`;
+    console.log(`[WikiContext] GET ${url}`);
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    
+    if (res.status === 404) {
+      // ── 用户不存在，自动创建 ──
+      console.log(`[WikiContext] 用户 ${userId} 不存在，自动创建档案...`);
+      try {
+        const createRes = await fetch(`${LLMWIKI_BASE}/api/clients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: userId,           // 使用 agent 端的 user_id 作为 llmwiki client id
+            name: fromName || userId,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (createRes.ok) {
+          const created = await createRes.json() as any;
+          console.log(`[WikiContext] ✓ 自动创建成功 id=${created.id} name=${created.name}`);
+          // 再次尝试拉取上下文（创建后已有默认 wiki 模板）
+          const retryRes = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+          if (retryRes.ok) {
+            const data = await retryRes.json() as any;
+            console.log(`[WikiContext] ✓ 创建后拉取成功 mode=${data.mode}`);
+            return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+          }
+        } else {
+          console.warn(`[WikiContext] 自动创建失败 HTTP ${createRes.status}`);
+        }
+      } catch (createErr: any) {
+        console.warn(`[WikiContext] 自动创建异常:`, createErr.message);
+      }
+      return { user_profile: '', health_wiki: '', mode: 'auto_created' };
+    }
+    
+    if (!res.ok) {
+      console.log(`[WikiContext] HTTP ${res.status} — 跳过`);
+      return { user_profile: '', health_wiki: '', mode: 'none' };
+    }
+    const data = await res.json() as any;
+    console.log(`[WikiContext] ✓ mode=${data.mode} wiki=${(data.health_wiki || '').length}字 profile=${(data.user_profile || '').length}字`);
+    return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+  } catch (err: any) {
+    console.warn(`[WikiContext] ✗ 拉取失败（不影响主流程）:`, err.message);
+    return { user_profile: '', health_wiki: '', mode: 'error' };
+  }
+}
+
+/**
+ * 按需获取指定 Wiki 页面（供 Gemini function calling 调用）
+ */
+async function fetchWikiPage(userId: string, pageName: string): Promise<string> {
+  if (!LLMWIKI_BASE || !userId) return '(无健康档案)';
+  try {
+    const url = `${LLMWIKI_BASE}/api/clients/${userId}/wiki`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return '(档案不存在)';
+    const pages = await res.json() as Record<string, string>;
+    return pages[pageName] || `(页面 ${pageName} 不存在)`;
+  } catch (err: any) {
+    console.warn(`[WikiPage] ✗ 获取 ${pageName} 失败:`, err.message);
+    return '(获取失败)';
+  }
+}
+
+// ─── Wiki function calling 工具定义 ─────────────────────────────────────────
+const WIKI_TOOLS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'get_medical_history',
+      description: '获取该客户的完整历史病史、化验结果和生理信号记录。当用户询问具体的检查结果、病史详情、化验指标时调用。',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'get_medication_plan',
+      description: '获取该客户的完整用药方案、当前干预措施和监测目标。当用户询问具体用药、剂量调整、治疗方案时调用。',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+];
+
 // ─── In-memory store for pending async health queries ─────────────────────────
 const pendingRequests = new Map<string, {
-  callbackUrl: string;
-  sessionId:   string;
-  delivery:    { app: string; recipient: string; action: string };
+  callbackUrl:  string;
+  sessionId:    string;
+  delivery:     { app: string; recipient: string; action: string };
+  userId:       string;   // LLMWiki 用户 ID（用于日志回写和 sync）
+  userContent:  string;   // 原始用户消息（用于写日志时配对）
 }>();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -194,54 +363,102 @@ async function callGeminiMessages(
   messages: { role: string; content: string }[],
   apiKey: string,
   maxTokens = 4096,
+  options?: { tools?: any[]; userId?: string },
 ): Promise<string> {
   const BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+  const tools = options?.tools;
+  const userId = options?.userId || '';
 
-  const res = await fetch(`${BASE}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type':  'application/json',
-    },
-    body: JSON.stringify({
+  // 构造初始消息列表（可变，tool call 循环中会追加）
+  const allMessages: any[] = [
+    { role: 'system', content: systemPrompt },
+    ...messages,
+  ];
+
+  // 最多允许 3 轮 tool call（防止死循环）
+  for (let round = 0; round < 4; round++) {
+    const reqBody: any = {
       model:      'gemini-3.6-flash',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages,
-      ],
+      messages:   allMessages,
       max_tokens: maxTokens,
       stream:     false,
-    }),
-    signal: AbortSignal.timeout(60_000),
-  });
+    };
+    if (tools && tools.length > 0 && round < 3) {
+      reqBody.tools = tools;
+    }
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
+    const res = await fetch(`${BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify(reqBody),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const data = await res.json() as any;
+    const choice = data.choices?.[0];
+    const finishReason: string = choice?.finish_reason || 'unknown';
+    const usage = data.usage || {};
+    const assistantMsg = choice?.message;
+
+    // ─── 日志 ──────────────────────────────────────────────────────────────
+    const contentLen = (assistantMsg?.content || '').length;
+    const toolCalls = assistantMsg?.tool_calls || [];
+    const logLevel = finishReason !== 'stop' && finishReason !== 'tool_calls' ? 'WARN' : 'INFO';
+    console.log(
+      `[Gemini][${logLevel}] round=${round} finish_reason=${finishReason}` +
+      ` prompt_tokens=${usage.prompt_tokens ?? '?'}` +
+      ` completion_tokens=${usage.completion_tokens ?? '?'}` +
+      ` content_len=${contentLen} tool_calls=${toolCalls.length}` +
+      ` max_tokens=${maxTokens}` +
+      (contentLen > 0 ? ` preview="${(assistantMsg?.content || '').slice(0, 60).replace(/\n/g, '↵')}..."` : '')
+    );
+    if (finishReason === 'MAX_TOKENS' || finishReason === 'max_tokens') {
+      console.warn(`[Gemini] ⚠️ 输出被截断！content_len=${contentLen}`);
+    }
+
+    // ─── 如果没有 tool calls，返回文本内容 ────────────────────────────────
+    if (toolCalls.length === 0) {
+      const content = assistantMsg?.content || '';
+      if (!content) throw new Error('Gemini returned empty content');
+      return content;
+    }
+
+    // ─── 处理 tool calls ─────────────────────────────────────────────────
+    console.log(`[Gemini] 🔧 ${toolCalls.length} tool call(s): ${toolCalls.map((tc: any) => tc.function?.name).join(', ')}`);
+    allMessages.push(assistantMsg); // 把 assistant 的 tool_call 消息加入
+
+    for (const tc of toolCalls) {
+      const fnName = tc.function?.name || '';
+      let result = '';
+
+      if (fnName === 'get_medical_history') {
+        result = await fetchWikiPage(userId, 'medical_history.md');
+        console.log(`[Gemini] 📄 get_medical_history → ${result.length}字`);
+      } else if (fnName === 'get_medication_plan') {
+        result = await fetchWikiPage(userId, 'medication_plan.md');
+        console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
+      } else {
+        result = `未知工具: ${fnName}`;
+      }
+
+      allMessages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: result,
+      });
+    }
+    // 继续下一轮，让 Gemini 基于 tool 结果生成回复
   }
 
-  const data = await res.json() as any;
-  const choice = data.choices?.[0];
-  const content: string = choice?.message?.content || '';
-  const finishReason: string = choice?.finish_reason || 'unknown';
-  const usage = data.usage || {};
-
-  // ─── 日志：每次 Gemini 调用都记录 finish_reason + token 用量 ──────────────
-  const logLevel = finishReason !== 'stop' ? 'WARN' : 'INFO';
-  console.log(
-    `[Gemini][${logLevel}] finish_reason=${finishReason}` +
-    ` prompt_tokens=${usage.prompt_tokens ?? '?'}` +
-    ` completion_tokens=${usage.completion_tokens ?? '?'}` +
-    ` content_len=${content.length}` +
-    ` max_tokens=${maxTokens}` +
-    ` preview="${content.slice(0, 60).replace(/\n/g, '↵')}..."`
-  );
-  if (finishReason === 'MAX_TOKENS' || finishReason === 'max_tokens') {
-    console.warn(`[Gemini] ⚠️ 输出被 max_tokens(${maxTokens}) 截断！content_len=${content.length}，末尾："${content.slice(-30)}"`);  
-  }
-
-  if (!content) throw new Error('Gemini returned empty content');
-  return content;
+  throw new Error('Tool call loop exceeded max rounds');
 }
 
 // ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
@@ -370,17 +587,20 @@ async function handleChatReply(
   profile: AgentProfile,
 ): Promise<AgentResponse> {
   const { content, meta, history = [], notes = '' } = req;
+  const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
   const fromName = meta.from_name || '您';
   const { app } = delivery;
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
+  const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
+  const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
   const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问助理'}，正在通过${app}与客户${fromName}沟通。
 
 回复风格：${profile.reply_style || '亲切、专业，回复简洁，通常不超过150字'}
 ${profile.service_flow ? `\n服务流程：\n${profile.service_flow}` : ''}${tabooText}
 
 关于该客户的备注信息：
-${notes || '（无特殊备注）'}
+${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 
 任务：用自然、亲切的语气回复客户消息。
 要求：
@@ -393,7 +613,11 @@ ${notes || '（无特殊备注）'}
     { role: 'user', content },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024);
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024,
+    { tools: wikiCtx?.health_wiki ? WIKI_TOOLS : undefined, userId: meta.user_id });
+
+  // ── LLMWiki: 后台写日志 ──
+  backgroundPostLog(meta.user_id, content, reply.trim());
 
   return {
     request_id: requestId,
@@ -414,12 +638,15 @@ async function handleHealthDirect(
   profile: AgentProfile,
   skillRouteLog: SkillRouteLog,
 ): Promise<AgentResponse> {
-  const { content, meta, history = [], notes = '', health_profile = '' } = req;
+  const { content, meta, history = [], notes = '' } = req;
+  const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
   const fromName = meta.from_name || '您';
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
+  const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
+  const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
   const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
-回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}
 
 要求：
 - 不要使用 Markdown 格式
@@ -427,8 +654,7 @@ async function handleHealthDirect(
 - 如无健康档案，基于对话内容给出通用建议`;
 
   const contextBlock = [
-    notes          ? `【客户备注】\n${notes}` : '',
-    health_profile ? `【健康档案】\n${health_profile}` : '',
+    notes ? `【客户备注】\n${notes}` : '',
     `【当前问题】\n${content}`,
   ].filter(Boolean).join('\n\n');
 
@@ -437,7 +663,11 @@ async function handleHealthDirect(
     { role: 'user', content: contextBlock },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048);
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048,
+    { tools: wikiCtx?.health_wiki ? WIKI_TOOLS : undefined, userId: meta.user_id });
+
+  // ── LLMWiki: 后台写日志 ──
+  backgroundPostLog(meta.user_id, content, reply.trim());
 
   return {
     request_id:  requestId,
@@ -462,13 +692,16 @@ async function handleHealthSkill(
   skillRouteLog: SkillRouteLog,
   serviceUrl: string,
 ): Promise<AgentResponse> {
-  const { content, meta, history = [], notes = '', health_profile = '', session_id } = req;
+  const { content, meta, history = [], notes = '', session_id } = req;
+  const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
   const fromName = meta.from_name || '您';
 
   pendingRequests.set(requestId, {
-    callbackUrl: req.callback_url || '',
-    sessionId:   session_id,
+    callbackUrl:  req.callback_url || '',
+    sessionId:    session_id,
     delivery,
+    userId:       meta.user_id || '',      // LLMWiki: 用于日志回写
+    userContent:  content,                 // LLMWiki: 原始用户消息
   });
 
   const recentHistory = history.slice(-20)
@@ -478,7 +711,8 @@ async function handleHealthSkill(
   const sandboxUserMessage = [
     notes          ? `【客户备注】\n${notes}` : '',
     recentHistory  ? `【近期对话记录】\n${recentHistory}` : '',
-    health_profile ? `【健康档案】\n${health_profile}` : '',
+    wikiCtx?.user_profile ? `【客户画像】\n${wikiCtx.user_profile}` : '',
+    wikiCtx?.health_wiki  ? `【健康档案】\n${wikiCtx.health_wiki}` : '',
     `【当前问题】\n${content}`,
     `\n请以亲切专业的口吻回复，不要使用 Markdown 格式，称呼客户为"${fromName}"。`,
   ].filter(Boolean).join('\n\n');
@@ -529,7 +763,7 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
   }
   pendingRequests.delete(requestId);
 
-  const { callbackUrl, sessionId, delivery } = pending;
+  const { callbackUrl, sessionId, delivery, userId, userContent } = pending;
   const agentOutput: string = (jobResult?.output || '（Agent 未返回内容）').trim();
 
   const callbackBody = {
@@ -542,6 +776,11 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
   };
 
   console.log(`[AgentService] Job done for ${requestId}, output length=${agentOutput.length}`);
+
+  // ── LLMWiki: Skill 完成后写日志 + 触发 sync + 重置计数器 ──
+  backgroundPostLog(userId, userContent, agentOutput);
+  triggerWikiSync(userId, `skill_complete:${requestId}`);
+  syncCounters.set(userId, 0); // Skill sync 已触发，重置30轮计数器
 
   if (!callbackUrl) {
     console.log(`[AgentService] No callback_url configured for ${requestId}`);
@@ -584,6 +823,48 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   const delivery: AgentDelivery = { app, recipient, action: 'type_and_send' };
 
   console.log(`[AgentService] request_id=${requestId} session=${req.session_id} source=${req.source}`);
+
+  // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
+  // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
+  const userId = req.meta?.user_id || '';
+  if (userId && LLMWIKI_BASE) {
+    const wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
+    (req as any)._wikiContext = wikiCtx;
+    console.log(`[AgentService] WikiContext injected: mode=${wikiCtx.mode} wiki=${wikiCtx.health_wiki.length}字 profile=${wikiCtx.user_profile.length}字`);
+
+    // ── 新用户 + 带历史对话 → 把历史写入日志并立即 sync ──
+    if ((wikiCtx.mode === 'auto_created' || wikiCtx.mode === 'new_user') && req.history && req.history.length > 0) {
+      console.log(`[AgentService] 新用户带历史 ${req.history.length} 条，批量写入日志并 sync`);
+      // 将 history 配对成 user+assistant 日志
+      const logs: { type: string; content: string; title: string }[] = [];
+      for (let i = 0; i < req.history.length; i += 2) {
+        const userMsg = req.history[i]?.content || '';
+        const aiMsg = req.history[i + 1]?.content || '';
+        if (userMsg) {
+          logs.push({
+            type: 'wechat',
+            content: `用户：${userMsg}${aiMsg ? `\nAI：${aiMsg}` : ''}`,
+            title: `历史对话 ${Math.floor(i / 2) + 1}`,
+          });
+        }
+      }
+      if (logs.length > 0) {
+        // 批量写入
+        fetch(`${LLMWIKI_BASE}/api/clients/${userId}/logs/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ logs }),
+          signal: AbortSignal.timeout(10_000),
+        })
+          .then(res => {
+            console.log(`[WikiLog] ✓ 历史日志批量写入 ${logs.length} 条 HTTP ${res.status}`);
+            // 写入成功后立即 sync
+            triggerWikiSync(userId, 'new_user_with_history');
+          })
+          .catch(err => console.warn(`[WikiLog] ✗ 历史日志写入失败:`, err.message));
+      }
+    }
+  }
 
   // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
   const routeType = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);

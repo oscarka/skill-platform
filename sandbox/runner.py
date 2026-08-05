@@ -1827,6 +1827,13 @@ def main():
             else:
                 customer_message = str(_limited_inputs)
 
+            # ── 将附件内容追加到 customer_message（ticket mode 专用路径）──────
+            # _attachment_section 在非 ticket 模式下已拼入 user_msg，但 ticket 模式
+            # 走独立路径，需要在此处单独追加，否则 Agent 永远看不到 PDF 内容
+            if _attachment_section:
+                customer_message = str(customer_message) + _attachment_section
+                print(f"[ticket-mode] Appended attachment section ({len(_attachment_section)} chars) to customer_message", flush=True)
+
             ticket_deadline = time.time() + max(60, _JOB_TIMEOUT_SECONDS - _job_elapsed() - 30)
             progress("执行", f"Agent 正在处理客户请求...")
 

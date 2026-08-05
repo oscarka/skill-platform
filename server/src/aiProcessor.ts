@@ -4,6 +4,28 @@ import * as db from './db';
 import { runAI } from './aiRunner';
 import { v4 as uuidv4 } from 'uuid';
 import { submitSandboxJob } from './cloudRunJobsClient';
+import { Storage } from '@google-cloud/storage';
+
+const GCS_BUCKET = process.env.BUNDLE_BUCKET || 'skill-platform-bundles-0884226164';
+
+/**
+ * Upload a local file to GCS and return the gs:// path.
+ * Used to pass ticket attachments to Cloud Run Job via __attachments__.
+ */
+async function uploadFileToGcs(localPath: string, ticketId: string): Promise<string | null> {
+  try {
+    const storage = new Storage();
+    const filename = path.basename(localPath);
+    const destPath = `ticket-attachments/${ticketId}/${uuidv4()}-${filename}`;
+    await storage.bucket(GCS_BUCKET).upload(localPath, { destination: destPath });
+    const gcsUri = `gs://${GCS_BUCKET}/${destPath}`;
+    console.log(`[TicketAgent] Uploaded attachment to GCS: ${gcsUri}`);
+    return gcsUri;
+  } catch (err: any) {
+    console.error(`[TicketAgent] GCS upload failed for ${localPath}:`, err.message);
+    return null;
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface TicketInput {
@@ -27,13 +49,14 @@ interface Skill {
   h5_config?: string;
 }
 
-// ─── File reader ─────────────────────────────────────────────────────────────
+// ─── File reader (used only for prompt-type skills running inline, not plugin/agent mode) ───
 function readFileAsText(filePath: string, mimeType: string): string {
   if (!fs.existsSync(filePath)) return '[文件不存在]';
   if (mimeType === 'application/pdf') {
-    // For PDF: return a note (Phase 4 will add real PDF parsing)
+    // PDF 在工单 Agent 模式下通过 GCS __attachments__ 传递，由 sandbox runner 用 pdfplumber 提取
+    // 此处仅用于 prompt-type 内联模式的降级显示
     const stats = fs.statSync(filePath);
-    return `[PDF文件: ${path.basename(filePath)}, 大小: ${(stats.size / 1024).toFixed(1)}KB - 二进制文件，请参考文件名处理]`;
+    return `[PDF文件: ${path.basename(filePath)}, 大小: ${(stats.size / 1024).toFixed(1)}KB]`;
   }
   if (mimeType?.startsWith('text/')) {
     return fs.readFileSync(filePath, 'utf-8').slice(0, 8000);
@@ -74,14 +97,15 @@ function buildPromptFromTemplate(template: string, inputs: TicketInput[]): strin
 
 // ─── Build user message for plugin-type skill (SKILL.md 无占位符，用输入构建 user message)───────────────
 // 这种情况下 SKILL.md 作为 system prompt，客户填写的表单字段作为 user message
+// 文件附件通过 GCS __attachments__ 单独传递，不在此处内联（sandbox runner 负责提取内容）
 function buildUserMessageFromInputs(inputs: TicketInput[]): string {
   const lines: string[] = ['以下是客户提交的信息，请根据这些信息完成任务：'];
   for (const inp of inputs) {
     if (inp.field_type === 'text' && inp.value) {
       lines.push(`《${inp.field_key}》: ${inp.value}`);
     } else if (inp.field_type === 'file' && inp.file_path) {
-      const text = readFileAsText(inp.file_path, inp.mime_type || '');
-      lines.push(`《${inp.file_name || inp.field_key}》:\n${text}`);
+      // 文件名在 user message 里做说明，实际内容由 sandbox 通过 GCS 路径提取
+      lines.push(`《${inp.file_name || inp.field_key}》: [附件已上传，Agent 可通过附件内容读取]`);
     }
   }
   return lines.join('\n');
@@ -278,7 +302,22 @@ async function submitTicketAgentJob(
 
   // Build customer data as single test case
   const userMessage = buildUserMessageFromInputs(inputs);
-  const testInputs = { ticket: userMessage };  // CASE_COUNT=1, one case
+  const testInputs: Record<string, any> = { ticket: userMessage };  // CASE_COUNT=1, one case
+
+  // ── 上传文件附件到 GCS，通过 __attachments__ 传给 sandbox runner ──────────
+  // sandbox runner.py 会从 GCS 下载文件并用 pdfplumber 等工具提取内容，注入 Agent 上下文
+  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path && fs.existsSync(i.file_path));
+  if (fileInputs.length > 0) {
+    const gcsPaths: string[] = [];
+    for (const fi of fileInputs) {
+      const gcsPath = await uploadFileToGcs(fi.file_path!, ticketId);
+      if (gcsPath) gcsPaths.push(gcsPath);
+    }
+    if (gcsPaths.length > 0) {
+      testInputs['__attachments__'] = gcsPaths;
+      console.log(`[TicketAgent] Injecting ${gcsPaths.length} GCS attachment(s) for ticket ${ticketId}`);
+    }
+  }
 
   // Ticket-specific callback URL
   const serviceUrl = process.env.SERVICE_URL || '';

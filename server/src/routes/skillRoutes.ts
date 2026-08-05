@@ -693,12 +693,42 @@ skillRouter.delete('/:id', async (req, res) => {
   try {
     const skill = await db.getAsync<{ id: string }>('SELECT id FROM skills WHERE id=?', [req.params.id]);
     if (!skill) return res.status(404).json({ error: 'Skill not found' });
-    await db.runAsync('DELETE FROM skills WHERE id=?', [req.params.id]);
+
+    // 级联清理关联数据（外键无 CASCADE，需手动按依赖顺序删除）
+    const skillId = req.params.id;
+
+    // 1. 先找出该 skill 下所有工单 ID
+    const tickets = await db.allAsync<{ id: string }>('SELECT id FROM tickets WHERE skill_id=?', [skillId]);
+    const ticketIds = tickets.map(t => t.id);
+
+    if (ticketIds.length > 0) {
+      const ph = ticketIds.map(() => '?').join(',');
+      // 2. 删 ticket_results（依赖 ticket_id）
+      await db.runAsync(`DELETE FROM ticket_results WHERE ticket_id IN (${ph})`, ticketIds);
+      // 3. 删 ticket_inputs（依赖 ticket_id）
+      await db.runAsync(`DELETE FROM ticket_inputs WHERE ticket_id IN (${ph})`, ticketIds);
+    }
+
+    // 4. 删 revision_memories（依赖 skill_id）
+    await db.runAsync('DELETE FROM revision_memories WHERE skill_id=?', [skillId]);
+
+    // 5. 删工单本身
+    if (ticketIds.length > 0) {
+      const ph = ticketIds.map(() => '?').join(',');
+      await db.runAsync(`DELETE FROM tickets WHERE id IN (${ph})`, ticketIds);
+    }
+
+    // 6. 最后删 skill
+    await db.runAsync('DELETE FROM skills WHERE id=?', [skillId]);
+
+    console.log(`[SkillRoute] Deleted skill ${skillId} with ${ticketIds.length} ticket(s)`);
     res.json({ success: true });
   } catch (err: any) {
+    console.error('[SkillRoute] Delete skill error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 // ─── POST /api/skills/:id/sandbox-test ───────────────────────────────────────

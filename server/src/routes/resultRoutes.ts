@@ -4,6 +4,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db';
 import { processTicket } from '../aiProcessor';
+import { marked } from 'marked';
 
 export const resultRouter = express.Router();
 
@@ -87,66 +88,310 @@ resultRouter.get('/:ticketId/report', async (req, res) => {
     if (!result) return res.status(404).json({ error: 'No result available' });
 
     const skill = await db.getAsync<any>('SELECT name FROM skills WHERE id=?', [ticket.skill_id]);
-    const content = result.revised_result || result.raw_result;
+    const rawContent = result.revised_result || result.raw_result || '';
     const date = new Date(ticket.updated_at).toLocaleDateString('zh-CN');
     const time = new Date(ticket.updated_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
-    // Convert markdown-like content to basic HTML
-    const contentHtml = content
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/^#{1,3}\s+(.+)$/gm, '<h3>$1</h3>')
-      .replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
-      .replace(/(<li>.*<\/li>\n?)+/gs, (m: string) => `<ul>${m}</ul>`)
-      .replace(/\n\n/g, '</p><p>')
-      .replace(/\n/g, '<br/>')
-      .replace(/^(?!<)(.+)$/gm, '$1');
+    // Configure marked: GFM (tables, strikethrough) + smart line breaks
+    marked.setOptions({ gfm: true, breaks: true } as any);
+    const contentHtml = marked.parse(rawContent) as string;
 
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>${skill?.name || '报告'} — ${ticket.patient_name || '患者'}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet"/>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap');
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Noto Serif SC', 'Songti SC', serif; background: #fff; color: #1a1a1a; padding: 40px; max-width: 800px; margin: 0 auto; line-height: 1.9; }
-  .report-header { border-bottom: 2px solid #1a1a1a; padding-bottom: 20px; margin-bottom: 28px; }
-  .report-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
-  .report-meta { font-size: 13px; color: #666; display: flex; gap: 24px; flex-wrap: wrap; margin-top: 10px; }
-  .report-meta span::before { content: attr(data-label) '：'; font-weight: 600; color: #333; }
-  .report-body { font-size: 15px; }
-  .report-body h3 { font-size: 16px; font-weight: 700; margin: 20px 0 8px; color: #111; border-left: 3px solid #2563eb; padding-left: 10px; }
-  .report-body p { margin-bottom: 10px; }
-  .report-body ul { padding-left: 20px; margin-bottom: 10px; }
-  .report-body li { margin-bottom: 4px; }
-  .report-body strong { color: #111; }
-  .report-footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 12px; color: #999; display: flex; justify-content: space-between; }
-  .watermark { color: #2563eb; font-weight: 700; }
-  ${result.revised_result ? '.revised-badge { display: inline-block; background: #f0fdf4; color: #16a34a; border: 1px solid #86efac; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-style: normal; margin-left: 8px; }' : ''}
-  @media print { body { padding: 20px; } }
+  /* ─── Reset & Base ─────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --blue:    #1d4ed8;
+    --blue-lt: #eff6ff;
+    --green:   #15803d;
+    --green-lt:#f0fdf4;
+    --amber:   #b45309;
+    --amber-lt:#fffbeb;
+    --red:     #b91c1c;
+    --red-lt:  #fef2f2;
+    --gray:    #374151;
+    --gray-lt: #f9fafb;
+    --border:  #e5e7eb;
+    --text:    #111827;
+    --muted:   #6b7280;
+    --radius:  6px;
+    --serif:   'Noto Serif SC', 'Songti SC', 'STSong', serif;
+    --sans:    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+
+  /* ─── Page ─────────────────────────────────────────────── */
+  body {
+    font-family: var(--serif);
+    font-size: 15px;
+    line-height: 1.85;
+    color: var(--text);
+    background: #f3f4f6;
+    padding: 32px 16px 60px;
+  }
+  .page {
+    background: #fff;
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 48px 56px 56px;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
+  }
+
+  /* ─── Header ───────────────────────────────────────────── */
+  .rpt-header {
+    border-bottom: 2px solid var(--text);
+    padding-bottom: 20px;
+    margin-bottom: 32px;
+  }
+  .rpt-badge {
+    display: inline-block;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--blue);
+    background: var(--blue-lt);
+    border: 1px solid #bfdbfe;
+    border-radius: 4px;
+    padding: 2px 8px;
+    margin-bottom: 10px;
+  }
+  .rpt-title {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -.02em;
+    color: var(--text);
+    line-height: 1.3;
+    margin-bottom: 14px;
+  }
+  .rpt-revised {
+    display: inline-block;
+    font-size: 11px;
+    font-style: normal;
+    font-family: var(--sans);
+    font-weight: 600;
+    color: var(--green);
+    background: var(--green-lt);
+    border: 1px solid #86efac;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-left: 10px;
+    vertical-align: middle;
+  }
+  .rpt-meta {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 24px;
+  }
+  .rpt-meta-item { display: flex; gap: 4px; }
+  .rpt-meta-label { color: var(--gray); font-weight: 600; }
+
+  /* ─── Body ─────────────────────────────────────────────── */
+  .rpt-body { font-size: 15px; color: var(--text); }
+
+  .rpt-body h1, .rpt-body h2, .rpt-body h3,
+  .rpt-body h4, .rpt-body h5 {
+    font-family: var(--sans);
+    font-weight: 700;
+    line-height: 1.4;
+    margin: 28px 0 10px;
+    color: var(--text);
+  }
+  .rpt-body h1 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .rpt-body h2 {
+    font-size: 16px;
+    color: #1e3a8a;
+    border-left: 4px solid var(--blue);
+    padding-left: 12px;
+    margin-left: -16px;
+  }
+  .rpt-body h3 { font-size: 14.5px; color: var(--gray); }
+  .rpt-body h4 { font-size: 14px; color: var(--muted); font-weight: 600; }
+
+  .rpt-body p { margin-bottom: 12px; }
+  .rpt-body strong { font-weight: 700; color: var(--text); }
+  .rpt-body em { color: var(--muted); }
+  .rpt-body a { color: var(--blue); text-decoration: underline; }
+  .rpt-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+  /* ─── Lists ─────────────────────────────────────────────── */
+  .rpt-body ul, .rpt-body ol {
+    padding-left: 22px;
+    margin-bottom: 12px;
+  }
+  .rpt-body li { margin-bottom: 5px; padding-left: 2px; }
+  .rpt-body ul li::marker { color: var(--blue); }
+
+  /* ─── Blockquote ────────────────────────────────────────── */
+  .rpt-body blockquote {
+    border-left: 4px solid var(--border);
+    padding: 10px 16px;
+    margin: 16px 0;
+    color: var(--muted);
+    background: var(--gray-lt);
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  /* ─── Code ──────────────────────────────────────────────── */
+  .rpt-body code {
+    font-family: 'Menlo', 'Monaco', monospace;
+    font-size: 13px;
+    background: var(--gray-lt);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+  .rpt-body pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: var(--radius);
+    padding: 16px;
+    overflow-x: auto;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+  .rpt-body pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  /* ─── Tables ────────────────────────────────────────────── */
+  .rpt-body table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-family: var(--sans);
+    font-size: 13.5px;
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  .rpt-body thead {
+    background: #1e3a8a;
+    color: #fff;
+  }
+  .rpt-body thead th {
+    padding: 11px 14px;
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+    letter-spacing: .02em;
+    font-size: 12.5px;
+  }
+  .rpt-body tbody tr:nth-child(even) { background: #f8fafc; }
+  .rpt-body tbody tr:hover { background: #eff6ff; transition: background .15s; }
+  .rpt-body td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    line-height: 1.65;
+  }
+  .rpt-body tbody tr:last-child td { border-bottom: none; }
+
+  /* ─── Risk level coloring (auto-detect cell text) ───────── */
+  .rpt-body td:first-child:not(:only-child) {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  /* Detect risk level via attribute selector on data-text + JS injection below */
+  .risk-high { color: var(--red)  !important; background: var(--red-lt) !important; }
+  .risk-mid  { color: var(--amber)!important; background: var(--amber-lt)!important; }
+  .risk-low  { color: var(--green)!important; background: var(--green-lt)!important; }
+
+  /* ─── Footer ────────────────────────────────────────────── */
+  .rpt-footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--sans);
+    font-size: 12px;
+    color: var(--muted);
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .rpt-footer-brand { color: var(--blue); font-weight: 700; }
+  .rpt-disclaimer {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 10px;
+    font-family: var(--sans);
+    font-style: italic;
+    line-height: 1.6;
+  }
+
+  /* ─── Print ─────────────────────────────────────────────── */
+  @media print {
+    body { background: #fff; padding: 0; }
+    .page { box-shadow: none; border-radius: 0; padding: 24px 32px; }
+    .rpt-body table { box-shadow: none; border: 1px solid var(--border); }
+    .rpt-body thead { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .rpt-body tbody tr:nth-child(even) { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .risk-high, .risk-mid, .risk-low { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+  @media (max-width: 640px) {
+    .page { padding: 24px 20px; }
+    .rpt-body h2 { margin-left: 0; }
+    .rpt-body table { font-size: 12px; }
+    .rpt-body td, .rpt-body thead th { padding: 8px 10px; }
+  }
 </style>
 </head>
 <body>
-  <div class="report-header">
-    <div class="report-title">
+<div class="page">
+  <div class="rpt-header">
+    <div class="rpt-badge">AI 健康分析报告</div>
+    <div class="rpt-title">
       ${skill?.name || 'AI 分析报告'}
-      ${result.revised_result ? '<em class="revised-badge">医生审阅版</em>' : ''}
+      ${result.revised_result ? '<em class="rpt-revised">医生审阅版</em>' : ''}
     </div>
-    <div class="report-meta">
-      <span data-label="患者">${ticket.patient_name || '—'}</span>
-      <span data-label="手机">${ticket.patient_phone || '—'}</span>
-      <span data-label="报告日期">${date} ${time}</span>
-      ${result.revised_by ? `<span data-label="审阅医生">${result.revised_by}</span>` : ''}
+    <div class="rpt-meta">
+      ${ticket.patient_name ? `<div class="rpt-meta-item"><span class="rpt-meta-label">受检人</span><span>${ticket.patient_name}</span></div>` : ''}
+      ${ticket.patient_phone ? `<div class="rpt-meta-item"><span class="rpt-meta-label">联系电话</span><span>${ticket.patient_phone}</span></div>` : ''}
+      <div class="rpt-meta-item"><span class="rpt-meta-label">报告时间</span><span>${date} ${time}</span></div>
+      ${result.revised_by ? `<div class="rpt-meta-item"><span class="rpt-meta-label">审阅医生</span><span>${result.revised_by}</span></div>` : ''}
     </div>
   </div>
-  <div class="report-body">
-    <p>${contentHtml}</p>
+
+  <div class="rpt-body">
+    ${contentHtml}
   </div>
-  <div class="report-footer">
-    <span>本报告由 <span class="watermark">Skill Platform</span> AI 系统生成</span>
+
+  <div class="rpt-footer">
+    <span>本报告由 <span class="rpt-footer-brand">Skill Platform</span> AI 系统生成</span>
     <span>生成时间：${date} ${time}</span>
   </div>
+  <div class="rpt-disclaimer">
+    ⚠️ 本报告仅供健康信息参考，不替代医生诊断、处方或治疗建议。如有疑虑请及时就医。
+  </div>
+</div>
+
+<script>
+  // Auto-color risk level cells: scan first-column td for 高风险/中风险/低风险
+  document.querySelectorAll('tbody tr').forEach(tr => {
+    const firstTd = tr.querySelector('td:first-child');
+    if (!firstTd) return;
+    const txt = firstTd.textContent.trim();
+    if (/高风险|高危/.test(txt)) firstTd.classList.add('risk-high');
+    else if (/中风险|中危/.test(txt)) firstTd.classList.add('risk-mid');
+    else if (/低风险|低危/.test(txt)) firstTd.classList.add('risk-low');
+  });
+</script>
 </body>
 </html>`;
 
@@ -182,10 +427,10 @@ resultRouter.get('/:ticketId/report', async (req, res) => {
     // Return HTML inline (open in browser → Ctrl+P to print as PDF)
     const filename = `report_${ticket.patient_name || 'report'}_${date.replace(/\//g, '-')}.html`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    // inline so browser opens it instead of downloading
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
     res.send(html);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
+

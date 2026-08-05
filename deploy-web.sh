@@ -9,6 +9,7 @@ REGION="asia-east1"
 echo "🔨 构建主平台镜像（跳过沙箱）..."
 gcloud builds submit \
   --project "$PROJECT" \
+  --region "$REGION" \
   --config cloudbuild-web.yaml \
   .
 
