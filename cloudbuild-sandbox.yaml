@@ -1,0 +1,78 @@
+##############################################################################
+# cloudbuild-sandbox.yaml — 只构建+部署沙箱镜像（跳过主平台重建）
+# 适用于：只改了 sandbox/ 下的代码（runner.py, server.py, Dockerfile.sandbox）
+# 同时更新：Cloud Run Service（审核通过 skill 用）+ Cloud Run Job（沙箱测试用）
+# 用法: bash deploy-sandbox.sh
+##############################################################################
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+steps:
+  # ── 构建沙箱镜像 ────────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build-sandbox
+    env: [DOCKER_BUILDKIT=1]
+    args:
+      - build
+      - --cache-from
+      - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
+      - -t
+      - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:$BUILD_ID
+      - -t
+      - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
+      - -f
+      - Dockerfile.sandbox
+      - .
+
+  # ── Push 沙箱镜像 ───────────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-sandbox
+    args: [push, --all-tags, asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox]
+    waitFor: [build-sandbox]
+
+  # ── 部署持久沙箱 Service（审核通过/已发布 skill 用，min-instances=1）──────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-sandbox-service
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - sandbox-service
+      - --image=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:$BUILD_ID
+      - --region=asia-east1
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --port=8080
+      - --memory=2Gi
+      - --cpu=2
+      - --min-instances=1
+      - --max-instances=10
+      - --concurrency=20
+      - --timeout=2100
+      - --set-env-vars=SANDBOX_SECRET=sandbox-secret-2024,DB_SCHEMA=skill_platform
+      - --set-secrets=DATABASE_URL=skill-platform-db-url:latest,DOUBAO_API_KEY=skill-platform-doubao-key:latest,DEEPSEEK_API_KEY=skill-platform-deepseek-key:latest,TAVILY_API_KEY=TAVILY_API_KEY:latest
+    waitFor: [push-sandbox]
+
+  # ── 更新 Cloud Run Job（沙箱测试用，CMD 覆盖为 runner.py）────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: update-sandbox-job
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - update
+      - skill-sandbox-job
+      - --image=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
+      - --region=asia-east1
+      - --task-timeout=2000
+      - --command=python3
+      - --args=/runner.py
+    waitFor: [push-sandbox]
+
+images:
+  - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:$BUILD_ID
+  - asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
