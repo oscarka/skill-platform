@@ -87,7 +87,13 @@ print(json.dumps({
     -d "$body")
 
   local ticket_id
-  ticket_id=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+  ticket_id=$(echo "$resp" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+# API 返回 {ticket: {...}} 或直接 {id: ...}
+if 'ticket' in d: d = d['ticket']
+print(d.get('id',''))
+" 2>/dev/null || true)
 
   if [[ -z "$ticket_id" ]]; then
     echo "  [$label] ❌ 创建工单失败: $resp"

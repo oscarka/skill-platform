@@ -31,6 +31,24 @@ export interface SandboxServiceJob {
 }
 
 /**
+ * 获取 Cloud Run Identity Token（用于调用 no-allow-unauthenticated 的 Service）
+ * 在 Cloud Run 环境下从 metadata server 获取，本地降级跳过认证。
+ */
+async function getIdentityToken(audience: string): Promise<string> {
+  try {
+    const metaUrl = `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=${encodeURIComponent(audience)}`;
+    const res = await fetch(metaUrl, {
+      headers: { 'Metadata-Flavor': 'Google' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) return await res.text();
+  } catch {
+    // 不在 GCP 环境，本地跳过
+  }
+  return '';
+}
+
+/**
  * 提交执行请求到持久沙箱 Service。
  * 立刻返回 jobId，不等待完成（和 Cloud Run Job 的 submitSandboxJob 行为一致）。
  */
@@ -62,14 +80,19 @@ export async function submitToSandboxService(
 
   const url = `${serviceUrl.replace(/\/$/, '')}/run`;
 
+  // Cloud Run Service 需要 Identity Token 认证
+  const idToken = await getIdentityToken(serviceUrl);
+  const headers: Record<string, string> = {
+    'Content-Type':     'application/json',
+    'X-Sandbox-Secret': secret,
+  };
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
   const res = await fetch(url, {
     method:  'POST',
-    headers: {
-      'Content-Type':     'application/json',
-      'X-Sandbox-Secret': secret,
-    },
+    headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),  // 15s 连接超时（热实例应 < 500ms 响应）
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
