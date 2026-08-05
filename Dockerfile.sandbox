@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # ─── Skill Sandbox Image ──────────────────────────────────────────────────────
-# 用于 Cloud Run Job 沙箱执行 Plugin Skill
+# 双用途镜像：
+#   Cloud Run Job（沙箱测试）：CMD 在提交时被覆盖为 python3 /runner.py
+#   Cloud Run Service（审核通过 skill）：默认 CMD 启动 gunicorn server.py
 # 参考 OpenClaw Dockerfile.sandbox 设计
 FROM debian:bookworm-slim
 
@@ -33,7 +35,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     pandas numpy \
     openai \
     google-cloud-storage \
-    psycopg2-binary
+    psycopg2-binary \
+    flask gunicorn
 
 # 创建沙箱用户
 RUN useradd --create-home --shell /bin/bash sandbox
@@ -41,6 +44,7 @@ WORKDIR /home/sandbox
 
 # 复制 runner 脚本及依赖模块
 COPY sandbox/runner.py /runner.py
+COPY sandbox/server.py /server.py
 COPY sandbox/transcript.py /transcript.py
 COPY sandbox/truncation.py /truncation.py
 COPY sandbox/redact.py /redact.py
@@ -48,4 +52,6 @@ COPY sandbox/requirements.txt /requirements.txt
 
 USER sandbox
 
-CMD ["python3", "/runner.py"]
+# 默认 CMD：Cloud Run Service 模式（gunicorn 启动 HTTP 服务）
+# Cloud Run Job 模式：提交 Execution 时通过 overrides.containerOverrides[].command 覆盖为 ["python3", "/runner.py"]
+CMD ["gunicorn", "--workers=4", "--threads=2", "--bind=0.0.0.0:8080", "--timeout=2100", "server:app"]

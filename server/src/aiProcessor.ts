@@ -4,6 +4,7 @@ import * as db from './db';
 import { runAI } from './aiRunner';
 import { v4 as uuidv4 } from 'uuid';
 import { submitSandboxJob } from './cloudRunJobsClient';
+import { submitToSandboxService } from './sandboxServiceClient';
 import { Storage } from '@google-cloud/storage';
 
 const GCS_BUCKET = process.env.BUNDLE_BUCKET || 'skill-platform-bundles-0884226164';
@@ -42,6 +43,7 @@ interface Skill {
   id: string;
   name: string;
   skill_type: 'prompt' | 'code' | 'plugin';
+  status?: string;   // 'pending' | 'approved' | 'rejected' | 'published'
   prompt_template?: string;
   code?: string;
   preferred_model?: string;
@@ -191,9 +193,20 @@ export async function processTicket(ticketId: string): Promise<void> {
       rawResult = aiRes.text;
 
     } else if (skill.skill_type === 'plugin' && skill.prompt_template) {
-      // plugin 类型：走 Agent Runner（Cloud Run Job，和沙箱测试完全一样）
-      // 客户填写的表单数据作为唯一 test case，SKILL.md 作为 Agent 指令
-      await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs);
+      // plugin 类型：走 Agent Runner
+      // ── 路由策略 ────────────────────────────────────────────────────────
+      // 审核通过的 skill（status='approved'）+ 配置了 SANDBOX_SERVICE_URL
+      //   → 走持久沙箱 Service（热实例，冷启动 < 100ms）
+      // 其他（pending/rejected 或未配置 Service URL）
+      //   → 走 Cloud Run Job（原逻辑，保持不变）
+      const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
+      if (skill.status === 'approved' && sandboxServiceUrl) {
+        console.log(`[TicketAgent] skill=${skill.id} status=approved → Sandbox Service`);
+        await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl);
+      } else {
+        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Cloud Run Job`);
+        await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs);
+      }
       // Agent 异步运行，callback 会写回结果并更新工单状态
       // 此处早返回，ticket 状态保持 'processing'
       return;
@@ -250,7 +263,91 @@ async function getSetting(key: string): Promise<string> {
   return row?.value || '';
 }
 
+// ─── Submit approved-skill ticket to Persistent Sandbox Service ───────────────
+// 审核通过的 skill 走这条路径，调用常驻热实例 Service，消灭冷启动
+async function submitTicketToSandboxService(
+  ticketId: string,
+  skillId: string,
+  skill: Skill,
+  inputs: TicketInput[],
+  serviceUrl: string
+): Promise<void> {
+  // 复用 submitTicketAgentJob 的 key/config 加载逻辑
+  const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
+    getSetting('ai_model'),
+    getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+    getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+    getSetting('doubao_api_key').then(k => k ? getSetting('deepseek_api_key') : getSetting('doubao_api_key')),
+    getSetting('doubao_base_url').then(u => u ? getSetting('deepseek_base_url') : getSetting('doubao_base_url')),
+  ]);
+
+  let mcpConfigsJson = '[]';
+  try {
+    const mcpRows = await db.allAsync<any>('SELECT name, command, args FROM mcp_configs', []);
+    if (mcpRows.length > 0) mcpConfigsJson = JSON.stringify(mcpRows);
+  } catch { /* ignore */ }
+
+  let oauthTokens = '';
+  try {
+    const storedTokens = await db.allAsync<any>(
+      `SELECT provider, mcp_name, access_token, token_data, expires_at
+       FROM mcp_oauth_tokens WHERE expires_at = 0 OR expires_at > ?`, [Date.now()]
+    );
+    if (storedTokens.length > 0) {
+      const tokenMap: Record<string, any> = {};
+      for (const t of storedTokens) {
+        let tokenObj: Record<string, any> = { access_token: t.access_token };
+        if (t.token_data) { try { tokenObj = { ...JSON.parse(t.token_data), access_token: t.access_token }; } catch {} }
+        if (!tokenObj.expiry_date && t.expires_at) tokenObj.expiry_date = parseInt(t.expires_at);
+        tokenMap[t.provider] = tokenObj;
+        if (t.mcp_name) tokenMap[t.mcp_name] = tokenObj;
+      }
+      oauthTokens = JSON.stringify(tokenMap);
+    }
+  } catch { /* ignore */ }
+
+  const userMessage = buildUserMessageFromInputs(inputs);
+  const testInputs: Record<string, any> = { ticket: userMessage };
+
+  // 附件处理（和 Job 路径完全一致）
+  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path && fs.existsSync(i.file_path));
+  if (fileInputs.length > 0) {
+    const gcsPaths: string[] = [];
+    for (const fi of fileInputs) {
+      const gcsPath = await uploadFileToGcs(fi.file_path!, ticketId);
+      if (gcsPath) gcsPaths.push(gcsPath);
+    }
+    if (gcsPaths.length > 0) {
+      testInputs['__attachments__'] = gcsPaths;
+      console.log(`[SandboxService] Injecting ${gcsPaths.length} GCS attachment(s) for ticket ${ticketId}`);
+    }
+  }
+
+  const svcUrl = process.env.SERVICE_URL || '';
+  const callbackUrl = svcUrl ? `${svcUrl}/api/tickets/${ticketId}/agent-callback` : '';
+  const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+
+  const { jobId } = await submitToSandboxService(serviceUrl, {
+    skillId,
+    userInputs:     testInputs,
+    model:          model || 'doubao-1-5-pro-32k-250115',
+    aiKey,
+    aiBaseUrl:      aiBase,
+    fallbackAiKey:  fallbackKey,
+    fallbackAiBase: fallbackBase,
+    callbackUrl,
+    sandboxSecret,
+    mcpConfigs:     mcpConfigsJson,
+    oauthTokens,
+    caseCount:      1,
+    ticketMode:     true,
+  });
+
+  console.log(`[SandboxService] Job submitted for ticket ${ticketId}: ${jobId}`);
+}
+
 // ─── Submit plugin-type ticket to Cloud Run Job (Agent Runner) ─────────────────
+
 // Mirrors runSandboxTest() in sandboxService.ts but uses ticket-specific callback URL
 async function submitTicketAgentJob(
   ticketId: string,
