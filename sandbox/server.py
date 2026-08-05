@@ -106,14 +106,19 @@ def run():
 
     # ── 后台线程：等待完成 + 超时 kill ─────────────────────────────────────
     def _monitor(job_id: str, proc: subprocess.Popen, timeout: int):
+        deadline = time.time() + timeout
         try:
-            stdout, _ = proc.communicate(timeout=timeout)
-            print(f"[server] job {job_id} done (rc={proc.returncode}) stdout_len={len(stdout or '')}", flush=True)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            print(f"[server] job {job_id} KILLED after {timeout}s timeout", flush=True)
+            # 实时转发子进程输出到 Cloud Logging（便于调试）
+            for line in proc.stdout:
+                print(f"[job:{job_id}] {line.rstrip()}", flush=True)
+                if time.time() > deadline:
+                    proc.kill()
+                    print(f"[server] job {job_id} KILLED after {timeout}s timeout", flush=True)
+                    break
+            proc.wait()
+            print(f"[server] job {job_id} done (rc={proc.returncode})", flush=True)
         except Exception as e:
+            proc.kill()
             print(f"[server] job {job_id} monitor error: {e}", flush=True)
         finally:
             with _jobs_lock:
