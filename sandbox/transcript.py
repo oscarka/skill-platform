@@ -72,7 +72,9 @@ class TranscriptManager:
         self._append_raw(header, header)
 
     # ─── 追加消息 ────────────────────────────────────────────────────────────
-    def append_assistant(self, turn: int, content: str, tool_calls: list = None) -> str:
+    def append_assistant(self, turn: int, content: str, tool_calls: list = None,
+                         model: str = None, usage: dict = None, finish_reason: str = None,
+                         request_meta: dict = None) -> str:
         """追加 AI 助手回复"""
         entry_id = _gen_id()
         entry = {
@@ -84,6 +86,11 @@ class TranscriptManager:
             "tool_calls": tool_calls or [],
             "ts": _now_iso(),
         }
+        if model: entry["model"] = model
+        if usage: entry["usage"] = usage
+        if finish_reason: entry["finish_reason"] = finish_reason
+        if request_meta: entry["request_meta"] = request_meta
+
         # 完整版：脱敏但不截断（除非极端大）
         full_entry = redact_message_full(entry)
         if len(full_entry.get("content", "")) > FULL_CONTENT_MAX_CHARS:

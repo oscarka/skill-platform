@@ -147,8 +147,8 @@ export default function AgentLogs() {
     <div>
       <div className="page-header">
         <div>
-          <h1>📜 Agent 执行日志 (CUA Control Center)</h1>
-          <p>CUA Live Timeline 风格 — 全量链条追踪、多阶段 Agent 思考、Tool 阶段拆解与交互分析</p>
+          <h1>📜 Agent 全链条控制台 (CUA Live Console)</h1>
+          <p>全量链条追踪、HTTP 接口 Payload、Tokens 消耗、System Prompt 深度上下文与工具拆解</p>
         </div>
       </div>
 
@@ -231,7 +231,7 @@ export default function AgentLogs() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#94a3b8' }}>
               <div style={{ fontSize: '3rem', marginBottom: 12 }}>💻</div>
               <div style={{ fontWeight: 600, color: '#334155' }}>请在左侧列表选择一条工单查看完整 Agent 上下文与执行日志</div>
-              <div style={{ fontSize: '.8rem', color: '#94a3b8', marginTop: 4 }}>支持 CUA-Style 时间轴拆解、上下文折叠、工具 Payload 深度检索</div>
+              <div style={{ fontSize: '.8rem', color: '#94a3b8', marginTop: 4 }}>CUA Log UI — HTTP Payload、Tokens 统计、System Prompt 与 Tool 响应全展开</div>
             </div>
           ) : loadingDetail ? (
             <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>加载工单日志数据...</div>
@@ -240,7 +240,7 @@ export default function AgentLogs() {
           ) : (
             <>
               {/* Header Info Banner */}
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '12px 16px', marginBottom: 14 }}>
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '12px 16px', marginBottom: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
                   <div>
                     <h2 style={{ fontSize: '1.05rem', fontWeight: 700, margin: '0 0 6px 0', color: '#0f172a', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -279,6 +279,23 @@ export default function AgentLogs() {
                   </div>
                 </div>
               </div>
+
+              {/* USER INPUTS BANNER (CUA Style Input Payload Context) */}
+              {detailData.inputs && detailData.inputs.length > 0 && (
+                <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '10px', padding: '10px 14px', marginBottom: 12 }}>
+                  <div style={{ fontSize: '.78rem', fontWeight: 700, color: '#0369a1', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>📥 客户提交参数与上下文 (User Input Payload)</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detailData.inputs.map((inp: any, idx: number) => (
+                      <div key={idx} style={{ fontSize: '.78rem', color: '#0c4a6e', background: '#fff', padding: '6px 10px', borderRadius: 6, border: '1px solid #e0f2fe' }}>
+                        <span style={{ fontWeight: 600, color: '#0284c7' }}>{inp.field_name || `Input ${idx + 1}`}: </span>
+                        <span style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>{inp.field_value || (inp.file_path ? `📁 ${inp.file_path}` : '(empty)')}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Tabs */}
               <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, marginBottom: 12, alignItems: 'center' }}>
@@ -350,7 +367,6 @@ export default function AgentLogs() {
                           const isAssistant = t.role === 'assistant';
                           const isTool = t.role === 'tool';
 
-                          // Icon dot
                           let dotChar = '•';
                           let dotBg = '#fff';
                           let dotBorder = '#94a3b8';
@@ -372,6 +388,8 @@ export default function AgentLogs() {
                           }
 
                           const timeStr = formatTimeOnly(t.ts);
+                          const reqMeta = t.request_meta || {};
+                          const usage = t.usage || {};
 
                           return (
                             <div key={i} style={{ position: 'relative', zIndex: 1 }}>
@@ -428,6 +446,25 @@ export default function AgentLogs() {
                                   <span style={{ fontSize: '.72rem', color: '#94a3b8', fontFamily: 'monospace' }}>{timeStr}</span>
                                 </div>
 
+                                {/* HTTP API REQUEST BANNER (CUA Log Style Endpoint Bar) */}
+                                {(isAssistant || isSystem || isTool) && (
+                                  <div style={{ marginTop: 4, marginBottom: 8, padding: '6px 10px', background: '#0f172a', color: '#94a3b8', borderRadius: '8px', fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                    <div>
+                                      <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>{reqMeta.method || (isTool ? 'EXEC' : 'POST')}</span>{' '}
+                                      <span style={{ color: '#f1f5f9' }}>{reqMeta.endpoint || (isTool ? `tool://${t.tool || 'mcp'}` : `/chat/completions`)}</span>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 10, fontSize: '10px' }}>
+                                      {t.model && <span style={{ color: '#c084fc' }}>model: {t.model}</span>}
+                                      {usage.prompt_tokens != null && (
+                                        <span style={{ color: '#34d399' }}>
+                                          tokens: in={usage.prompt_tokens} / out={usage.completion_tokens || 0}
+                                        </span>
+                                      )}
+                                      {t.finish_reason && <span style={{ color: '#f59e0b' }}>finish: {t.finish_reason}</span>}
+                                    </div>
+                                  </div>
+                                )}
+
                                 {/* EVENT CONTENT */}
                                 {isEvent && (
                                   <div style={{ fontSize: '.82rem', color: '#92400e', fontWeight: 500 }}>
@@ -439,9 +476,9 @@ export default function AgentLogs() {
                                 {isSystem && t.content && (
                                   <details open={expandAll} style={{ marginTop: 4 }}>
                                     <summary style={{ fontSize: '11px', fontWeight: 600, color: '#4f46e5', cursor: 'pointer', userSelect: 'none' }}>
-                                      ▶ 展开/收起 System Prompt 内容 (共 {t.content.length} 字)
+                                      ▶ 展开查看 System Prompt 完整指令 (共 {t.content.length} 字)
                                     </summary>
-                                    <pre style={{ background: '#0f172a', color: '#e2e8f0', padding: 12, borderRadius: 8, fontSize: '11px', marginTop: 8, maxHeight: 350, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
+                                    <pre style={{ background: '#0f172a', color: '#e2e8f0', padding: 12, borderRadius: 8, fontSize: '11px', marginTop: 8, maxHeight: 450, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
                                       {t.content}
                                     </pre>
                                   </details>
@@ -451,7 +488,7 @@ export default function AgentLogs() {
                                 {isAssistant && (
                                   <div>
                                     {t.content && (
-                                      <div style={{ fontSize: '.85rem', color: '#3b0764', lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'rgba(255,255,255,0.7)', padding: 10, borderRadius: 8, border: '1px solid #f3e8ff' }}>
+                                      <div style={{ fontSize: '.85rem', color: '#3b0764', lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'rgba(255,255,255,0.8)', padding: 10, borderRadius: 8, border: '1px solid #f3e8ff' }}>
                                         {t.content}
                                       </div>
                                     )}
@@ -462,13 +499,13 @@ export default function AgentLogs() {
                                           const tcName = tc.name || tc.function?.name || 'tool';
                                           const tcArgs = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments, null, 2);
                                           return (
-                                            <div key={idx} style={{ background: '#1e293b', borderRadius: 8, padding: '8px 12px', marginTop: 4 }}>
+                                            <div key={idx} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px', marginTop: 6 }}>
                                               <div style={{ color: '#38bdf8', fontSize: '11px', fontWeight: 'bold', fontFamily: 'monospace' }}>
                                                 🔧 {tcName}
                                               </div>
                                               <details open={expandAll} style={{ marginTop: 4 }}>
                                                 <summary style={{ fontSize: '10px', color: '#94a3b8', cursor: 'pointer', fontFamily: 'monospace' }}>
-                                                  ▶ 展开查看 Tool Arguments
+                                                  ▶ 展开查看 Tool Arguments & Request Payload
                                                 </summary>
                                                 <pre style={{ background: 'transparent', color: '#34d399', padding: 0, margin: '6px 0 0 0', fontSize: '11px', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
                                                   {tcArgs}
@@ -490,21 +527,21 @@ export default function AgentLogs() {
                                     </div>
                                     <details open={expandAll} style={{ marginTop: 6 }}>
                                       <summary style={{ fontSize: '11px', fontWeight: 600, color: '#059669', cursor: 'pointer', userSelect: 'none' }}>
-                                        ▶ 展开查看工具 Response 数据 & Context Payload
+                                        ▶ 展开查看详细请求参数 (Request Payload) & 响应上下文 (Response)
                                       </summary>
                                       <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
                                         {t.input && (
                                           <div>
-                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Input Arguments]</div>
-                                            <pre style={{ background: '#0f172a', color: '#38bdf8', padding: 8, borderRadius: 6, fontSize: '11px', margin: 0, whiteSpace: 'pre-wrap' }}>
+                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Input Arguments & Payload]</div>
+                                            <pre style={{ background: '#0f172a', color: '#38bdf8', padding: 10, borderRadius: 6, fontSize: '11px', margin: 0, whiteSpace: 'pre-wrap' }}>
                                               {typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2)}
                                             </pre>
                                           </div>
                                         )}
                                         {t.output && (
                                           <div>
-                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Response Result Data]</div>
-                                            <pre style={{ background: '#0f172a', color: '#34d399', padding: 10, borderRadius: 6, fontSize: '11px', margin: 0, maxHeight: 350, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Response Result Context]</div>
+                                            <pre style={{ background: '#0f172a', color: '#34d399', padding: 10, borderRadius: 6, fontSize: '11px', margin: 0, maxHeight: 450, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
                                               {t.output}
                                             </pre>
                                           </div>

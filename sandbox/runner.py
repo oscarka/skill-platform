@@ -1283,7 +1283,8 @@ def executor_react_loop(
         messages[0] = {"role": "system", "content": base_system + progress_hint}
 
         resp = call_ai(messages, tools=executor_tools)
-        msg = resp["choices"][0]["message"]
+        choice0 = resp["choices"][0]
+        msg = choice0["message"]
         msg.pop("_thinking", None)  # 清除内部字段，不影响消息历史
         messages.append(msg)
 
@@ -1292,10 +1293,27 @@ def executor_react_loop(
         if content:
             collected_outputs.append(content)
 
+        used_model = resp.get("model") or AI_MODEL
+        usage = resp.get("usage") or {}
+        finish_reason = choice0.get("finish_reason", "stop")
+        req_meta = {
+            "method": "POST",
+            "endpoint": f"{AI_BASE_URL.rstrip('/')}/chat/completions",
+            "model": used_model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "stream": True,
+            "tool_choice": "auto" if executor_tools else "none",
+            "messages_count": len(messages) - 1,
+        }
+
         tm.append_assistant(
             turn=turn + 1,
             content=content,
             tool_calls=[{"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]} for tc in tc_list],
+            model=used_model,
+            usage=usage,
+            finish_reason=finish_reason,
+            request_meta=req_meta,
         )
 
         if not tc_list:
