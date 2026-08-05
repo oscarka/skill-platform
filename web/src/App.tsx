@@ -11,6 +11,7 @@ import SkillTest from './pages/SkillTest';
 import McpConfigs from './pages/McpConfigs';
 import OAuthManager from './pages/OAuthManager';
 import AgentProfile from './pages/AgentProfile';
+import AgentLogs from './pages/AgentLogs';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="tickets" element={<TicketList />} />
           <Route path="tickets/new" element={<TicketCreate />} />
           <Route path="tickets/:id" element={<TicketDetail />} />
+          <Route path="agent-logs" element={<AgentLogs />} />
           <Route path="test" element={<SkillTest />} />
           <Route path="mcp-configs" element={<McpConfigs />} />
           <Route path="oauth" element={<OAuthManager />} />

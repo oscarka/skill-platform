@@ -115,8 +115,8 @@ export const api = {
 
   // ─── Results ───────────────────────────────────────────────────────────────
   results: {
-    process: (ticketId: string) =>
-      request<any>(`/results/process/${ticketId}`, { method: 'POST' }),
+    process: (ticketId: string, overrideModel?: string) =>
+      request<any>(`/results/process/${ticketId}`, { method: 'POST', body: JSON.stringify({ override_model: overrideModel || null }) }),
     get: (ticketId: string) => request<any>(`/results/${ticketId}`),
     update: (ticketId: string, body: { revised_result?: string; revision_notes?: string; revised_by?: string }) =>
       request<any>(`/results/${ticketId}`, { method: 'PUT', body: JSON.stringify(body) }),

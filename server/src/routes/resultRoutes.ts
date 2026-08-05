@@ -13,6 +13,7 @@ if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
 
 // ─── POST /api/results/process/:ticketId ─────────────────────────────────────
 // Trigger AI processing. Runs async (doesn't block response).
+// Body: { override_model?: string } — optional model override for testing
 resultRouter.post('/process/:ticketId', async (req, res) => {
   try {
     const ticket = await db.getAsync<any>('SELECT id, status FROM tickets WHERE id=?', [req.params.ticketId]);
@@ -20,11 +21,16 @@ resultRouter.post('/process/:ticketId', async (req, res) => {
     if (!['submitted', 'done', 'error'].includes(ticket.status))
       return res.status(400).json({ error: `Ticket status is "${ticket.status}", must be submitted/done/error to reprocess` });
 
+    const overrideModel: string | undefined = req.body?.override_model || undefined;
+    if (overrideModel) {
+      console.log(`[Processor] Ticket ${ticket.id} reprocess with overrideModel=${overrideModel}`);
+    }
+
     // Respond immediately, process in background
-    res.json({ message: 'Processing started', ticket_id: ticket.id });
+    res.json({ message: 'Processing started', ticket_id: ticket.id, override_model: overrideModel || null });
 
     // Run async (non-blocking)
-    processTicket(ticket.id).catch(err => {
+    processTicket(ticket.id, { overrideModel }).catch(err => {
       console.error(`[Processor] Ticket ${ticket.id} failed:`, err.message);
     });
   } catch (err: any) {

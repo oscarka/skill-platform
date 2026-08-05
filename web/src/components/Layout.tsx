@@ -13,6 +13,7 @@ const NAV = [
     items: [
       { to: '/tickets', label: '工单列表', icon: '📋' },
       { to: '/tickets/new', label: '创建工单', icon: '🔗' },
+      { to: '/agent-logs', label: 'Agent 执行日志', icon: '📜' },
     ],
   },
   {

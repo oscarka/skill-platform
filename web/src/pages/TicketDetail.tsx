@@ -31,6 +31,7 @@ export default function TicketDetail() {
   const [revisedBy, setRevisedBy] = useState('');
   const [savingRevision, setSavingRevision] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [overrideModel, setOverrideModel] = useState('');
   // Poll ref
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -77,8 +78,8 @@ export default function TicketDetail() {
 
   const handleProcess = async () => {
     try {
-      await api.results.process(id!);
-      flash('success', 'AI 处理已启动，请稍候…');
+      await api.results.process(id!, overrideModel || undefined);
+      flash('success', `AI 处理已启动${overrideModel ? `（模型：${overrideModel}）` : ''}，请稍候…`);
       setTimeout(load, 1000);
     } catch (e: any) { flash('error', e.message); }
   };
@@ -166,9 +167,26 @@ export default function TicketDetail() {
       <div className="card mb-4">
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           {canProcess && (
-            <button className="btn btn-primary" onClick={handleProcess} disabled={processing}>
-              {processing ? '⏳ AI 处理中…' : '🤖 重新 AI 处理'}
-            </button>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <select
+                className="form-input"
+                style={{ fontSize: '.8rem', padding: '4px 8px', width: 'auto', minWidth: 160 }}
+                value={overrideModel}
+                onChange={e => setOverrideModel(e.target.value)}
+                disabled={processing}
+                title="选择执行模型（留空=使用系统默认）"
+              >
+                <option value="">🤖 默认模型</option>
+                <option value="doubao-seed-1-8-251228">豆包 Seed 1.8</option>
+                <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                <option value="deepseek-chat">DeepSeek V3</option>
+                <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+              </select>
+              <button className="btn btn-primary" onClick={handleProcess} disabled={processing}>
+                {processing ? '⏳ AI 处理中…' : '🤖 重新 AI 处理'}
+              </button>
+            </div>
           )}
           {canReturn && (
             <button className="btn btn-secondary" onClick={() => setShowReturn(v => !v)}>↩️ 打回补充</button>

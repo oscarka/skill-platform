@@ -163,7 +163,7 @@ async function runCodeSkill(
 }
 
 // ─── Main processor ───────────────────────────────────────────────────────────
-export async function processTicket(ticketId: string): Promise<void> {
+export async function processTicket(ticketId: string, opts?: { overrideModel?: string }): Promise<void> {
   const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
   if (!ticket) throw new Error('Ticket not found');
 
@@ -202,11 +202,11 @@ export async function processTicket(ticketId: string): Promise<void> {
       const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
       const isVerified = skill.status === 'approved' || skill.status === 'published';
       if (isVerified && sandboxServiceUrl) {
-        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Sandbox Service`);
-        await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl);
+        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Sandbox Service (model=${opts?.overrideModel || 'default'})`);
+        await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl, opts?.overrideModel);
       } else {
-        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Cloud Run Job`);
-        await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs);
+        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Cloud Run Job (model=${opts?.overrideModel || 'default'})`);
+        await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs, opts?.overrideModel);
       }
       // Agent 异步运行，callback 会写回结果并更新工单状态
       // 此处早返回，ticket 状态保持 'processing'
@@ -271,7 +271,8 @@ async function submitTicketToSandboxService(
   skillId: string,
   skill: Skill,
   inputs: TicketInput[],
-  serviceUrl: string
+  serviceUrl: string,
+  overrideModel?: string
 ): Promise<void> {
   // 复用 submitTicketAgentJob 的 key/config 加载逻辑
   const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
@@ -340,10 +341,13 @@ async function submitTicketToSandboxService(
   const callbackUrl = svcUrl ? `${svcUrl}/api/tickets/${ticketId}/agent-callback` : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
+  const effectiveModel = overrideModel || skill.preferred_model || model || 'doubao-1-5-pro-32k-250115';
+  console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} setting=${model} → effective=${effectiveModel}`);
+
   const { jobId } = await submitToSandboxService(serviceUrl, {
     skillId,
     userInputs:     testInputs,
-    model:          model || 'doubao-1-5-pro-32k-250115',
+    model:          effectiveModel,
     aiKey,
     aiBaseUrl:      aiBase,
     fallbackAiKey:  fallbackKey,
@@ -366,7 +370,8 @@ async function submitTicketAgentJob(
   ticketId: string,
   skillId: string,
   skill: Skill,
-  inputs: TicketInput[]
+  inputs: TicketInput[],
+  overrideModel?: string
 ): Promise<void> {
   // Load AI keys from settings (same as sandboxService)
   const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
@@ -448,11 +453,14 @@ async function submitTicketAgentJob(
 
   // skillMdB64 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
 
+  const effectiveModel = overrideModel || skill.preferred_model || model || 'doubao-1-5-pro-32k-250115';
+  console.log(`[TicketAgent] model resolution: override=${overrideModel} preferred=${skill.preferred_model} setting=${model} → effective=${effectiveModel}`);
+
   const { executionId } = await submitSandboxJob({
     skillId,
     // skillMd 已废弃，runner.py 从 DB 读
     userInputs:       testInputs,
-    model:            model || 'doubao-1-5-pro-32k-250115',
+    model:            effectiveModel,
     aiKey,
     aiBaseUrl:        aiBase,
     fallbackAiKey:    fallbackKey,
