@@ -13,6 +13,17 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   error:         { label: '出错',     cls: 'badge-rejected' },
 };
 
+const formatDate = (val: any) => {
+  if (!val) return '-';
+  let num = Number(val);
+  if (!isNaN(num) && num > 1000000000) {
+    if (num < 10000000000) num *= 1000;
+    return new Date(num).toLocaleString('zh-CN');
+  }
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? String(val) : d.toLocaleString('zh-CN');
+};
+
 export default function TicketDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -157,9 +168,9 @@ export default function TicketDetail() {
           <a className="btn btn-ghost" href={ticket.h5_url} target="_blank" rel="noreferrer">🔗 预览</a>
         </div>
         <div style={{ marginTop: 6, fontSize: '.75rem', color: 'var(--gray-400)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <span>有效期：{new Date(ticket.expires_at).toLocaleString('zh-CN')}</span>
+          <span>有效期：{formatDate(ticket.expires_at)}</span>
           {ticket.return_count > 0 && <span>已打回 {ticket.return_count} 次</span>}
-          {ticket.h5_submitted_at && <span>客户提交：{new Date(ticket.h5_submitted_at).toLocaleString('zh-CN')}</span>}
+          {ticket.h5_submitted_at && <span>客户提交：{formatDate(ticket.h5_submitted_at)}</span>}
         </div>
       </div>
 

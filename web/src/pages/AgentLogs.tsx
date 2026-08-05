@@ -12,6 +12,30 @@ const STATUS_CONFIG: Record<string, { label: string; cls: string }> = {
   error:         { label: '出错',      cls: 'badge-rejected' },
 };
 
+const formatDate = (val: any) => {
+  if (!val) return '-';
+  let num = Number(val);
+  if (!isNaN(num) && num > 1000000000) {
+    if (num < 10000000000) num *= 1000;
+    return new Date(num).toLocaleString('zh-CN');
+  }
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? String(val) : d.toLocaleString('zh-CN');
+};
+
+const formatTimeOnly = (val: any) => {
+  if (!val) return '';
+  if (typeof val === 'string' && val.includes('T')) {
+    return val.slice(11, 19);
+  }
+  let num = Number(val);
+  if (!isNaN(num) && num > 1000000000) {
+    if (num < 10000000000) num *= 1000;
+    return new Date(num).toLocaleTimeString('zh-CN');
+  }
+  return String(val);
+};
+
 export default function AgentLogs() {
   const [tickets, setTickets] = useState<any[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -24,6 +48,7 @@ export default function AgentLogs() {
   const [q, setQ] = useState('');
   const [reprocessing, setReprocessing] = useState(false);
   const [overrideModel, setOverrideModel] = useState('');
+  const [expandAll, setExpandAll] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -38,7 +63,6 @@ export default function AgentLogs() {
         setSelectedId(list[0].id);
       }
 
-      // Check if polling is needed
       const hasActive = list.some((t: any) => ['submitted', 'processing'].includes(t.status));
       if (hasActive && !pollRef.current) {
         pollRef.current = setInterval(() => loadList(false), 5000);
@@ -97,7 +121,6 @@ export default function AgentLogs() {
     }
   };
 
-  // Helper to extract transcript
   const rawAiLog = detailData?.result?.ai_log || '';
   let transcript: any[] = [];
   try {
@@ -106,7 +129,6 @@ export default function AgentLogs() {
     transcript = [];
   }
 
-  // Extract model name from transcript header if present
   const headerObj = transcript.find((t: any) => t.type === 'header');
   const detectedModel = headerObj?.model || detailData?.ticket?.override_model || '系统默认';
 
@@ -125,19 +147,19 @@ export default function AgentLogs() {
     <div>
       <div className="page-header">
         <div>
-          <h1>📜 Agent 执行日志</h1>
-          <p>全量查看每条工单的思考流程、工具调用、运行耗时与完整 AI 上下文</p>
+          <h1>📜 Agent 执行日志 (CUA Control Center)</h1>
+          <p>CUA Live Timeline 风格 — 全量链条追踪、多阶段 Agent 思考、Tool 阶段拆解与交互分析</p>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, minHeight: 'calc(100vh - 180px)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 16, minHeight: 'calc(100vh - 170px)' }}>
         
         {/* Left Side: Ticket List */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', padding: 12, height: '100%', overflow: 'hidden' }}>
           <form onSubmit={handleSearch} style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
             <input
               className="form-input"
-              style={{ fontSize: '.8rem', padding: '4px 8px' }}
+              style={{ fontSize: '.8rem', padding: '5px 8px' }}
               placeholder="搜索工单标题/编号..."
               value={q}
               onChange={e => setQ(e.target.value)}
@@ -145,7 +167,7 @@ export default function AgentLogs() {
             <button className="btn btn-secondary btn-sm" type="submit">搜索</button>
           </form>
 
-          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
             <select
               className="form-input"
               style={{ fontSize: '.8rem', padding: '4px 8px' }}
@@ -162,7 +184,7 @@ export default function AgentLogs() {
 
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
             {loadingList ? (
-              <div style={{ textAlign: 'center', padding: 20, color: 'var(--gray-400)', fontSize: '.85rem' }}>加载列表中...</div>
+              <div style={{ textAlign: 'center', padding: 20, color: 'var(--gray-400)', fontSize: '.85rem' }}>加载工单列表...</div>
             ) : tickets.length === 0 ? (
               <div style={{ textAlign: 'center', padding: 20, color: 'var(--gray-400)', fontSize: '.85rem' }}>无符合条件的工单</div>
             ) : (
@@ -175,24 +197,26 @@ export default function AgentLogs() {
                     onClick={() => setSelectedId(t.id)}
                     style={{
                       padding: '10px 12px',
-                      borderRadius: 'var(--radius-sm)',
+                      borderRadius: '10px',
                       cursor: 'pointer',
-                      border: isSelected ? '2px solid var(--primary)' : '1px solid var(--gray-200)',
-                      background: isSelected ? 'var(--primary-light)' : '#fff',
+                      border: isSelected ? '2px solid #4f46e5' : '1px solid #e2e8f0',
+                      background: isSelected ? '#f5f3ff' : '#fff',
+                      boxShadow: isSelected ? '0 2px 8px rgba(79,70,229,0.12)' : 'none',
                       transition: 'all 0.15s ease',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                      <span className={`badge ${statusCfg.cls}`} style={{ fontSize: '.7rem' }}>{statusCfg.label}</span>
-                      <span style={{ fontSize: '.72rem', color: 'var(--gray-400)' }}>
-                        {new Date(t.created_at).toLocaleDateString('zh-CN')}
+                      <span className={`badge ${statusCfg.cls}`} style={{ fontSize: '.68rem' }}>{statusCfg.label}</span>
+                      <span style={{ fontSize: '.72rem', color: '#94a3b8', fontFamily: 'monospace' }}>
+                        {formatDate(t.created_at)}
                       </span>
                     </div>
-                    <div style={{ fontWeight: 600, fontSize: '.85rem', color: 'var(--gray-800)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <div style={{ fontWeight: 600, fontSize: '.84rem', color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {t.title}
                     </div>
-                    <div style={{ fontSize: '.75rem', color: 'var(--gray-500)', marginTop: 2 }}>
-                      Skill: {t.skill_name || t.skill_id}
+                    <div style={{ fontSize: '.75rem', color: '#64748b', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Skill: {t.skill_name || t.skill_id}</span>
+                      {t.patient_name && <span>{t.patient_name}</span>}
                     </div>
                   </div>
                 );
@@ -202,29 +226,34 @@ export default function AgentLogs() {
         </div>
 
         {/* Right Side: Log Detail */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', padding: 16, overflow: 'hidden' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', padding: 16, overflow: 'hidden', background: '#ffffff' }}>
           {!selectedId ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
-              <div style={{ fontSize: '3rem', marginBottom: 12 }}>📜</div>
-              <div>请在左侧列表选择一条工单查看完整 Agent 上下文与执行日志</div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#94a3b8' }}>
+              <div style={{ fontSize: '3rem', marginBottom: 12 }}>💻</div>
+              <div style={{ fontWeight: 600, color: '#334155' }}>请在左侧列表选择一条工单查看完整 Agent 上下文与执行日志</div>
+              <div style={{ fontSize: '.8rem', color: '#94a3b8', marginTop: 4 }}>支持 CUA-Style 时间轴拆解、上下文折叠、工具 Payload 深度检索</div>
             </div>
           ) : loadingDetail ? (
-            <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-400)' }}>加载工单日志数据...</div>
+            <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>加载工单日志数据...</div>
           ) : !detailData ? (
-            <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-400)' }}>未能找到该工单数据</div>
+            <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>未能找到该工单数据</div>
           ) : (
             <>
-              {/* Header Info */}
-              <div style={{ borderBottom: '1px solid var(--gray-200)', paddingBottom: 12, marginBottom: 12 }}>
+              {/* Header Info Banner */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '12px 16px', marginBottom: 14 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
                   <div>
-                    <h2 style={{ fontSize: '1.1rem', margin: '0 0 4px 0', color: 'var(--gray-900)' }}>
-                      {detailData.ticket?.title}
+                    <h2 style={{ fontSize: '1.05rem', fontWeight: 700, margin: '0 0 6px 0', color: '#0f172a', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>{detailData.ticket?.title}</span>
+                      <span className={`badge ${STATUS_CONFIG[detailData.ticket?.status]?.cls || 'badge-disabled'}`} style={{ fontSize: '.7rem' }}>
+                        {STATUS_CONFIG[detailData.ticket?.status]?.label || detailData.ticket?.status}
+                      </span>
                     </h2>
-                    <div style={{ fontSize: '.8rem', color: 'var(--gray-500)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                      <span>Skill: <strong>{detailData.skill?.name || detailData.ticket?.skill_id}</strong></span>
-                      <span>识别模型: <strong>{detectedModel}</strong></span>
-                      <span>提交时间: {new Date(detailData.ticket?.created_at).toLocaleString('zh-CN')}</span>
+                    <div style={{ fontSize: '.78rem', color: '#64748b', display: 'flex', gap: 14, flexWrap: 'wrap', fontFamily: 'monospace' }}>
+                      <span>Skill: <strong style={{ color: '#4f46e5' }}>{detailData.skill?.name || detailData.ticket?.skill_id}</strong></span>
+                      <span>识别模型: <strong style={{ color: '#0284c7' }}>{detectedModel}</strong></span>
+                      <span>提交时间: <strong>{formatDate(detailData.ticket?.created_at)}</strong></span>
+                      {detailData.ticket?.patient_name && <span>客户: <strong>{detailData.ticket.patient_name}</strong></span>}
                     </div>
                   </div>
 
@@ -232,7 +261,7 @@ export default function AgentLogs() {
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <select
                       className="form-input"
-                      style={{ fontSize: '.8rem', padding: '4px 8px', width: 'auto' }}
+                      style={{ fontSize: '.78rem', padding: '4px 8px', width: 'auto', background: '#fff' }}
                       value={overrideModel}
                       onChange={e => setOverrideModel(e.target.value)}
                       disabled={reprocessing}
@@ -244,35 +273,46 @@ export default function AgentLogs() {
                       <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
                       <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                     </select>
-                    <button className="btn btn-primary btn-sm" onClick={handleReprocess} disabled={reprocessing}>
-                      {reprocessing ? '⏳ 处理中...' : '🤖 指定模型重新运行'}
+                    <button className="btn btn-primary btn-sm" onClick={handleReprocess} disabled={reprocessing} style={{ boxShadow: '0 2px 6px rgba(79,70,229,0.2)' }}>
+                      {reprocessing ? '⏳ 启动中...' : '🚀 指定模型重新运行'}
                     </button>
                   </div>
                 </div>
               </div>
 
               {/* Tabs */}
-              <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--gray-200)', marginBottom: 12 }}>
+              <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid #e2e8f0', paddingBottom: 8, marginBottom: 12, alignItems: 'center' }}>
                 <button
                   className={`btn btn-sm ${activeTab === 'transcript' ? 'btn-primary' : 'btn-ghost'}`}
                   onClick={() => setActiveTab('transcript')}
                 >
-                  ⚡ 执行上下文 & Step 追踪 ({transcript.length} 条记录)
+                  ⚡ CUA Timeline 全链条追踪 ({transcript.length} 事件)
                 </button>
                 <button
                   className={`btn btn-sm ${activeTab === 'output' ? 'btn-primary' : 'btn-ghost'}`}
                   onClick={() => setActiveTab('output')}
                 >
-                  📄 最终输出结果
+                  📄 最终输出报告
                 </button>
                 <button
                   className={`btn btn-sm ${activeTab === 'json' ? 'btn-primary' : 'btn-ghost'}`}
                   onClick={() => setActiveTab('json')}
                 >
-                  🔍 原始 JSON 日志
+                  🔍 原始 JSON 数据
                 </button>
+
+                {activeTab === 'transcript' && (
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setExpandAll(v => !v)}
+                    style={{ marginLeft: 'auto', fontSize: '.75rem', color: '#64748b' }}
+                  >
+                    {expandAll ? '📂 全部折叠' : '📖 全部展开'}
+                  </button>
+                )}
+
                 {rawAiLog && (
-                  <button className="btn btn-ghost btn-sm" onClick={downloadLog} style={{ marginLeft: 'auto', fontSize: '.78rem', color: 'var(--primary)' }}>
+                  <button className="btn btn-ghost btn-sm" onClick={downloadLog} style={{ marginLeft: activeTab === 'transcript' ? 4 : 'auto', fontSize: '.75rem', color: '#4f46e5' }}>
                     📥 下载完整 JSON
                   </button>
                 )}
@@ -281,100 +321,204 @@ export default function AgentLogs() {
               {/* Tab Content */}
               <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
                 
-                {/* TAB 1: TRANSCRIPT */}
+                {/* TAB 1: TRANSCRIPT (CUA Live Timeline Log Style) */}
                 {activeTab === 'transcript' && (
                   <div>
                     {transcript.length === 0 ? (
-                      <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-400)', fontSize: '.85rem' }}>
-                        {detailData.result ? '暂无详细思考与工具调用日志（可能是纯文本类型或传统运行模式）' : '工单尚未执行完成'}
+                      <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8', fontSize: '.85rem' }}>
+                        {detailData.result ? '暂无详细思考与工具调用日志（可能是传统 prompt/code 模式）' : '工单尚未执行完成'}
                       </div>
                     ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                      <div style={{ position: 'relative', paddingLeft: 24, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        
+                        {/* Timeline Vertical Guide Line */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: 9,
+                            top: 12,
+                            bottom: 12,
+                            width: 2,
+                            background: '#cbd5e1',
+                            zIndex: 0,
+                          }}
+                        />
+
                         {transcript.map((t: any, i: number) => {
-                          const isEvent = t.type === 'event';
+                          const isEvent = t.type === 'event' || t.type === 'header';
                           const isSystem = t.role === 'system';
                           const isAssistant = t.role === 'assistant';
                           const isTool = t.role === 'tool';
 
+                          // Icon dot
+                          let dotChar = '•';
+                          let dotBg = '#fff';
+                          let dotBorder = '#94a3b8';
+                          let cardBg = '#ffffff';
+                          let cardBorder = '#e2e8f0';
+
+                          if (isEvent) {
+                            dotChar = '⚡'; dotBg = '#fef3c7'; dotBorder = '#f59e0b';
+                            cardBg = '#fffbeb'; cardBorder = '#fde68a';
+                          } else if (isSystem) {
+                            dotChar = '📋'; dotBg = '#f1f5f9'; dotBorder = '#64748b';
+                            cardBg = '#f8fafc'; cardBorder = '#e2e8f0';
+                          } else if (isAssistant) {
+                            dotChar = '🧠'; dotBg = '#f3e8ff'; dotBorder = '#9333ea';
+                            cardBg = '#faf5ff'; cardBorder = '#e9d5ff';
+                          } else if (isTool) {
+                            dotChar = '🔧'; dotBg = '#d1fae5'; dotBorder = '#10b981';
+                            cardBg = '#ecfdf5'; cardBorder = '#a7f3d0';
+                          }
+
+                          const timeStr = formatTimeOnly(t.ts);
+
                           return (
-                            <div
-                              key={i}
-                              style={{
-                                border: '1px solid var(--gray-200)',
-                                borderRadius: 'var(--radius-sm)',
-                                background: isEvent ? '#fffbf0' : isSystem ? '#fafafa' : isAssistant ? '#f4f7ff' : '#f0fff4',
-                                padding: '12px 14px',
-                              }}
-                            >
-                              {/* Entry Header */}
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                                <div style={{ fontWeight: 600, fontSize: '.83rem', color: isAssistant ? 'var(--primary)' : isTool ? '#047857' : isEvent ? '#b45309' : 'var(--gray-700)' }}>
-                                  {isEvent ? `⚡ 事件: ${t.event || 'System Event'}`
-                                    : isSystem ? `📋 System Prompt (${t.label || 'executor'})`
-                                    : isAssistant ? `🤖 AI Turn ${t.turn != null ? t.turn : i}`
-                                    : isTool ? `🔧 工具响应: ${t.tool || 'MCP/Internal Tool'}`
-                                    : `Step ${i + 1}`}
-                                </div>
-                                {t.ts && <span style={{ fontSize: '.72rem', color: 'var(--gray-400)' }}>{t.ts.slice(11, 19)}</span>}
+                            <div key={i} style={{ position: 'relative', zIndex: 1 }}>
+                              {/* Dot */}
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  left: -24,
+                                  top: 10,
+                                  width: 20,
+                                  height: 20,
+                                  borderRadius: '50%',
+                                  background: dotBg,
+                                  border: `2px solid ${dotBorder}`,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  fontSize: '10px',
+                                  boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+                                }}
+                              >
+                                {dotChar}
                               </div>
 
-                              {/* Details per role */}
-                              {isEvent && t.detail && (
-                                <div style={{ fontSize: '.83rem', color: '#92400e', whiteSpace: 'pre-wrap' }}>{t.detail}</div>
-                              )}
+                              {/* Card */}
+                              <div
+                                style={{
+                                  borderRadius: '12px',
+                                  border: `1px solid ${cardBorder}`,
+                                  background: cardBg,
+                                  padding: '12px 14px',
+                                  boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+                                }}
+                              >
+                                {/* Card Title Line */}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span
+                                      style={{
+                                        display: 'inline-block',
+                                        padding: '2px 8px',
+                                        borderRadius: '6px',
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        background: dotBg,
+                                        color: dotBorder,
+                                        textTransform: 'uppercase',
+                                      }}
+                                    >
+                                      {isEvent ? (t.event || 'EVENT') : isSystem ? 'SYSTEM PROMPT' : isAssistant ? `AI THINKING (TURN ${t.turn != null ? t.turn : i})` : `TOOL RESPONSE (${t.tool || 'MCP'})`}
+                                    </span>
+                                    {t.label && <span style={{ fontSize: '.72rem', color: '#64748b', fontWeight: 600 }}>[{t.label}]</span>}
+                                  </div>
+                                  <span style={{ fontSize: '.72rem', color: '#94a3b8', fontFamily: 'monospace' }}>{timeStr}</span>
+                                </div>
 
-                              {isSystem && t.content && (
-                                <pre style={{ background: '#fff', border: '1px solid var(--gray-200)', borderRadius: 4, padding: 10, fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0, color: 'var(--gray-700)' }}>
-                                  {t.content}
-                                </pre>
-                              )}
+                                {/* EVENT CONTENT */}
+                                {isEvent && (
+                                  <div style={{ fontSize: '.82rem', color: '#92400e', fontWeight: 500 }}>
+                                    {t.detail || t.event || JSON.stringify(t)}
+                                  </div>
+                                )}
 
-                              {isAssistant && (
-                                <div>
-                                  {t.content && (
-                                    <pre style={{ background: '#fff', border: '1px solid #dbeafe', borderRadius: 4, padding: 10, fontSize: '.83rem', whiteSpace: 'pre-wrap', maxHeight: 600, overflow: 'auto', margin: '0 0 8px 0', lineHeight: 1.6 }}>
+                                {/* SYSTEM PROMPT (Accordion Collapsible) */}
+                                {isSystem && t.content && (
+                                  <details open={expandAll} style={{ marginTop: 4 }}>
+                                    <summary style={{ fontSize: '11px', fontWeight: 600, color: '#4f46e5', cursor: 'pointer', userSelect: 'none' }}>
+                                      ▶ 展开/收起 System Prompt 内容 (共 {t.content.length} 字)
+                                    </summary>
+                                    <pre style={{ background: '#0f172a', color: '#e2e8f0', padding: 12, borderRadius: 8, fontSize: '11px', marginTop: 8, maxHeight: 350, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
                                       {t.content}
                                     </pre>
-                                  )}
-                                  {t.tool_calls && t.tool_calls.length > 0 && (
-                                    <div style={{ marginTop: 6 }}>
-                                      <div style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--primary)', marginBottom: 4 }}>🛠️ 发起工具调用 ({t.tool_calls.length} 个):</div>
-                                      {t.tool_calls.map((tc: any, idx: number) => (
-                                        <div key={idx} style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 4, padding: '6px 10px', fontSize: '.78rem', marginBottom: 4 }}>
-                                          <strong>{tc.name || tc.function?.name}</strong>
-                                          <pre style={{ margin: '4px 0 0 0', whiteSpace: 'pre-wrap', fontSize: '.75rem', color: 'var(--gray-700)' }}>
-                                            {typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments, null, 2)}
-                                          </pre>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
+                                  </details>
+                                )}
 
-                              {isTool && (
-                                <div>
-                                  {t.input && (
-                                    <div style={{ marginBottom: 6 }}>
-                                      <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>输入参数:</div>
-                                      <pre style={{ background: '#fff', border: '1px solid var(--gray-200)', borderRadius: 4, padding: 6, fontSize: '.75rem', margin: 0 }}>
-                                        {typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2)}
-                                      </pre>
+                                {/* ASSISTANT RESPONSE & TOOL CALLS */}
+                                {isAssistant && (
+                                  <div>
+                                    {t.content && (
+                                      <div style={{ fontSize: '.85rem', color: '#3b0764', lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'rgba(255,255,255,0.7)', padding: 10, borderRadius: 8, border: '1px solid #f3e8ff' }}>
+                                        {t.content}
+                                      </div>
+                                    )}
+                                    {t.tool_calls && t.tool_calls.length > 0 && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#7e22ce', marginBottom: 4 }}>🛠️ 发起工具调用 ({t.tool_calls.length} 个):</div>
+                                        {t.tool_calls.map((tc: any, idx: number) => {
+                                          const tcName = tc.name || tc.function?.name || 'tool';
+                                          const tcArgs = typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments, null, 2);
+                                          return (
+                                            <div key={idx} style={{ background: '#1e293b', borderRadius: 8, padding: '8px 12px', marginTop: 4 }}>
+                                              <div style={{ color: '#38bdf8', fontSize: '11px', fontWeight: 'bold', fontFamily: 'monospace' }}>
+                                                🔧 {tcName}
+                                              </div>
+                                              <details open={expandAll} style={{ marginTop: 4 }}>
+                                                <summary style={{ fontSize: '10px', color: '#94a3b8', cursor: 'pointer', fontFamily: 'monospace' }}>
+                                                  ▶ 展开查看 Tool Arguments
+                                                </summary>
+                                                <pre style={{ background: 'transparent', color: '#34d399', padding: 0, margin: '6px 0 0 0', fontSize: '11px', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
+                                                  {tcArgs}
+                                                </pre>
+                                              </details>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* TOOL RESPONSE (Accordion Collapsible Payload & Response) */}
+                                {isTool && (
+                                  <div>
+                                    <div style={{ fontSize: '.82rem', fontWeight: 600, color: '#065f46', marginBottom: 4 }}>
+                                      ✅ 工具 [{t.tool || 'MCP'}] 执行完成
                                     </div>
-                                  )}
-                                  {t.output && (
-                                    <div>
-                                      <div style={{ fontSize: '.75rem', color: 'var(--gray-500)' }}>输出结果:</div>
-                                      <pre style={{ background: '#fff', border: '1px solid #a7f3d0', borderRadius: 4, padding: 8, fontSize: '.78rem', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', margin: 0 }}>
-                                        {t.output}
-                                      </pre>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
+                                    <details open={expandAll} style={{ marginTop: 6 }}>
+                                      <summary style={{ fontSize: '11px', fontWeight: 600, color: '#059669', cursor: 'pointer', userSelect: 'none' }}>
+                                        ▶ 展开查看工具 Response 数据 & Context Payload
+                                      </summary>
+                                      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        {t.input && (
+                                          <div>
+                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Input Arguments]</div>
+                                            <pre style={{ background: '#0f172a', color: '#38bdf8', padding: 8, borderRadius: 6, fontSize: '11px', margin: 0, whiteSpace: 'pre-wrap' }}>
+                                              {typeof t.input === 'string' ? t.input : JSON.stringify(t.input, null, 2)}
+                                            </pre>
+                                          </div>
+                                        )}
+                                        {t.output && (
+                                          <div>
+                                            <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: 2 }}>[Response Result Data]</div>
+                                            <pre style={{ background: '#0f172a', color: '#34d399', padding: 10, borderRadius: 6, fontSize: '11px', margin: 0, maxHeight: 350, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                                              {t.output}
+                                            </pre>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </details>
+                                  </div>
+                                )}
+
+                              </div>
                             </div>
                           );
                         })}
+
                       </div>
                     )}
                   </div>
@@ -384,19 +528,19 @@ export default function AgentLogs() {
                 {activeTab === 'output' && (
                   <div>
                     {!detailData.result ? (
-                      <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-400)' }}>尚未生成输出结果</div>
+                      <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>尚未生成输出结果</div>
                     ) : (
                       <div
                         style={{
-                          background: 'var(--gray-50)',
-                          border: '1px solid var(--gray-200)',
-                          borderRadius: 'var(--radius-sm)',
-                          padding: '16px 18px',
+                          background: '#f8fafc',
+                          border: '1px solid #e2e8f0',
+                          borderRadius: '12px',
+                          padding: '16px 20px',
                           fontSize: '.88rem',
                           lineHeight: 1.85,
                           whiteSpace: 'pre-wrap',
                           fontFamily: 'inherit',
-                          color: 'var(--gray-800)',
+                          color: '#0f172a',
                         }}
                       >
                         {detailData.result.revised_result || detailData.result.raw_result || '（无输出文本）'}
@@ -410,14 +554,15 @@ export default function AgentLogs() {
                   <div>
                     <pre
                       style={{
-                        background: '#1e293b',
-                        color: '#f8fafc',
-                        padding: 14,
-                        borderRadius: 'var(--radius-sm)',
+                        background: '#0f172a',
+                        color: '#38bdf8',
+                        padding: 16,
+                        borderRadius: '12px',
                         fontSize: '.78rem',
                         whiteSpace: 'pre-wrap',
                         overflowX: 'auto',
                         maxHeight: '70vh',
+                        fontFamily: 'monospace',
                       }}
                     >
                       {rawAiLog ? rawAiLog : '// 暂无原始 JSON 日志'}
