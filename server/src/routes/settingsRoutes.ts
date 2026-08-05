@@ -99,8 +99,9 @@ settingsRouter.get('/models', (_req, res) => {
       { id: 'doubao-seed-2-1-pro-260628',    provider: 'doubao',   label: '豆包 Seed 2.1 Pro（最新旗舰，推理强，较慢）' },
       { id: 'doubao-1-5-pro-32k-250115',     provider: 'doubao',   label: '豆包 1.5 Pro 32K（速度快，备用）' },
       { id: 'doubao-1-5-lite-32k-250115',    provider: 'doubao',   label: '豆包 1.5 Lite 32K（低成本）' },
-      { id: 'deepseek-chat',                 provider: 'deepseek', label: 'DeepSeek Chat' },
-      { id: 'deepseek-reasoner',             provider: 'deepseek', label: 'DeepSeek Reasoner（复杂推理）' },
+      { id: 'deepseek-chat',                 provider: 'deepseek', label: 'DeepSeek V3（deepseek-chat）' },
+      { id: 'deepseek-chat-v4-5-flash',      provider: 'deepseek', label: 'DeepSeek V4 Flash 0731 ⚡（最新，速度快）' },
+      { id: 'deepseek-reasoner',             provider: 'deepseek', label: 'DeepSeek Reasoner R1（复杂推理）' },
     ]
   });
 });
