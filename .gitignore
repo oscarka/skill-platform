@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.tmp_hermes/
+.tmp_oc3/
+__pycache__/
+*.pyc
+*.pem
+test_health_report.pdf
+test_gemini_stream.py
+test_ticket_pdf.sh
