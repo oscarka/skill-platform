@@ -516,7 +516,7 @@ async function callGeminiMessages(
 // ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
 
 // Route result also carries timing and prompt for logging
-export interface RouteResult { type: 'chat' | 'health'; durationMs: number; systemPrompt: string; userMsg: string; rawResult: string; }
+export interface RouteResult { type: 'chat' | 'health'; durationMs: number; systemPrompt: string; userMsg: string; rawResult: string; model: string; }
 
 async function routeMessage(content: string, notes: string, history: { role: string; content: string }[], apiKey: string): Promise<RouteResult> {
   const systemPrompt = `你是一个智能分诊助手。根据客户消息和近期对话历史判断属于哪一类：
@@ -538,11 +538,12 @@ async function routeMessage(content: string, notes: string, history: { role: str
     const match = result.match(/"type"\s*:\s*"(chat|health)"/);
     const type = match?.[1] as 'chat' | 'health' | undefined;
     console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'} (${durationMs}ms)`);
-    return { type: type || 'chat', durationMs, systemPrompt, userMsg, rawResult: result.trim() };
+    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    return { type: type || 'chat', durationMs, systemPrompt, userMsg, rawResult: result.trim(), model };
   } catch (err) {
     const durationMs = Date.now() - t0;
     console.warn('[AgentService] Route call failed, defaulting to chat:', err);
-    return { type: 'chat', durationMs, systemPrompt, userMsg, rawResult: '(error)' };
+    return { type: 'chat', durationMs, systemPrompt, userMsg, rawResult: '(error)', model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' };
   }
 }
 
@@ -777,7 +778,7 @@ async function handleHealthSkill(
 
   // 记录发给 Skill 的完整上下文（含 profile/wiki 注入情况）
   void appendTaskEvent(requestId, 'skill_input', {
-    message_preview: sandboxUserMessage.slice(0, 600),
+    message_preview: sandboxUserMessage.slice(0, 3000), // 扩大到3000字，便于完整审查
     message_chars: sandboxUserMessage.length,
     has_wiki: !!(wikiCtx?.health_wiki),
     has_profile: !!(wikiCtx?.user_profile),
@@ -1041,7 +1042,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     systemPrompt: routeResult.systemPrompt,
     userMsg: routeResult.userMsg.slice(0, 800),
     rawResult: routeResult.rawResult,
-    model: 'gemini-flash',
+    model: routeResult.model || process.env.GEMINI_MODEL || 'gemini-2.0-flash', // 使用实际模型名
   });
 
   // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
@@ -1095,12 +1096,22 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     skillId: selectedSkillId,
     skillName: selectedSkillName,
     reason: routeReason,
-    available_skills: availableSkills.map(s => ({ id: s.id, name: s.name })),
+    available_skills: availableSkills.map(s => ({ id: s.id, name: s.name, description: (s as any).description?.slice(0, 100) || '' })),
   });
   void updateAgentTask(requestId, { status: 'executing', routeType: 'health', skillId: selectedSkillId || undefined });
 
   if (selectedSkillId && selectedSkillName) {
-    void appendTaskEvent(requestId, 'skill_started', { skillId: selectedSkillId, skillName: selectedSkillName });
+    const skillDesc = availableSkills.find(s => s.id === selectedSkillId);
+    void appendTaskEvent(requestId, 'skill_started', {
+      skillId: selectedSkillId,
+      skillName: selectedSkillName,
+      description: (skillDesc as any)?.description?.slice(0, 200) || '',
+      context_summary: [
+        wikiCtx?.user_profile ? `用户画像 ${wikiCtx.user_profile.length}字` : '无用户画像',
+        wikiCtx?.health_wiki ? `健康档案 ${wikiCtx.health_wiki.length}字` : '无健康档案',
+        `历史 ${history.length} 条`,
+      ].join(' · '),
+    });
     const skillResult = await handleHealthSkill(
       req, apiKey, requestId, delivery,
       profile, selectedSkillId, selectedSkillName,

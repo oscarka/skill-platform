@@ -390,12 +390,12 @@ function AgentTasksPanel() {
                     </div>
                     <div style={{ flex: 1, paddingBottom: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                        <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', color: '#374151', background: '#f1f5f9', padding: '2px 8px', borderRadius: 5 }}>SESSION CONTEXT</span>
+                        <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', color: '#374151', background: '#f1f5f9', padding: '2px 8px', borderRadius: 5 }}>消息接入</span>
                         <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace' }}>{fmtTimeShort(item.ts)}</span>
                       </div>
                       {/* Dark bar */}
                       <div style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', flexWrap: 'wrap' as const, gap: 6 }}>
-                        <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>INGEST</span>
+                        <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>📥 接收消息</span>
                         <span style={{ color: '#f1f5f9' }}>/api/orch/ingest</span>
                         <div style={{ display: 'flex', gap: 10 }}>
                           {ctx.history_count > 0 && <span style={{ color: '#c084fc' }}>history: {ctx.history_count}</span>}
@@ -499,6 +499,12 @@ function AgentTasksPanel() {
                               <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>POST</span> <span style={{ color: '#f1f5f9' }}>/chat/completions</span></div>
                               <span style={{ color: '#c084fc' }}>分诊路由 AI</span>
                             </div>
+                            {/* AI 判定结论 */}
+                            {p.rawResult && (
+                              <div style={{ marginBottom: 8, background: p.routeType === 'health' ? '#faf5ff' : '#f0fdf4', border: `1px solid ${p.routeType === 'health' ? '#e9d5ff' : '#bbf7d0'}`, borderRadius: 6, padding: '6px 10px', fontSize: '.8rem', fontFamily: 'monospace', color: p.routeType === 'health' ? '#6d28d9' : '#065f46' }}>
+                                AI 判定结论：{p.rawResult}
+                              </div>
+                            )}
                             {p.systemPrompt && <details style={{ marginBottom: 6 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 System Prompt ({p.systemPrompt.length} 字符)</summary><pre style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}>{p.systemPrompt}</pre></details>}
                             {p.userMsg && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开用户消息 (含近期历史)</summary><pre style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}>{p.userMsg}</pre></details>}
                           </div>
@@ -511,9 +517,12 @@ function AgentTasksPanel() {
                                 <div style={{ fontSize: '.72rem', color: '#64748b', marginBottom: 5 }}>可用 Skill：</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
                                   {(p.available_skills as any[]).map((s: any) => (
-                                    <span key={s.id} style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400 }}>
-                                      {s.name}{s.id === p.skillId ? ' ✓' : ''}
-                                    </span>
+                                    <div key={s.id} style={{ display: 'inline-block' }}>
+                                      <span style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400 }}>
+                                        {s.name}{s.id === p.skillId ? ' ✓' : ''}
+                                      </span>
+                                      {s.description && <div style={{ fontSize: '.65rem', color: '#94a3b8', marginTop: 2, maxWidth: 160, lineHeight: 1.3 }}>{s.description}</div>}
+                                    </div>
                                   ))}
                                 </div>
                               </div>
@@ -535,11 +544,18 @@ function AgentTasksPanel() {
                                 <span style={{ color: '#94a3b8' }}>total: {p.message_chars || 0}字</span>
                               </div>
                             </div>
-                            {p.message_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开发送给 Skill 的完整上下文</summary><pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 280, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #e5e7eb' }}>{p.message_preview}</pre></details>}
+                            {p.message_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开发送给 Skill 的完整上下文（拼装后的 user message，含 wiki/profile/历史）{p.message_chars > (p.message_preview?.length || 0) ? ` — 仅显示前${p.message_preview.length}字，完整${p.message_chars}字` : ''}</summary><pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 500, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #e5e7eb' }}>{p.message_preview}</pre></details>}
                           </div>
                         )}
                         {evType === 'reassurance_sent' && p.reply && (
                           <div style={{ fontSize: '.85rem', color: '#065f46', borderLeft: '3px solid #34d399', paddingLeft: 10, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{p.reply}</div>
+                        )}
+                        {evType === 'skill_started' && (
+                          <div>
+                            <div style={{ fontSize: '.85rem', fontWeight: 600, color: '#854d0e', marginBottom: 6 }}>🚀 {p.skillName || 'Skill'} 正在启动执行</div>
+                            {p.context_summary && <div style={{ fontSize: '.78rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '5px 10px', borderRadius: 6, marginBottom: 6 }}>注入上下文：{p.context_summary}</div>}
+                            {p.description && <div style={{ fontSize: '.75rem', color: '#92400e', lineHeight: 1.5, borderLeft: '3px solid #fbbf24', paddingLeft: 8 }}>{p.description}</div>}
+                          </div>
                         )}
                         {evType === 'skill_done' && (
                           <div>
