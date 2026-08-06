@@ -16,6 +16,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
 import { submitSandboxJob } from './cloudRunJobsClient';
+import { submitToSandboxService } from './sandboxServiceClient';
 
 // ─── Agent Task Tracking ─────────────────────────────────────────────────────
 // 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
@@ -768,20 +769,44 @@ async function handleHealthSkill(
     ? `${serviceUrl}/api/v1/agent/job-callback/${requestId}`
     : '';
 
+  // ── 路由策略（和工单系统一致）──────────────────────────────────────────────────
+  // approved skill + SANDBOX_SERVICE_URL 已配置 → Sandbox Service（热实例，冷启动 <100ms）
+  // 其他 → Cloud Run Job（冷启动 8-15s）
+  const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
+  const skillRow = await db.getAsync<any>('SELECT status, preferred_model, mcp_names FROM skills WHERE id=?', [skillId]);
+  const isApproved = skillRow?.status === 'approved' || skillRow?.status === 'published';
+  const effectiveModel = skillRow?.preferred_model || 'gemini-3.6-flash';
+
   try {
-    await submitSandboxJob({
-      skillId,
-      userInputs:    { ticket: sandboxUserMessage },
-      model:         'gemini-3.6-flash',
-      aiKey:         apiKey,
-      // Gemini OpenAI 兼容端点 — Cloud Run Job 需要完整 base URL 才能拼出 /chat/completions
-      aiBaseUrl:     'https://generativelanguage.googleapis.com/v1beta/openai',
-      callbackUrl:   jobCallbackUrl,
-      sandboxSecret: process.env.SANDBOX_SECRET || 'sandbox-secret-2024',
-      caseCount:     1,
-      ticketMode:    true,
-    });
-    console.log(`[AgentService] Cloud Run Job submitted: skill=${skillName}(${skillId}), requestId=${requestId}`);
+    if (isApproved && sandboxServiceUrl) {
+      // ── Sandbox Service（持久热实例）────────────────────────────────────
+      console.log(`[AgentService] Sandbox Service submitted: skill=${skillName}(${skillId}), requestId=${requestId}`);
+      await submitToSandboxService(sandboxServiceUrl, {
+        skillId,
+        userInputs:    { ticket: sandboxUserMessage },
+        model:          effectiveModel,
+        aiKey:          apiKey,
+        aiBaseUrl:      'https://generativelanguage.googleapis.com/v1beta/openai',
+        callbackUrl:    jobCallbackUrl,
+        sandboxSecret:  process.env.SANDBOX_SECRET || 'sandbox-secret-2024',
+        caseCount:      1,
+        ticketMode:     true,
+      });
+    } else {
+      // ── Cloud Run Job（按需冷启动）──────────────────────────────────────
+      console.log(`[AgentService] Cloud Run Job submitted: skill=${skillName}(${skillId}), requestId=${requestId} (status=${skillRow?.status}, serviceUrl=${sandboxServiceUrl ? 'set' : 'unset'})`);
+      await submitSandboxJob({
+        skillId,
+        userInputs:    { ticket: sandboxUserMessage },
+        model:          effectiveModel,
+        aiKey:          apiKey,
+        aiBaseUrl:      'https://generativelanguage.googleapis.com/v1beta/openai',
+        callbackUrl:    jobCallbackUrl,
+        sandboxSecret:  process.env.SANDBOX_SECRET || 'sandbox-secret-2024',
+        caseCount:      1,
+        ticketMode:     true,
+      });
+    }
   } catch (err) {
     pendingRequests.delete(requestId);
     throw err;
