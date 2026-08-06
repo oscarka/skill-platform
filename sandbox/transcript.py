@@ -328,16 +328,22 @@ class TranscriptManager:
         except Exception as e:
             print(f"[transcript] file write error: {e}", flush=True)
 
-        # ─── 实时上报到平台 DB (支持 CUA Real-time Stream Display) ─────────
+        # ─── 实时上报到平台 DB (线程异步，不阻塞主流程) ─────────
         try:
             callback_url = os.getenv("CALLBACK_URL", "")
             secret = os.getenv("SANDBOX_SECRET", "sandbox-secret-2024")
             if callback_url:
-                import urllib.request as _ur
-                payload = json.dumps({"type": "transcript_step", "entry": display_entry, "secret": secret}).encode()
-                req = _ur.Request(callback_url, data=payload,
-                                  headers={"Content-Type": "application/json", "X-Sandbox-Secret": secret}, method="POST")
-                _ur.urlopen(req, timeout=3)
+                import threading
+                def _send():
+                    try:
+                        import urllib.request as _ur
+                        payload = json.dumps({"type": "transcript_step", "entry": display_entry, "secret": secret}).encode()
+                        req = _ur.Request(callback_url, data=payload,
+                                          headers={"Content-Type": "application/json", "X-Sandbox-Secret": secret}, method="POST")
+                        _ur.urlopen(req, timeout=5)
+                    except Exception:
+                        pass
+                threading.Thread(target=_send, daemon=True).start()
         except Exception:
             pass
 

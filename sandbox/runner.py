@@ -596,18 +596,21 @@ def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dic
         print(f"[invoke_skill] error: {e}", flush=True)
         return {"ok": False, "error": str(e)}
 
-# ─── 进度上报（stdout + HTTP POST 到平台，实时写入 DB 供前端展示）──────────────
+# ─── 进度上报（stdout + HTTP POST 到平台，线程异步不阻塞主流程）──────────────
 def _post_progress(msg: dict):
     if not CALLBACK_URL:
         return
-    try:
-        import urllib.request as _ur
-        data = json.dumps({"type": "progress", "event": msg, "secret": SANDBOX_SECRET}).encode()
-        req = _ur.Request(CALLBACK_URL, data=data,
-                          headers={"Content-Type": "application/json"}, method="POST")
-        _ur.urlopen(req, timeout=5)
-    except Exception:
-        pass  # 进度上报失败不影响主流程
+    import threading
+    def _send():
+        try:
+            import urllib.request as _ur
+            data = json.dumps({"type": "progress", "event": msg, "secret": SANDBOX_SECRET}).encode()
+            req = _ur.Request(CALLBACK_URL, data=data,
+                              headers={"Content-Type": "application/json"}, method="POST")
+            _ur.urlopen(req, timeout=5)
+        except Exception:
+            pass  # 进度上报失败不影响主流程
+    threading.Thread(target=_send, daemon=True).start()
 
 def progress(step: str, detail: str = ""):
     ts = datetime.now(timezone.utc).isoformat()
