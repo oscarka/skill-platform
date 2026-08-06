@@ -224,7 +224,8 @@ agentRouter.post('/chat', async (req, res) => {
 
 agentRouter.post('/job-callback/:requestId', async (req, res) => {
   const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
-  const secret   = req.headers['x-sandbox-secret'];
+  // runner.py sends progress callbacks with secret in body, final result in header
+  const secret   = req.headers['x-sandbox-secret'] || (req.body as any)?.secret || '';
 
   if (secret !== EXPECTED) {
     console.warn(`[AgentRoute] job-callback: invalid secret for requestId=${req.params.requestId}`);

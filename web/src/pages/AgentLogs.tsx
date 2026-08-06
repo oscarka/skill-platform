@@ -517,12 +517,9 @@ function AgentTasksPanel() {
                                 <div style={{ fontSize: '.72rem', color: '#64748b', marginBottom: 5 }}>可用 Skill：</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
                                   {(p.available_skills as any[]).map((s: any) => (
-                                    <div key={s.id} style={{ display: 'inline-block' }}>
-                                      <span style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400 }}>
-                                        {s.name}{s.id === p.skillId ? ' ✓' : ''}
-                                      </span>
-                                      {s.description && <div style={{ fontSize: '.65rem', color: '#94a3b8', marginTop: 2, maxWidth: 160, lineHeight: 1.3 }}>{s.description}</div>}
-                                    </div>
+                                    <span key={s.id} title={s.description || ''} style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400, cursor: s.description ? 'help' : 'default' }}>
+                                      {s.name}{s.id === p.skillId ? ' ✓' : ''}
+                                    </span>
                                   ))}
                                 </div>
                               </div>
@@ -583,7 +580,34 @@ function AgentTasksPanel() {
                             {p.stack && <details><summary style={{ fontSize: '.72rem', color: '#9ca3af', cursor: 'pointer' }}>Stack Trace</summary><pre style={{ fontSize: '10px', color: '#7f1d1d', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', marginTop: 4 }}>{p.stack}</pre></details>}
                           </div>
                         )}
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed'].includes(evType) && (
+                        {evType === 'cua_delivered' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                              <span style={{ fontSize: '.88rem', fontWeight: 700, color: p.success !== false ? '#059669' : '#dc2626' }}>
+                                {p.success !== false ? '✅ CUA 已成功送达' : '⚠️ CUA 送达异常'}
+                              </span>
+                              {p.step_count && <span style={{ fontSize: '.72rem', background: '#d1fae5', color: '#065f46', padding: '1px 6px', borderRadius: 4 }}>{p.step_count} 步</span>}
+                            </div>
+                            <div style={{ fontSize: '.78rem', color: '#475569' }}>
+                              {p.app && <span>📱 {p.app}</span>}
+                              {p.recipient && <span style={{ marginLeft: 8 }}>→ {p.recipient}</span>}
+                            </div>
+                            {p.events_preview && p.events_preview.length > 0 && (
+                              <details style={{ marginTop: 6 }}>
+                                <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 CUA 执行步骤摘要</summary>
+                                <div style={{ marginTop: 6, fontSize: '.75rem' }}>
+                                  {(p.events_preview as any[]).map((ep: any, i: number) => (
+                                    <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid #f1f5f9' }}>
+                                      <span style={{ color: '#6b7280', minWidth: 60 }}>{ep.type || '-'}</span>
+                                      <span style={{ color: '#374151' }}>{ep.text || '-'}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+                          </div>
+                        )}
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
@@ -602,16 +626,16 @@ function AgentTasksPanel() {
                 const isTool = t.role === 'tool';
                 const isEvent = t.type === 'event' || t.type === 'header';
                 const themeMap: Record<string, any> = {
-                  header:    { dot: '#7c3aed', icon: '⚡', badge: 'START',    badgeBg: '#ede9fe', badgeFg: '#5b21b6', cardBg: '#faf5ff', border: '#e9d5ff' },
-                  event:     { dot: '#d97706', icon: '◆', badge: 'EVENT',    badgeBg: '#fef3c7', badgeFg: '#92400e', cardBg: '#fffbeb', border: '#fde68a' },
-                  system:    { dot: '#1e293b', icon: '⌨', badge: 'SYSTEM PROMPT', badgeBg: '#1e293b', badgeFg: '#94a3b8', cardBg: '#0f172a', border: '#334155' },
-                  assistant: { dot: '#059669', icon: '🤖', badge: 'AI THINKING', badgeBg: '#d1fae5', badgeFg: '#065f46', cardBg: '#f0fdf4', border: '#a7f3d0' },
-                  tool:      { dot: '#ea580c', icon: '🔧', badge: 'TOOL',    badgeBg: '#fff7ed', badgeFg: '#c2410c', cardBg: '#fff7ed', border: '#fed7aa' },
+                  header:    { dot: '#7c3aed', icon: '⚡', badge: '沙箱启动',    badgeBg: '#ede9fe', badgeFg: '#5b21b6', cardBg: '#faf5ff', border: '#e9d5ff' },
+                  event:     { dot: '#d97706', icon: '◆', badge: '执行事件',    badgeBg: '#fef3c7', badgeFg: '#92400e', cardBg: '#fffbeb', border: '#fde68a' },
+                  system:    { dot: '#1e293b', icon: '⌨', badge: '系统提示词', badgeBg: '#1e293b', badgeFg: '#94a3b8', cardBg: '#0f172a', border: '#334155' },
+                  assistant: { dot: '#059669', icon: '🤖', badge: 'AI 推理', badgeBg: '#d1fae5', badgeFg: '#065f46', cardBg: '#f0fdf4', border: '#a7f3d0' },
+                  tool:      { dot: '#ea580c', icon: '🔧', badge: '工具调用',    badgeBg: '#fff7ed', badgeFg: '#c2410c', cardBg: '#fff7ed', border: '#fed7aa' },
                 };
                 const roleKey = isEvent ? (t.type || 'event') : (t.role || 'event');
                 const th = themeMap[roleKey] || themeMap['event'];
-                const turnLabel = isAssistant ? `AI · TURN ${t.turn ?? (idx + 1)}` : th.badge;
-                const cardLabel = isEvent ? (t.event || t.type || th.badge) : isSystem ? 'SYSTEM PROMPT' : isTool ? `TOOL · ${t.tool || 'MCP'}` : turnLabel;
+                const turnLabel = isAssistant ? `AI 推理 · 第${t.turn ?? (idx + 1)}轮` : th.badge;
+                const cardLabel = isEvent ? (t.event === 'start' ? '沙箱开始执行' : t.event === 'skill_loaded' ? 'Skill 内容加载' : t.event || th.badge) : isSystem ? '系统提示词 [executor]' : isTool ? `工具 · ${t.tool || 'MCP'}` : turnLabel;
 
                 return (
                   <div key={`tr-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
@@ -644,15 +668,34 @@ function AgentTasksPanel() {
                             </div>
                           </div>
                         )}
-                        {/* Event content */}
-                        {isEvent && <div style={{ fontSize: '.82rem', color: '#92400e' }}>{t.detail || t.message || t.event || JSON.stringify(t)}</div>}
-                        {/* System prompt */}
-                        {isSystem && t.content && (
-                          <details>
-                            <summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开 System Prompt ({(t.content || '').length} 字符)</summary>
-                            <pre style={{ fontSize: '11px', color: '#e2e8f0', background: '#0f172a', padding: '10px 12px', borderRadius: 7, whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 400, overflow: 'auto' }}>{t.content}</pre>
-                          </details>
-                        )}
+                        {/* Event content — show full with expand button if truncated */}
+                        {isEvent && (() => {
+                          const raw = t.detail || t.message || t.event || JSON.stringify(t);
+                          const truncMatch = typeof raw === 'string' && raw.match(/\[(\d+)\s*chars?\s*total\]/);
+                          const fullText = t.full_content || (typeof raw === 'string' ? raw : '');
+                          return (
+                            <div style={{ fontSize: '.82rem', color: '#92400e' }}>
+                              <div style={{ whiteSpace: 'pre-wrap' }}>{raw}</div>
+                              {truncMatch && (
+                                <details style={{ marginTop: 6 }}>
+                                  <summary style={{ fontSize: '.72rem', color: '#b45309', cursor: 'pointer', background: '#fef3c7', display: 'inline-block', padding: '2px 8px', borderRadius: 4 }}>📖 查看完整内容（{truncMatch[1]} 字符）</summary>
+                                  <pre style={{ fontSize: '11px', color: '#78350f', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 600, overflow: 'auto', background: '#fffbeb', padding: 10, borderRadius: 7, border: '1px solid #fde68a' }}>{fullText}</pre>
+                                </details>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        {/* System prompt — also support expand for truncated */}
+                        {isSystem && t.content && (() => {
+                          const truncMatch = typeof t.content === 'string' && t.content.match(/\[(\d+)\s*chars?\s*total\]/);
+                          const fullText = t.full_content || t.content;
+                          return (
+                            <details>
+                              <summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开系统提示词 ({fullText.length} 字符){t.is_truncated ? ' — 点击查看完整内容' : ''}</summary>
+                              <pre style={{ fontSize: '11px', color: '#e2e8f0', background: '#0f172a', padding: '10px 12px', borderRadius: 7, whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 600, overflow: 'auto' }}>{fullText}</pre>
+                            </details>
+                          );
+                        })()}
                         {/* AI thinking */}
                         {isAssistant && t.content && (
                           <details>

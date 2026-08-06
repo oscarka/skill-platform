@@ -123,10 +123,12 @@ class TranscriptManager:
         # 完整版：保留完整 system prompt
         full_entry = dict(entry)
 
-        # 截断版：只保留前 500 字符（system prompt 一般很长，UI 不需要完整展示）
+        # 截断版：只保留前 500 字符（system prompt 一般很长，UI 默认折叠）
+        # 完整内容保存在 full_content 字段，前端点击展开可查看
         display_entry = dict(entry)
         if len(content) > 500:
             display_entry["content"] = content[:500] + f"...[{len(content)} chars total]"
+            display_entry["full_content"] = content  # 前端展开用
             display_entry["is_truncated"] = True
 
         self._append_raw(full_entry, display_entry)
