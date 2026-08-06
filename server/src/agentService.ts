@@ -969,6 +969,38 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     has_notes: !!(req.notes),
   });
 
+  // ── 立即触发 CUA 预热（并行于后续处理，不阻塞）─────────────────────────
+  const cuaSendUrl = process.env.CUA_SEND_URL || '';
+  if (cuaSendUrl && req.meta?.from_name) {
+    // fire-and-forget: 通知 Mac mini 提前把企业微信置于前台
+    fetch(`${cuaSendUrl}/api/prewarm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app: '企业微信',
+        session_id: userId || req.session_id,
+        request_id: requestId,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    }).then(async r => {
+      const data = await r.json().catch(() => ({})) as any;
+      console.log(`[Prewarm] ✅ ready=${data.ready} pid=${data.pid}`);
+      void appendTaskEvent(requestId, 'app_prewarm', {
+        ready: data.ready,
+        pid: data.pid,
+        app: data.app || '企业微信',
+        error: data.error || '',
+      });
+    }).catch(e => {
+      console.warn(`[Prewarm] ⚠️ 预热失败: ${e.message}`);
+      void appendTaskEvent(requestId, 'app_prewarm', {
+        ready: false,
+        error: e.message,
+        app: '企业微信',
+      });
+    });
+  }
+
   // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
   // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
   if (userId && LLMWIKI_BASE) {

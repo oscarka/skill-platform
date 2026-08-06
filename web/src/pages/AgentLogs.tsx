@@ -141,6 +141,7 @@ const CHANNEL_STATUS: Record<string, { label: string; dot: string }> = {
 const EVENT_ICONS: Record<string, string> = {
   message_received: '📨',
   wiki_fetched:     '📚',
+  app_prewarm:      '📱',
   route_decided:    '🔀',
   skill_selected:   '🎯',
   skill_started:    '⚙️',
@@ -437,6 +438,7 @@ function AgentTasksPanel() {
                 const evCfg: Record<string, { icon: string; label: string; dotBg: string; cardBg: string; cardBorder: string; textColor: string }> = {
                   message_received: { icon: '📩', label: '收到消息', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#bfdbfe', textColor: '#1e40af' },
                   wiki_fetched:     { icon: '📚', label: 'Wiki 上下文', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#bbf7d0', textColor: '#065f46' },
+                  app_prewarm:      { icon: '📱', label: '应用预热', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#e9d5ff', textColor: '#5b21b6' },
                   route_decided:    { icon: '🔀', label: '路由决策', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#e9d5ff', textColor: '#5b21b6' },
                   skill_selected:   { icon: '🎯', label: 'Skill 选择', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#c2410c' },
                   skill_input:      { icon: '📤', label: '发送上下文', dotBg: '#475569', cardBg: '#f8fafc', cardBorder: '#cbd5e1', textColor: '#334155' },
@@ -612,7 +614,16 @@ function AgentTasksPanel() {
                             )}
                           </div>
                         )}
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered'].includes(evType) && (
+                        {evType === 'app_prewarm' && (
+                          <div style={{ fontSize: '.82rem', color: p.ready ? '#059669' : '#dc2626' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <span>{p.ready ? '✅ 企业微信已就绪' : '⚠️ 预热失败'}</span>
+                              {p.pid && <span style={{ fontSize: '.72rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>PID {p.pid}</span>}
+                            </div>
+                            {p.error && <div style={{ fontSize: '.72rem', color: '#dc2626', marginTop: 4 }}>{p.error}</div>}
+                          </div>
+                        )}
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
