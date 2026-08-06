@@ -288,6 +288,43 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
   updated_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   UNIQUE(provider, mcp_name)
 );
+
+-- 统一 Agent 任务表 —— 所有渠道的每次交互都在这里有记录
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id              TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  source_channel  TEXT NOT NULL DEFAULT 'unknown',
+  input_content   TEXT,
+  route_type      TEXT,
+  skill_id        TEXT,
+  ticket_id       TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  reply_content   TEXT,
+  error_message   TEXT,
+  meta            TEXT,
+  started_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  ended_at        BIGINT,
+  duration_ms     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_user    ON agent_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status  ON agent_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_started ON agent_tasks(started_at DESC);
+
+-- 任务内的详细事件流
+CREATE TABLE IF NOT EXISTS agent_task_events (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  event_type  TEXT NOT NULL,
+  payload     TEXT,
+  ts          BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_task ON agent_task_events(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_ts   ON agent_task_events(ts DESC);
+
 `;
 
 export async function initDb(): Promise<void> {
