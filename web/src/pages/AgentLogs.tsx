@@ -128,8 +128,182 @@ const S = {
   },
 } as const;
 
+// ─── Agent Tasks Panel (渠道消息统一日志) ─────────────────────────────────────
+
+const CHANNEL_STATUS: Record<string, { label: string; dot: string }> = {
+  pending:   { label: '待路由',   dot: '#94a3b8' },
+  routing:   { label: '路由中',   dot: '#f59e0b' },
+  executing: { label: '执行中',   dot: '#3b82f6' },
+  done:      { label: '已完成',   dot: '#10b981' },
+  failed:    { label: '失败',     dot: '#ef4444' },
+};
+
+const EVENT_ICONS: Record<string, string> = {
+  message_received: '📨',
+  wiki_fetched:     '📚',
+  route_decided:    '🔀',
+  skill_selected:   '🎯',
+  skill_started:    '⚙️',
+  reassurance_sent: '💬',
+  skill_done:       '✅',
+  reply_sent:       '📤',
+  task_failed:      '❌',
+};
+
+function AgentTasksPanel() {
+  const [tasks, setTasks] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<any>(null);
+  const [events, setEvents] = useState<any[]>([]);
+  const [filter, setFilter] = useState({ channel: '', status: '' });
+
+  const loadTasks = async () => {
+    try {
+      const params = new URLSearchParams({ limit: '50' });
+      if (filter.channel) params.set('channel', filter.channel);
+      if (filter.status) params.set('status', filter.status);
+      const res = await fetch(`/api/v1/agent/tasks?${params}`);
+      const data = await res.json();
+      setTasks(data.tasks || []);
+      setTotal(data.total || 0);
+    } catch (e) {
+      console.error('load tasks:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadTaskDetail = async (id: string) => {
+    const res = await fetch(`/api/v1/agent/tasks/${id}`);
+    const data = await res.json();
+    setSelected(data);
+    setEvents(data.events || []);
+  };
+
+  useEffect(() => { loadTasks(); }, [filter]);
+  useEffect(() => {
+    const t = setInterval(loadTasks, 8000);
+    return () => clearInterval(t);
+  }, [filter]);
+
+  const fmtTime = (ts: number) => ts ? new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+  const fmtDur  = (ms: number) => ms ? (ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`) : '-';
+
+  return (
+    <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      {/* Left list */}
+      <div className="card" style={{ width: 340, display: 'flex', flexDirection: 'column', padding: 12, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
+          <select className="form-control" value={filter.channel} onChange={e => setFilter(f => ({ ...f, channel: e.target.value }))} style={{ flex: 1, fontSize: '.8rem', padding: '4px 8px' }}>
+            <option value="">全部渠道</option>
+            <option value="wecom">企业微信</option>
+            <option value="api">API</option>
+          </select>
+          <select className="form-control" value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))} style={{ flex: 1, fontSize: '.8rem', padding: '4px 8px' }}>
+            <option value="">全部状态</option>
+            <option value="done">已完成</option>
+            <option value="failed">失败</option>
+            <option value="executing">执行中</option>
+          </select>
+          <button className="btn btn-sm btn-ghost" onClick={loadTasks} title="刷新">↻</button>
+        </div>
+        <div style={{ fontSize: '.75rem', color: '#64748b', marginBottom: 8, flexShrink: 0 }}>共 {total} 条记录</div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {loading && <div style={{ textAlign: 'center', padding: 20, color: '#64748b' }}>加载中...</div>}
+          {!loading && tasks.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#64748b' }}>暂无数据<br/><span style={{ fontSize: '.75rem' }}>渠道消息到来后会自动记录</span></div>}
+          {tasks.map(t => {
+            const sc = CHANNEL_STATUS[t.status] || { label: t.status, dot: '#94a3b8' };
+            const isActive = selected?.id === t.id;
+            return (
+              <div key={t.id} onClick={() => loadTaskDetail(t.id)} style={{
+                padding: '10px 12px', marginBottom: 6, borderRadius: 8, cursor: 'pointer',
+                background: isActive ? '#eff6ff' : '#f8fafc',
+                border: `1px solid ${isActive ? '#3b82f6' : '#e2e8f0'}`,
+                transition: 'all .15s',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontSize: '.8rem', fontWeight: 600, color: '#1e293b' }}>{t.user_id || '-'}</span>
+                  <span style={{ fontSize: '.7rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: sc.dot, display: 'inline-block' }} />
+                    {sc.label}
+                  </span>
+                </div>
+                <div style={{ fontSize: '.75rem', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>
+                  {t.input_content?.slice(0, 50) || '-'}
+                </div>
+                <div style={{ fontSize: '.7rem', color: '#94a3b8', display: 'flex', gap: 8 }}>
+                  <span>{t.source_channel || '-'}</span>
+                  <span>{t.route_type || '-'}</span>
+                  <span>{fmtTime(t.started_at)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Right detail */}
+      <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 16, overflow: 'hidden' }}>
+        {!selected && <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}><div style={{ fontSize: 48, marginBottom: 12 }}>📋</div>点击左侧任务查看事件流</div>}
+        {selected && <>
+          {/* Task header */}
+          <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: 12, marginBottom: 14, flexShrink: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: '1rem', color: '#1e293b', marginBottom: 4 }}>
+                  {selected.user_id} · {selected.source_channel}
+                </div>
+                <div style={{ fontSize: '.82rem', color: '#475569' }}>{selected.input_content}</div>
+              </div>
+              <div style={{ textAlign: 'right', fontSize: '.75rem', color: '#64748b' }}>
+                <div>ID: <code style={{ fontSize: '.72rem' }}>{selected.id}</code></div>
+                <div>时长: {fmtDur(selected.duration_ms)}</div>
+                <div>路由: {selected.route_type || '-'} {selected.skill_id ? `· ${selected.skill_id.slice(0,8)}` : ''}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Events timeline */}
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            <div style={{ fontSize: '.8rem', fontWeight: 600, color: '#64748b', marginBottom: 10 }}>事件流 ({events.length})</div>
+            {events.length === 0 && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无事件记录</div>}
+            {events.map((ev, i) => (
+              <div key={ev.id || i} style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+                <div style={{ flexShrink: 0, width: 28, height: 28, borderRadius: '50%', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '.9rem' }}>
+                  {EVENT_ICONS[ev.event_type] || '•'}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <span style={{ fontSize: '.8rem', fontWeight: 600, color: '#334155' }}>{ev.event_type}</span>
+                    <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>{fmtTime(ev.ts)}</span>
+                  </div>
+                  {ev.payload && (
+                    <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', background: '#f8fafc', padding: '6px 8px', borderRadius: 6, border: '1px solid #e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 120, overflow: 'auto' }}>
+                      {JSON.stringify(ev.payload, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {/* Reply preview */}
+            {selected.reply_content && (
+              <div style={{ marginTop: 16, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #86efac' }}>
+                <div style={{ fontSize: '.8rem', fontWeight: 600, color: '#166534', marginBottom: 6 }}>💬 AI 回复</div>
+                <div style={{ fontSize: '.82rem', color: '#15803d', whiteSpace: 'pre-wrap' }}>{selected.reply_content}</div>
+              </div>
+            )}
+          </div>
+        </>}
+      </div>
+    </div>
+  );
+}
+
 // ─── Component State ─────────────────────────────────────────────────────────
 export default function AgentLogs() {
+  const [mainTab, setMainTab] = useState<'tickets' | 'channel'>('tickets');
   const [tickets, setTickets] = useState<any[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -284,12 +458,31 @@ export default function AgentLogs() {
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 48px)' }}>
       <div className="page-header" style={{ flexShrink: 0 }}>
         <div>
-          <h1>📜 Agent 全链条控制台 (CUA Live Console)</h1>
-          <p>全量链条追踪、HTTP 接口 Payload、Tokens 消耗、System Prompt 深度上下文与工具拆解</p>
+          <h1>📜 Agent 全链条控制台</h1>
+          <p>工单日志 · 渠道消息追踪 · HTTP Payload · Token 消耗 · 全链路事件流</p>
+        </div>
+        {/* 主标签页切换 */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button
+            className={`btn btn-sm ${mainTab === 'tickets' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setMainTab('tickets')}
+          >📋 工单日志</button>
+          <button
+            className={`btn btn-sm ${mainTab === 'channel' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setMainTab('channel')}
+          >📡 渠道消息</button>
         </div>
       </div>
 
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '340px 1fr', gridTemplateRows: '1fr', alignItems: 'stretch', gap: 16, overflow: 'hidden', minHeight: 0 }}>
+      {/* ── 渠道消息面板 ─────────────────────────────────────── */}
+      {mainTab === 'channel' && (
+        <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, padding: '0 0 12px 0' }}>
+          <AgentTasksPanel />
+        </div>
+      )}
+
+      {/* ── 工单日志面板（原有内容）─────────────────────────── */}
+      {mainTab === 'tickets' && <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '340px 1fr', gridTemplateRows: '1fr', alignItems: 'stretch', gap: 16, overflow: 'hidden', minHeight: 0 }}>
 
         {/* ── 左侧：工单列表 ────────────────────────────────────────────── */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', padding: 12, overflow: 'hidden', minHeight: 0 }}>
@@ -826,7 +1019,8 @@ export default function AgentLogs() {
           )}
         </div>
 
-      </div>
+      </div>}
+
     </div>
   );
 }
