@@ -111,6 +111,9 @@ export const api = {
     return: (id: string, reason: string) =>
       request<any>(`/tickets/${id}/return`, { method: 'PUT', body: JSON.stringify({ reason }) }),
     status: (id: string) => request<any>(`/tickets/${id}/status`),
+    updateInputs: (id: string, formData: FormData) =>
+      fetch(`/api/tickets/${id}/inputs`, { method: 'PUT', body: formData })
+        .then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Failed'); return j; }),
   },
 
   // ─── Results ───────────────────────────────────────────────────────────────

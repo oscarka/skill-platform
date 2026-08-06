@@ -1,0 +1,1068 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.skillRouter = void 0;
+const express_1 = __importDefault(require("express"));
+const uuid_1 = require("uuid");
+const db = __importStar(require("../db"));
+const reviewAgent_1 = require("../reviewAgent");
+const sandboxService_1 = require("../sandboxService");
+const bundleService_1 = require("../bundleService");
+const transcriptService_1 = require("../transcriptService");
+const https_1 = __importDefault(require("https"));
+const multer_1 = __importDefault(require("multer"));
+const adm_zip_1 = __importDefault(require("adm-zip"));
+const tar_1 = require("tar");
+const os_1 = __importDefault(require("os"));
+const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+exports.skillRouter = express_1.default.Router();
+// ─── ClaWHub API client ────────────────────────────────────────────────────────
+const CLAWHUB_BASE = 'https://clawhub.ai';
+async function clawhubApiGet(path) {
+    return new Promise((resolve, reject) => {
+        const url = `${CLAWHUB_BASE}${path}`;
+        https_1.default.get(url, {
+            headers: {
+                'User-Agent': 'SkillPlatform/1.0',
+                'Accept': 'application/json',
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                }
+                catch (e) {
+                    reject(new Error(`ClaWHub API parse error: ${data.slice(0, 200)}`));
+                }
+            });
+        }).on('error', reject);
+    });
+}
+const clawhubApi = {
+    // Search skills: GET /api/v1/skills?q=...&limit=N
+    search: (q, limit = 10) => clawhubApiGet(`/api/v1/skills?q=${encodeURIComponent(q)}&limit=${limit}`),
+    // Get skill detail by slug: GET /api/v1/skills/{slug}
+    // Returns skill.description = full SKILL.md content
+    detail: (slug) => clawhubApiGet(`/api/v1/skills/${encodeURIComponent(slug)}`),
+};
+/** Sanitize a skill record for API response (remove raw code for list views) */
+function sanitize(skill, full = false) {
+    const base = {
+        id: skill.id,
+        name: skill.name,
+        version: skill.version,
+        description: skill.description,
+        category: skill.category,
+        type: skill.type,
+        skill_type: skill.skill_type,
+        author_name: skill.author_name,
+        status: skill.status,
+        preferred_model: skill.preferred_model,
+        fallback_model: skill.fallback_model,
+        h5_config: skill.h5_config ? JSON.parse(skill.h5_config) : null,
+        ai_review: skill.ai_review ? JSON.parse(skill.ai_review) : null,
+        reject_reason: skill.reject_reason,
+        created_at: skill.created_at,
+        updated_at: skill.updated_at,
+        published_at: skill.published_at,
+        sandbox_status: skill.sandbox_status || 'none',
+        sandbox_test: skill.sandbox_test || null,
+        bundle_status: skill.bundle_status || 'none',
+        bundle_version: skill.bundle_version || 0,
+        bundle_path: skill.bundle_path || null,
+        installed_at: skill.installed_at || null,
+        mcp_names: skill.mcp_names != null ? JSON.parse(skill.mcp_names) : null,
+    };
+    if (full) {
+        return {
+            ...base,
+            prompt_template: skill.prompt_template,
+            code: skill.code,
+            test_inputs: skill.test_inputs ? JSON.parse(skill.test_inputs) : null,
+        };
+    }
+    return base;
+}
+// ─── GET /api/skills ──────────────────────────────────────────────────────────
+exports.skillRouter.get('/', async (req, res) => {
+    try {
+        const { type, status, q } = req.query;
+        let sql = 'SELECT * FROM skills WHERE 1=1';
+        const params = [];
+        if (type) {
+            sql += ' AND type=?';
+            params.push(type);
+        }
+        if (status) {
+            sql += ' AND status=?';
+            params.push(status);
+        }
+        if (q) {
+            sql += ' AND (name LIKE ? OR description LIKE ?)';
+            params.push(`%${q}%`, `%${q}%`);
+        }
+        sql += ' ORDER BY created_at DESC';
+        const skills = await db.allAsync(sql, params);
+        res.json({ skills: skills.map(s => sanitize(s)) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/clawhub-search ──────────────────────────────────────────
+// Search ClaWHub marketplace
+exports.skillRouter.get('/clawhub-search', async (req, res) => {
+    try {
+        const q = req.query.q || '';
+        const limit = Math.min(parseInt(req.query.limit || '20'), 50);
+        const data = await clawhubApi.search(q, limit);
+        res.json(data);
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/clawhub-install ────────────────────────────────────────
+// Install a skill from ClaWHub by slug using the real ClaWHub API
+exports.skillRouter.post('/clawhub-install', async (req, res) => {
+    try {
+        const { slug, type = 'external' } = req.body;
+        if (!slug)
+            return res.status(400).json({ error: 'slug is required (e.g. "claw-markdown-preview")' });
+        // Fetch skill detail from ClaWHub API
+        const detail = await clawhubApi.detail(slug);
+        if (!detail?.skill) {
+            return res.status(404).json({ error: `Skill "${slug}" not found on ClaWHub` });
+        }
+        const skillInfo = detail.skill;
+        const content = skillInfo.description || skillInfo.summary || '';
+        if (!content || content.length < 20) {
+            return res.status(400).json({ error: 'Skill has no content (description/SKILL.md is empty)' });
+        }
+        const name = skillInfo.displayName || slug;
+        const author = detail.owner?.handle || '';
+        const version = skillInfo.latestVersion?.version || skillInfo.tags?.latest || '1.0.0';
+        const installCmd = `openclaw skills install ${author ? '@' + author + '/' : ''}${slug}`;
+        const promptTemplate = `${content}
+
+---
+**当前任务输入：**
+{{user_input}}
+
+请根据以上 Skill 规范，处理用户的请求并给出结构化结果。`;
+        const id = (0, uuid_1.v4)();
+        const now = Date.now();
+        const pluginConfig = {
+            source: 'clawhub',
+            clawhub_url: `https://clawhub.com/${slug}`,
+            clawhub_slug: slug,
+            install_cmd: installCmd,
+            original_author: author,
+            original_version: version,
+            stats: skillInfo.stats,
+            topics: skillInfo.topics,
+        };
+        await db.runAsync(`INSERT INTO skills
+        (id, name, version, description, category, type, skill_type, author_name,
+         status, prompt_template, code, plugin_config, preferred_model, fallback_model,
+         created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, name, version,
+            skillInfo.summary || `ClaWHub Skill: ${name}`,
+            skillInfo.topics?.[0] || 'clawhub', type, 'plugin', author || 'clawhub',
+            'pending', promptTemplate, null,
+            JSON.stringify(pluginConfig), null, null,
+            now, now]);
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [id]);
+        res.status(201).json({
+            skill: sanitize(skill, true),
+            clawhub: {
+                slug,
+                name,
+                author,
+                version,
+                installCmd,
+                contentLength: content.length,
+                stats: skillInfo.stats,
+                preview: content.slice(0, 400) + (content.length > 400 ? '...' : ''),
+            },
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/import-clawhub ─────────────────────────────────────────
+// 支持三种模式：url（页面链接）/ slug（直接 slug）/ skill_content（粘贴 SKILL.md）
+exports.skillRouter.post('/import-clawhub', async (req, res) => {
+    try {
+        let { url, slug, type = 'external', skill_content, skill_name, skill_author } = req.body;
+        // ── 从 CLI 命令提取 slug ─────────────────────────────────────────────────
+        // 支持格式：openclaw skills install @a2mus/stitch-ui-designer
+        if (!slug && url && url.trim().startsWith('openclaw')) {
+            const tokens = url.trim().split(/\s+/);
+            const pkg = tokens[tokens.length - 1]; // 最后一个词 e.g. "@a2mus/stitch-ui-designer"
+            // 去掉 @ 和 author/ 前缀，只取 skill 部分
+            slug = pkg.replace(/^@?[^/]+\//, '').replace(/^@/, '');
+        }
+        // ── 从 URL 提取 slug ──────────────────────────────────────────────────────
+        // 支持格式：
+        //   https://clawhub.ai/scrapfly-alerting
+        //   https://clawhub.ai/skills/scrapfly-alerting
+        //   https://clawhub.com/agistack/medical  → 先试 "medical", 再试 "agistack/medical"
+        if (!slug && url && !url.trim().startsWith('openclaw')) {
+            try {
+                const u = new URL(url.trim());
+                const parts = u.pathname.replace(/^\//, '').replace(/\/$/, '').split('/').filter(Boolean);
+                // 去掉 "skills" 前缀段
+                const pathParts = parts.filter(p => p !== 'skills');
+                slug = pathParts.join('/'); // e.g. "scrapfly-alerting" or "agistack/medical"
+            }
+            catch {
+                // 可能是纯 slug 如 "stitch-ui-designer"，直接使用
+                slug = url.trim();
+            }
+        }
+        // ── URL/Slug 模式：从 ClawHub API 获取 ───────────────────────────────────
+        if (slug) {
+            let detail = null;
+            // 先尝试完整 slug，如果失败再试最后一段（兼容 owner/skill 格式）
+            try {
+                detail = await clawhubApi.detail(slug);
+            }
+            catch { }
+            if (!detail?.skill && slug.includes('/')) {
+                const lastPart = slug.split('/').pop();
+                try {
+                    detail = await clawhubApi.detail(lastPart);
+                }
+                catch { }
+                if (detail?.skill)
+                    slug = lastPart;
+            }
+            if (!detail?.skill)
+                return res.status(404).json({ error: `Skill "${slug}" 在 ClaWHub 上找不到，请确认链接` });
+            const skillInfo = detail.skill;
+            // description 字段 = 完整 SKILL.md 内容（含 YAML frontmatter）
+            const skillMd = skillInfo.description || skillInfo.summary || '';
+            const name = skillInfo.displayName || slug;
+            const author = detail.owner?.handle || '';
+            const version = detail.latestVersion?.version || skillInfo.latestVersion?.version || '1.0.0';
+            const summary = skillInfo.summary || `ClawHub Skill: ${name}`;
+            // prompt_template 存原始 SKILL.md，sandbox 直接用此内容
+            const promptTemplate = skillMd;
+            const id = (0, uuid_1.v4)();
+            const now = Date.now();
+            await db.runAsync(`INSERT INTO skills (id,name,version,description,category,type,skill_type,author_name,status,prompt_template,code,plugin_config,preferred_model,fallback_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, name, version, summary, 'clawhub', type, 'plugin', author || 'clawhub', 'pending',
+                promptTemplate, null,
+                JSON.stringify({ source: 'clawhub', slug, install_cmd: `openclaw skills install ${slug}`, original_author: author }),
+                null, null, now, now]);
+            const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [id]);
+            return res.status(201).json({
+                skill: sanitize(skill, true),
+                clawhub: { slug, name, author, version, contentLength: skillMd.length, preview: skillMd.slice(0, 400) + '...' }
+            });
+        }
+        // ── 粘贴模式：用户直接贴入 SKILL.md 文本 ─────────────────────────────────
+        if (!skill_content || skill_content.length < 30) {
+            return res.status(400).json({ error: '请提供 ClawHub skill 链接（URL）或粘贴 SKILL.md 内容' });
+        }
+        const id = (0, uuid_1.v4)();
+        const now = Date.now();
+        const name = skill_name || 'Imported Skill';
+        const author = skill_author || 'unknown';
+        await db.runAsync(`INSERT INTO skills (id,name,version,description,category,type,skill_type,author_name,status,prompt_template,code,plugin_config,preferred_model,fallback_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, name, '1.0.0', skill_content.slice(0, 200).replace(/\n/g, ' '), 'clawhub-paste', type, 'plugin',
+            author, 'pending', skill_content, null,
+            JSON.stringify({ source: 'paste', original_author: author }),
+            null, null, now, now]);
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [id]);
+        res.status(201).json({ skill: sanitize(skill, true), parsed: { name, author, contentLength: skill_content.length, preview: skill_content.slice(0, 400) + '...' } });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// multer for ZIP / tar.gz upload (memory storage, max 50MB)
+const zipUpload = (0, multer_1.default)({
+    storage: multer_1.default.memoryStorage(),
+    limits: { fileSize: 50 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        const name = file.originalname.toLowerCase();
+        const ok = file.mimetype === 'application/zip'
+            || file.mimetype === 'application/x-zip-compressed'
+            || file.mimetype === 'application/gzip'
+            || file.mimetype === 'application/x-gzip'
+            || file.mimetype === 'application/x-tar'
+            || file.mimetype === 'application/octet-stream'
+            || name.endsWith('.zip')
+            || name.endsWith('.tar.gz')
+            || name.endsWith('.tgz');
+        if (ok)
+            cb(null, true);
+        else
+            cb(new Error('Only .zip / .tar.gz / .tgz files are accepted'));
+    },
+});
+// 从 tar.gz buffer 中提取所有文件
+async function extractTarGz(buffer) {
+    const tmpDir = fs_1.default.mkdtempSync(path_1.default.join(os_1.default.tmpdir(), 'skill-tar-'));
+    try {
+        const tmpFile = path_1.default.join(tmpDir, 'archive.tar.gz');
+        fs_1.default.writeFileSync(tmpFile, buffer);
+        await (0, tar_1.x)({ file: tmpFile, cwd: tmpDir });
+        fs_1.default.unlinkSync(tmpFile); // 删除归档本身
+        const result = new Map();
+        const walk = (dir, base) => {
+            for (const entry of fs_1.default.readdirSync(dir)) {
+                const full = path_1.default.join(dir, entry);
+                const rel = base ? `${base}/${entry}` : entry;
+                if (fs_1.default.statSync(full).isDirectory()) {
+                    walk(full, rel);
+                }
+                else {
+                    result.set(rel, fs_1.default.readFileSync(full));
+                }
+            }
+        };
+        walk(tmpDir, '');
+        return result;
+    }
+    finally {
+        fs_1.default.rmSync(tmpDir, { recursive: true, force: true });
+    }
+}
+// multer for test file upload (PDF / image / Word, max 20MB each, up to 10 files)
+const ALLOWED_TEST_MIMETYPES = new Set([
+    'application/pdf',
+    'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+    'application/msword', // .doc
+    'text/plain', 'text/csv', 'text/markdown',
+]);
+const ALLOWED_TEST_EXTS = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.docx', '.doc', '.txt', '.csv', '.md']);
+const testFileUpload = (0, multer_1.default)({
+    storage: multer_1.default.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024, files: 10 },
+    fileFilter: (_req, file, cb) => {
+        const ext = path_1.default.extname(file.originalname).toLowerCase();
+        if (ALLOWED_TEST_MIMETYPES.has(file.mimetype) || ALLOWED_TEST_EXTS.has(ext))
+            cb(null, true);
+        else
+            cb(new Error(`不支持的文件格式：${ext}。支持 PDF、图片、Word、TXT、CSV、Markdown`));
+    },
+});
+// ─── POST /api/skills/upload-zip ──────────────────────────────────────────────
+// 上传和其他平台下载好的 Skill 压缩包，自动解析 SKILL.md 入库
+exports.skillRouter.post('/upload-zip', zipUpload.single('file'), async (req, res) => {
+    try {
+        if (!req.file)
+            return res.status(400).json({ error: '请上传 .zip / .tar.gz / .tgz 文件' });
+        const { type = 'external' } = req.body;
+        const origName = req.file.originalname.toLowerCase();
+        const isTarGz = origName.endsWith('.tar.gz') || origName.endsWith('.tgz');
+        let skillMd = '';
+        let foundFiles = [];
+        if (isTarGz) {
+            // ── tar.gz 路径 ─────────────────────────────────────────────────────────
+            const files = await extractTarGz(req.file.buffer);
+            foundFiles = Array.from(files.keys()).filter(p => !p.endsWith('/'));
+            const skillEntry = foundFiles.find(p => {
+                const seg = p.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+                return seg.toLowerCase() === 'skill.md';
+            });
+            if (!skillEntry) {
+                return res.status(400).json({
+                    error: 'tar.gz 中找不到 SKILL.md，请确认压缩包格式正确',
+                    found: foundFiles.slice(0, 20),
+                });
+            }
+            skillMd = (files.get(skillEntry) || Buffer.alloc(0)).toString('utf-8');
+        }
+        else {
+            // ── zip 路径 ────────────────────────────────────────────────────────────
+            const zip = new adm_zip_1.default(req.file.buffer);
+            const entries = zip.getEntries();
+            foundFiles = entries
+                .filter(e => !e.entryName.startsWith('__MACOSX/') && !e.entryName.endsWith('/'))
+                .map(e => e.entryName);
+            const skillMdEntry = entries.find(e => {
+                const normalized = e.entryName.replace(/\\/g, '/');
+                if (normalized.startsWith('__MACOSX/'))
+                    return false;
+                if (normalized.endsWith('/'))
+                    return false;
+                const filename = normalized.split('/').filter(Boolean).pop() || '';
+                return filename.toLowerCase() === 'skill.md';
+            });
+            if (!skillMdEntry) {
+                return res.status(400).json({
+                    error: 'ZIP 中找不到 SKILL.md 文件，请确认压缩包格式正确',
+                    found: foundFiles.slice(0, 20),
+                });
+            }
+            skillMd = skillMdEntry.getData().toString('utf-8');
+        }
+        // 解析 YAML frontmatter：---\nkey: value\n---
+        let name = req.file.originalname
+            .replace(/\.tar\.gz$/i, '').replace(/\.tgz$/i, '').replace(/\.zip$/i, '');
+        let author = 'unknown';
+        let version = '1.0.0';
+        let description = '';
+        const fmMatch = skillMd.match(/^---\s*\n([\s\S]*?)\n---/);
+        if (fmMatch) {
+            const fm = fmMatch[1];
+            const pick = (key) => {
+                const m = fm.match(new RegExp(`^${key}:\\s*(.+)`, 'm'));
+                return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : '';
+            };
+            name = pick('name') || pick('displayName') || name;
+            author = pick('author') || pick('author_handle') || author;
+            version = pick('version') || version;
+            description = pick('description') || pick('summary') || description;
+        }
+        // 如果 description 短于30字，用 SKILL.md 前200字作承接
+        if (!description || description.length < 10) {
+            description = skillMd.replace(/^---[\s\S]*?---/, '').trim().slice(0, 200).replace(/\n/g, ' ');
+        }
+        const id = (0, uuid_1.v4)();
+        const now = Date.now();
+        await db.runAsync(`INSERT INTO skills (id,name,version,description,category,type,skill_type,author_name,status,prompt_template,code,plugin_config,preferred_model,fallback_model,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, name, version, description.slice(0, 500), 'zip-upload', type, 'plugin',
+            author, 'pending', skillMd, null,
+            JSON.stringify({ source: 'zip-upload', originalFileName: req.file.originalname }),
+            null, null, now, now]);
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [id]);
+        res.status(201).json({
+            skill: sanitize(skill, true),
+            parsed: {
+                name, author, version,
+                contentLength: skillMd.length,
+                preview: skillMd.slice(0, 400) + (skillMd.length > 400 ? '...' : ''),
+                allFiles: foundFiles.slice(0, 30),
+            },
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id ──────────────────────────────────────────────────────
+exports.skillRouter.get('/:id', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        res.json({ skill: sanitize(skill, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills ─────────────────────────────────────────────────────────
+// Create a new skill (status starts as 'pending')
+exports.skillRouter.post('/', async (req, res) => {
+    try {
+        const { name, description, category, type, skill_type, author_name, prompt_template, code, plugin_config, preferred_model, fallback_model, test_inputs, } = req.body;
+        if (!name)
+            return res.status(400).json({ error: '"name" is required' });
+        if (!type || !['internal', 'external'].includes(type))
+            return res.status(400).json({ error: '"type" must be internal or external' });
+        if (!skill_type || !['prompt', 'code', 'plugin'].includes(skill_type))
+            return res.status(400).json({ error: '"skill_type" must be prompt, code, or plugin' });
+        if (skill_type === 'prompt' && !prompt_template)
+            return res.status(400).json({ error: '"prompt_template" is required for prompt-type skills' });
+        if (skill_type === 'code' && !code)
+            return res.status(400).json({ error: '"code" is required for code-type skills' });
+        // plugin type just needs a name + plugin_config (or code)
+        const id = (0, uuid_1.v4)();
+        const now = Date.now();
+        await db.runAsync(`INSERT INTO skills
+        (id, name, version, description, category, type, skill_type, author_name,
+         status, prompt_template, code, plugin_config, preferred_model, fallback_model, test_inputs,
+         created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, name, '1.0.0', description || null, category || null,
+            type, skill_type, author_name || null,
+            'pending', prompt_template || null, code || null,
+            plugin_config ? JSON.stringify(plugin_config) : null,
+            preferred_model || null, fallback_model || null,
+            test_inputs ? JSON.stringify(test_inputs) : null,
+            now, now]);
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [id]);
+        res.status(201).json({ skill: sanitize(skill, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/skills/:id ──────────────────────────────────────────────────────
+// Update an unpublished skill
+exports.skillRouter.put('/:id', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.status === 'published')
+            return res.status(400).json({ error: 'Cannot edit a published skill. Create a new version.' });
+        const { name, description, category, author_name, prompt_template, code, preferred_model, fallback_model, test_inputs, mcp_names } = req.body;
+        // mcp_names 可以是数组（前端传来）或 null；序列化为 JSON 字符串存储
+        const mcpNamesJson = mcp_names !== undefined
+            ? JSON.stringify(Array.isArray(mcp_names) ? mcp_names : [])
+            : null;
+        await db.runAsync(`UPDATE skills SET name=COALESCE(?,name), description=COALESCE(?,description),
+       category=COALESCE(?,category), author_name=COALESCE(?,author_name),
+       prompt_template=COALESCE(?,prompt_template), code=COALESCE(?,code),
+       preferred_model=COALESCE(?,preferred_model), fallback_model=COALESCE(?,fallback_model),
+       test_inputs=COALESCE(?,test_inputs),
+       mcp_names=CASE WHEN ?::text IS NOT NULL THEN ?::text ELSE mcp_names END,
+       updated_at=?
+       WHERE id=?`, [name || null, description || null, category || null, author_name || null,
+            prompt_template || null, code || null, preferred_model || null, fallback_model || null,
+            test_inputs ? JSON.stringify(test_inputs) : null,
+            mcpNamesJson, mcpNamesJson,
+            Date.now(), req.params.id]);
+        const updated = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        res.json({ skill: sanitize(updated, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/review ─────────────────────────────────────────────
+// OpenClaw-style review agent:
+//   - 评审 AI 通过工具调用按需读取 Skill 内容（不预先拼串）
+//   - 类比 OpenClaw agent 用 read_file 读 SKILL.md
+//   - 彻底修复 skill_type='plugin' 时 content=null 导致 10 分的 bug
+exports.skillRouter.post('/:id/review', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        await db.runAsync(`UPDATE skills SET status='reviewing', updated_at=? WHERE id=?`, [Date.now(), skill.id]);
+        const testInputs = skill.test_inputs ? JSON.parse(skill.test_inputs) : undefined;
+        let reviewResult;
+        try {
+            reviewResult = await (0, reviewAgent_1.runSkillReviewAgent)({
+                skillId: skill.id,
+                skillName: skill.name,
+                skillDescription: skill.description || undefined,
+                skillVisibility: skill.type === 'external' ? 'external' : 'internal',
+                testInputs,
+                model: skill.preferred_model || undefined,
+                fallbackModel: skill.fallback_model || undefined,
+                onProgress: (p) => {
+                    // 日志格式和沙箱一致：[review] {ts, step, detail}
+                    console.log(`[review] ${JSON.stringify(p)}`);
+                },
+            });
+        }
+        catch (aiErr) {
+            reviewResult = { score: 0, passed: false, summary: `AI评审失败: ${aiErr.message}`, strengths: [], weaknesses: [], suggestions: [] };
+        }
+        const finalStatus = reviewResult.passed ? 'approved' : 'rejected';
+        await db.runAsync(`UPDATE skills SET ai_review=?, status=?, updated_at=? WHERE id=?`, [JSON.stringify(reviewResult), finalStatus, Date.now(), skill.id]);
+        const updated = await db.getAsync('SELECT * FROM skills WHERE id=?', [skill.id]);
+        res.json({ skill: sanitize(updated, true), review: reviewResult });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/skills/:id/h5-config ───────────────────────────────────────────
+// Save the confirmed H5 config (for external skills, before publish)
+exports.skillRouter.put('/:id/h5-config', async (req, res) => {
+    try {
+        const { h5_config } = req.body;
+        if (!h5_config)
+            return res.status(400).json({ error: 'h5_config is required' });
+        const skill = await db.getAsync('SELECT id, type FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.type !== 'external')
+            return res.status(400).json({ error: 'h5_config only applies to external skills' });
+        await db.runAsync(`UPDATE skills SET h5_config=?, updated_at=? WHERE id=?`, [JSON.stringify(h5_config), Date.now(), req.params.id]);
+        res.json({ success: true });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/skills/:id/publish ─────────────────────────────────────────────
+exports.skillRouter.put('/:id/publish', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.status === 'published')
+            return res.status(400).json({ error: 'Skill is already published' });
+        // External skills must have h5_config before publishing
+        if (skill.type === 'external' && !skill.h5_config)
+            return res.status(400).json({ error: 'External skills must have H5 config before publishing' });
+        const now = Date.now();
+        await db.runAsync(`UPDATE skills SET status='published', published_at=?, updated_at=? WHERE id=?`, [now, now, req.params.id]);
+        const updated = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        res.json({ skill: sanitize(updated, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/skills/:id/reject ──────────────────────────────────────────────
+exports.skillRouter.put('/:id/reject', async (req, res) => {
+    try {
+        const { reason } = req.body;
+        if (!reason)
+            return res.status(400).json({ error: 'Rejection reason is required' });
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        await db.runAsync(`UPDATE skills SET status='rejected', reject_reason=?, updated_at=? WHERE id=?`, [reason, Date.now(), req.params.id]);
+        const updated = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        res.json({ skill: sanitize(updated, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── DELETE /api/skills/:id ──────────────────────────────────────────────────
+exports.skillRouter.delete('/:id', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT id FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        // 级联清理关联数据（外键无 CASCADE，需手动按依赖顺序删除）
+        const skillId = req.params.id;
+        // 1. 先找出该 skill 下所有工单 ID
+        const tickets = await db.allAsync('SELECT id FROM tickets WHERE skill_id=?', [skillId]);
+        const ticketIds = tickets.map(t => t.id);
+        if (ticketIds.length > 0) {
+            const ph = ticketIds.map(() => '?').join(',');
+            // 2. 删 ticket_results（依赖 ticket_id）
+            await db.runAsync(`DELETE FROM ticket_results WHERE ticket_id IN (${ph})`, ticketIds);
+            // 3. 删 ticket_inputs（依赖 ticket_id）
+            await db.runAsync(`DELETE FROM ticket_inputs WHERE ticket_id IN (${ph})`, ticketIds);
+        }
+        // 4. 删 revision_memories（依赖 skill_id）
+        await db.runAsync('DELETE FROM revision_memories WHERE skill_id=?', [skillId]);
+        // 5. 删工单本身
+        if (ticketIds.length > 0) {
+            const ph = ticketIds.map(() => '?').join(',');
+            await db.runAsync(`DELETE FROM tickets WHERE id IN (${ph})`, ticketIds);
+        }
+        // 6. 最后删 skill
+        await db.runAsync('DELETE FROM skills WHERE id=?', [skillId]);
+        console.log(`[SkillRoute] Deleted skill ${skillId} with ${ticketIds.length} ticket(s)`);
+        res.json({ success: true });
+    }
+    catch (err) {
+        console.error('[SkillRoute] Delete skill error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/sandbox-test ───────────────────────────────────────
+// 触发沙箱测试（异步，立即返回 202）
+// body 可选：{ oauthTokens: JSON.stringify({google: {access_token, refresh_token, ...}}) }
+exports.skillRouter.post('/:id/sandbox-test', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.sandbox_status === 'running') {
+            return res.status(409).json({ error: 'Sandbox test already running' });
+        }
+        const content = skill.prompt_template || skill.code || '';
+        if (!content) {
+            return res.status(400).json({ error: 'Skill has no content to test' });
+        }
+        // 可选：管理员授权后传入 OAuth tokens，注入沙箱供 MCP 工具使用
+        const oauthTokens = req.body?.oauthTokens || undefined;
+        // 可选：测试用例数量（1-3，默认1）
+        const caseCount = Math.max(1, Math.min(3, parseInt(req.body?.count || '1', 10) || 1));
+        // 可选：手工填写的测试输入（纯文本，优先级高于 DB 存储和 AI 自动生成）
+        const manualTestInput = req.body?.manualTestInput || undefined;
+        // 可选：已上传到 GCS 的附件路径列表（JSON 字符串）
+        const attachmentGcsPaths = req.body?.attachmentGcsPaths
+            ? JSON.parse(req.body.attachmentGcsPaths)
+            : [];
+        // 可选：本次运行临时覆盖模型（不改 Skill 默认配置）
+        const overrideModel = req.body?.overrideModel || undefined;
+        res.status(202).json({ message: 'Sandbox test started', skillId: skill.id });
+        (0, sandboxService_1.runSandboxTest)(skill.id, oauthTokens, caseCount, manualTestInput, attachmentGcsPaths, overrideModel).catch(err => {
+            console.error('[SandboxRoute] Unhandled error:', err.message);
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/install ─────────────────────────────────────────────
+// 审核通过后安装 Skill Bundle → 打包依赖上传 GCS
+exports.skillRouter.post('/:id/install', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT id, name, status, content, bundle_status, bundle_version FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.bundle_status === 'building')
+            return res.status(409).json({ error: '正在安装中，请稍候' });
+        await (0, bundleService_1.buildBundle)(skill.id);
+        res.json({ message: '安装已触发', skillId: skill.id });
+        // 异步执行沙箱安装
+        (0, sandboxService_1.runSandboxTest)(skill.id).then(async (result) => {
+            if (result?.passed) {
+                const bundlePath = `gs://${(0, bundleService_1.getBucketName)()}/${skill.id}/v${(skill.bundle_version || 0) + 1}.tar.gz`;
+                await (0, bundleService_1.markBundleReady)(skill.id, bundlePath);
+                console.log(`[Bundle] Skill "${skill.name}" installed: ${bundlePath}`);
+            }
+            else {
+                await (0, bundleService_1.markBundleFailed)(skill.id);
+            }
+        }).catch(async () => {
+            await (0, bundleService_1.markBundleFailed)(skill.id);
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/sandbox-callback ───────────────────────────────────
+// 接收两种消息：
+//   1. type="progress"  → 把 event 追加到 sandbox_progress（实时进度）
+//   2. type="result"    → 写入最终测试结果到 sandbox_test
+exports.skillRouter.post('/:id/sandbox-callback', async (req, res) => {
+    try {
+        const EXPECTED_SECRET = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+        const headerSecret = req.headers['x-sandbox-secret'] || '';
+        const bodySecret = req.body?.secret || '';
+        if (headerSecret !== EXPECTED_SECRET && bodySecret !== EXPECTED_SECRET) {
+            return res.status(403).json({ error: 'forbidden' });
+        }
+        const id = req.params.id;
+        // ── 进度事件（runner.py 每个 turn/tool 都会 POST 一次）──────────────────
+        if (req.body?.type === 'progress' && req.body?.event) {
+            const event = req.body.event;
+            const row = await db.getAsync('SELECT sandbox_progress FROM skills WHERE id=?', [id]);
+            const events = row?.sandbox_progress ? JSON.parse(row.sandbox_progress) : [];
+            events.push(event);
+            await db.runAsync(`UPDATE skills SET sandbox_progress=?, updated_at=? WHERE id=?`, [JSON.stringify(events), Date.now(), id]);
+            return res.json({ ok: true, appended: true });
+        }
+        // ── 最终结果（runner.py 执行完毕 POST 一次）───────────────────────────────
+        const body = req.body;
+        const { passed, output, duration_ms, tested_at, transcript, transcript_gcs, testInput, model } = body;
+        const result = {
+            skillId: id,
+            passed,
+            output,
+            transcript: transcript || [], // 截断版对话记录（给前端展示）
+            transcript_gcs: transcript_gcs || null, // GCS 完整版路径
+            testInput: testInput || null, // AI 生成的测试输入
+            model: model || null, // 使用的模型名
+            durationMs: duration_ms,
+            testedAt: tested_at,
+        };
+        await db.runAsync(`UPDATE skills SET sandbox_test=?, sandbox_status=?, updated_at=? WHERE id=?`, [JSON.stringify(result), 'done', Date.now(), id]);
+        res.json({ ok: true });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/sandbox-progress ────────────────────────────────────
+// 前端轮询获取沙箱测试进度
+exports.skillRouter.get('/:id/sandbox-progress', async (req, res) => {
+    try {
+        const row = await db.getAsync('SELECT sandbox_status, sandbox_progress FROM skills WHERE id=?', [req.params.id]);
+        if (!row)
+            return res.status(404).json({ error: 'Skill not found' });
+        const events = row.sandbox_progress ? JSON.parse(row.sandbox_progress) : [];
+        res.json({ status: row.sandbox_status, events });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/signed-url ─────────────────────────────────────────
+// 为 GCS 文件生成签名下载 URL（有效期 15 分钟），供前端下载/预览
+exports.skillRouter.get('/:id/signed-url', async (req, res) => {
+    try {
+        const { Storage } = await Promise.resolve().then(() => __importStar(require('@google-cloud/storage')));
+        const gcsPath = req.query.path;
+        if (!gcsPath || !gcsPath.startsWith('gs://')) {
+            return res.status(400).json({ error: 'path must be a gs:// URI' });
+        }
+        const withoutProto = gcsPath.replace('gs://', '');
+        const slashIdx = withoutProto.indexOf('/');
+        const bucketName = withoutProto.slice(0, slashIdx);
+        const blobName = withoutProto.slice(slashIdx + 1);
+        const storage = new Storage();
+        const [signedUrl] = await storage.bucket(bucketName).file(blobName).getSignedUrl({
+            version: 'v4',
+            action: 'read',
+            expires: Date.now() + 15 * 60 * 1000, // 15 min
+        });
+        res.json({ signedUrl });
+    }
+    catch (e) {
+        console.error('[signed-url] error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+// ─── POST /api/skills/:id/upload-test-files ───────────────────────────────────
+// 上传测试附件（PDF/图片/Word 等）到 GCS，返回 GCS 路径列表供沙箱测试使用
+// 支持最多 10 个文件，每个最大 20MB
+exports.skillRouter.post('/:id/upload-test-files', testFileUpload.array('files', 10), async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT id FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        const files = req.files;
+        if (!files || files.length === 0)
+            return res.status(400).json({ error: '请至少上传一个文件' });
+        const bucket = (0, bundleService_1.getBucketName)();
+        const gcsPaths = [];
+        // 动态 import google-cloud/storage（避免无 GCP 环境时报错）
+        let storageClient = null;
+        try {
+            const { Storage } = await Promise.resolve(`${'@google-cloud/storage'}`).then(s => __importStar(require(s)));
+            storageClient = new Storage();
+        }
+        catch {
+            // 本地开发环境没有 GCS，回退到保存到本地 uploads 目录
+        }
+        for (const file of files) {
+            const ext = path_1.default.extname(file.originalname).toLowerCase() || '.bin';
+            const blobName = `test-inputs/${skill.id}/${(0, uuid_1.v4)()}${ext}`;
+            const gcsPath = `gs://${bucket}/${blobName}`;
+            if (storageClient) {
+                const bkt = storageClient.bucket(bucket);
+                const blob = bkt.file(blobName);
+                await blob.save(file.buffer, { contentType: file.mimetype, metadata: { originalName: file.originalname } });
+                console.log(`[UploadTestFiles] uploaded ${file.originalname} → ${gcsPath}`);
+            }
+            else {
+                // 本地 fallback：把路径记为 local:// 供 runner.py 判断跳过
+                console.warn(`[UploadTestFiles] GCS not available, skipping actual upload for ${file.originalname}`);
+            }
+            gcsPaths.push({ gcsPath, filename: file.originalname, size: file.size, type: file.mimetype });
+        }
+        res.json({ gcsPaths, count: gcsPaths.length });
+    }
+    catch (err) {
+        console.error('[UploadTestFiles] error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/upload-scripts ─────────────────────────────────────
+// 用户上传 skill zip/tar.gz 包，解压后把 scripts/ 路径记录到 DB
+// 请求体：multipart/form-data，字段名 "archive"
+exports.skillRouter.post('/:id/upload-scripts', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        // 读取 raw body（base64 编码的 zip，前端用 FileReader.readAsDataURL）
+        const { archiveBase64, filename } = req.body;
+        if (!archiveBase64) {
+            return res.status(400).json({ error: 'archiveBase64 field required' });
+        }
+        const fs = await Promise.resolve().then(() => __importStar(require('fs')));
+        const path = await Promise.resolve().then(() => __importStar(require('path')));
+        const os = await Promise.resolve().then(() => __importStar(require('os')));
+        const { execSync: exec2 } = await Promise.resolve().then(() => __importStar(require('child_process')));
+        // 解压到临时目录
+        const tmpDir = path.join(os.tmpdir(), `skill-scripts-${skill.id}`);
+        fs.mkdirSync(tmpDir, { recursive: true });
+        // 写入 zip 文件
+        const ext = (filename || 'archive.zip').endsWith('.gz') ? '.tar.gz' : '.zip';
+        const archivePath = path.join(tmpDir, `archive${ext}`);
+        const buf = Buffer.from(archiveBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+        fs.writeFileSync(archivePath, buf);
+        // 解压
+        if (ext === '.tar.gz') {
+            exec2(`tar xzf ${archivePath} -C ${tmpDir} 2>/dev/null || true`);
+        }
+        else {
+            exec2(`unzip -q -o ${archivePath} -d ${tmpDir} 2>/dev/null || true`);
+        }
+        // 找 scripts/ 目录（可能在根目录或子目录里）
+        let scriptsPath = '';
+        try {
+            const result = exec2(`find ${tmpDir} -name "scripts" -type d | head -1`, { encoding: 'utf8' });
+            scriptsPath = result.trim();
+        }
+        catch { /* ignore */ }
+        if (!scriptsPath) {
+            // scripts/ 不存在，就用解压根目录
+            scriptsPath = tmpDir;
+        }
+        // 记录到 DB（存在 settings 表或 skill 的 metadata 字段）
+        await db.runAsync('UPDATE skills SET scripts_path=?, updated_at=? WHERE id=?', [scriptsPath, Date.now(), skill.id]);
+        return res.json({
+            message: 'Scripts uploaded and extracted',
+            scriptsPath,
+            skillId: skill.id,
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/transcripts ──────────────────────────────────────────
+// 列出某个 skill 的所有 transcript 记录
+exports.skillRouter.get('/:id/transcripts', async (req, res) => {
+    try {
+        const list = await (0, transcriptService_1.listTranscripts)(req.params.id);
+        res.json({ transcripts: list });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/transcript/full ──────────────────────────────────────
+// 读取完整版 transcript（从 GCS）
+exports.skillRouter.get('/:id/transcript/full', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT sandbox_test FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'not found' });
+        const st = skill.sandbox_test ? JSON.parse(skill.sandbox_test) : null;
+        const gcsInfo = st?.transcript_gcs;
+        if (!gcsInfo)
+            return res.json({ entries: [], message: 'no GCS transcript available' });
+        const entries = await (0, transcriptService_1.readFullTranscript)(gcsInfo);
+        const summary = (0, transcriptService_1.summarizeTranscript)(entries);
+        res.json({ entries, summary });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/transcript/spill/:entryId ───────────────────────────
+// 读取 spill 文件（大输出的完整内容）
+exports.skillRouter.get('/:id/transcript/spill/:spillPath', async (req, res) => {
+    try {
+        const content = await (0, transcriptService_1.readSpillFile)(decodeURIComponent(req.params.spillPath));
+        res.json({ content });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/skills/:id/preview ─────────────────────────────────────────────
+// 管理员 staging 预览：返回 skill 的 prompt + 配置（无需审核通过）
+exports.skillRouter.get('/:id/preview', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        res.json({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            skill_type: skill.skill_type,
+            type: skill.type,
+            status: skill.status,
+            prompt_template: skill.prompt_template || '',
+            plugin_config: skill.plugin_config ? JSON.parse(skill.plugin_config) : null,
+            requires: null, // from SKILL.md frontmatter if parsed
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/preview/chat ───────────────────────────────────────
+// 管理员 staging 预览：用 SKILL.md 作 system prompt，转发聊天消息给 AI
+exports.skillRouter.post('/:id/preview/chat', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT id, name, prompt_template, preferred_model FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        const { messages = [], user_message } = req.body;
+        if (!user_message && messages.length === 0) {
+            return res.status(400).json({ error: 'messages or user_message required' });
+        }
+        // 从 settings 表拿 AI 配置
+        const getSetting = (k) => db.getAsync('SELECT value FROM settings WHERE key=?', [k]).then(r => r?.value || '');
+        const [apiKey, baseUrl, model] = await Promise.all([
+            getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+            getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+            Promise.resolve(skill.preferred_model || ''),
+        ]);
+        const defaultModel = await getSetting('default_model');
+        const targetModel = model || defaultModel || 'doubao-seed-1-8-251228';
+        const systemPrompt = skill.prompt_template || `You are ${skill.name}.`;
+        const chatMessages = [
+            { role: 'system', content: systemPrompt },
+            ...messages,
+            ...(user_message ? [{ role: 'user', content: user_message }] : []),
+        ];
+        const aiRes = await fetch(`${baseUrl || 'https://ark.cn-beijing.volces.com/api/v3'}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: targetModel, messages: chatMessages }),
+        });
+        if (!aiRes.ok) {
+            const err = await aiRes.text();
+            return res.status(502).json({ error: `AI API error: ${err.slice(0, 200)}` });
+        }
+        const aiData = await aiRes.json();
+        const reply = aiData.choices?.[0]?.message?.content || '';
+        res.json({ reply, model: targetModel });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/skills/:id/sandbox-cancel ─────────────────────────────────────
+// 管理员手动停止沙箱测试：把状态标为 cancelled（Job 本身已超时或结束）
+exports.skillRouter.post('/:id/sandbox-cancel', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT id, sandbox_status FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.sandbox_status !== 'running') {
+            return res.json({ ok: true, message: 'not running' });
+        }
+        await db.runAsync(`UPDATE skills SET sandbox_status='cancelled', updated_at=? WHERE id=?`, [Date.now(), skill.id]);
+        res.json({ ok: true, message: 'cancelled' });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});

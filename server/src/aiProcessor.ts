@@ -104,7 +104,20 @@ function buildUserMessageFromInputs(inputs: TicketInput[]): string {
   const lines: string[] = ['以下是客户提交的信息，请根据这些信息完成任务：'];
   for (const inp of inputs) {
     if (inp.field_type === 'text' && inp.value) {
-      lines.push(`《${inp.field_key}》: ${inp.value}`);
+      // Try to pretty-print JSON values (e.g. objects submitted by scripts)
+      let displayValue = inp.value;
+      if (displayValue === '[object Object]') {
+        // Stale serialization artifact — skip or show warning
+        console.warn(`[buildUserMessage] field "${inp.field_key}" has "[object Object]" value, skipping`);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(displayValue);
+        if (typeof parsed === 'object' && parsed !== null) {
+          displayValue = JSON.stringify(parsed, null, 2);
+        }
+      } catch { /* not JSON, use as-is */ }
+      lines.push(`《${inp.field_key}》: ${displayValue}`);
     } else if (inp.field_type === 'file' && inp.file_path) {
       // 文件名在 user message 里做说明，实际内容由 sandbox 通过 GCS 路径提取
       lines.push(`《${inp.file_name || inp.field_key}》: [附件已上传，Agent 可通过附件内容读取]`);

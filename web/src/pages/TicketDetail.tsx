@@ -43,6 +43,11 @@ export default function TicketDetail() {
   const [savingRevision, setSavingRevision] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [overrideModel, setOverrideModel] = useState('');
+  // Inputs editing state
+  const [editingInputs, setEditingInputs] = useState(false);
+  const [editedTextValues, setEditedTextValues] = useState<Record<string, string>>({});
+  const [replacementFiles, setReplacementFiles] = useState<Record<string, File>>({});
+  const [savingInputs, setSavingInputs] = useState(false);
   // Poll ref
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -125,6 +130,35 @@ export default function TicketDetail() {
       await loadResult();
     } catch (e: any) { flash('error', e.message); }
     finally { setSavingRevision(false); }
+  };
+
+  const startEditInputs = () => {
+    // Pre-fill text values from current inputs
+    const vals: Record<string, string> = {};
+    for (const inp of (data?.inputs || [])) {
+      if (inp.field_type === 'text') vals[inp.field_key] = inp.value || '';
+    }
+    setEditedTextValues(vals);
+    setReplacementFiles({});
+    setEditingInputs(true);
+  };
+
+  const handleSaveInputs = async () => {
+    setSavingInputs(true);
+    try {
+      const fd = new FormData();
+      fd.append('fields', JSON.stringify(editedTextValues));
+      for (const [inputId, file] of Object.entries(replacementFiles)) {
+        fd.append(`file_${inputId}`, file);
+      }
+      const res = await api.tickets.updateInputs(id!, fd);
+      // Update local data with fresh inputs
+      setData((prev: any) => ({ ...prev, inputs: res.inputs }));
+      setEditingInputs(false);
+      setReplacementFiles({});
+      flash('success', '客户输入已更新，可重新 AI 处理');
+    } catch (e: any) { flash('error', e.message); }
+    finally { setSavingInputs(false); }
   };
 
   if (loading) return <div className="loading">加载中…</div>;
@@ -423,30 +457,106 @@ export default function TicketDetail() {
       {/* ── Client Inputs ─────────────────────────────────────────── */}
       {(textInputs.length > 0 || fileInputs.length > 0) && (
         <div className="card mb-4">
-          <div className="card-title">📋 客户提交内容</div>
-          {textInputs.map((inp: any) => {
-            const fieldCfg = skill?.h5_config?.fields?.find((f: any) => f.key === inp.field_key);
-            return (
-              <div key={inp.id} style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 4 }}>
-                  {fieldCfg?.label || inp.field_key}
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+            <div className="card-title" style={{ margin: 0 }}>📋 客户提交内容</div>
+            {!editingInputs && (
+              <button className="btn btn-ghost btn-sm ml-auto" onClick={startEditInputs}>✏️ 编辑</button>
+            )}
+          </div>
+
+          {/* ── Read-only view ── */}
+          {!editingInputs && (
+            <>
+              {textInputs.map((inp: any) => {
+                const fieldCfg = skill?.h5_config?.fields?.find((f: any) => f.key === inp.field_key);
+                return (
+                  <div key={inp.id} style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 4 }}>
+                      {fieldCfg?.label || inp.field_key}
+                    </div>
+                    <div style={{ fontSize: '.875rem', background: 'var(--gray-50)', padding: '8px 12px', borderRadius: 6, whiteSpace: 'pre-wrap' }}>
+                      {inp.value || '（未填写）'}
+                    </div>
+                  </div>
+                );
+              })}
+              {fileInputs.length > 0 && (
+                <div style={{ marginTop: textInputs.length ? 12 : 0 }}>
+                  <div style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 8 }}>上传的文件</div>
+                  {fileInputs.map((f: any) => (
+                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'var(--gray-50)', borderRadius: 6, marginBottom: 6 }}>
+                      <span>{f.mime_type?.includes('pdf') ? '📄' : '🖼️'}</span>
+                      <span style={{ flex: 1, fontSize: '.875rem' }}>{f.file_name}</span>
+                      <a className="btn btn-ghost btn-sm" href={'/api/upload/' + f.file_path?.split('/').pop()} target="_blank" rel="noreferrer">查看</a>
+                    </div>
+                  ))}
                 </div>
-                <div style={{ fontSize: '.875rem', background: 'var(--gray-50)', padding: '8px 12px', borderRadius: 6 }}>
-                  {inp.value || '（未填写）'}
+              )}
+            </>
+          )}
+
+          {/* ── Edit mode ── */}
+          {editingInputs && (
+            <div>
+              {/* Text fields */}
+              {textInputs.map((inp: any) => {
+                const fieldCfg = skill?.h5_config?.fields?.find((f: any) => f.key === inp.field_key);
+                return (
+                  <div key={inp.id} className="form-group">
+                    <label className="form-label">{fieldCfg?.label || inp.field_key}</label>
+                    <textarea
+                      className="form-textarea"
+                      rows={3}
+                      style={{ fontSize: '.875rem', fontFamily: 'inherit', resize: 'vertical' }}
+                      value={editedTextValues[inp.field_key] ?? inp.value ?? ''}
+                      onChange={e => setEditedTextValues(prev => ({ ...prev, [inp.field_key]: e.target.value }))}
+                    />
+                  </div>
+                );
+              })}
+              {/* File fields */}
+              {fileInputs.length > 0 && (
+                <div className="form-group">
+                  <label className="form-label" style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--gray-500)' }}>上传的文件</label>
+                  {fileInputs.map((f: any) => (
+                    <div key={f.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 10px', background: 'var(--gray-50)', borderRadius: 6, marginBottom: 8, border: replacementFiles[f.id] ? '1.5px solid var(--primary)' : '1px solid var(--gray-200)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>{f.mime_type?.includes('pdf') ? '📄' : '🖼️'}</span>
+                        <span style={{ flex: 1, fontSize: '.875rem', color: replacementFiles[f.id] ? 'var(--gray-400)' : 'inherit', textDecoration: replacementFiles[f.id] ? 'line-through' : 'none' }}>
+                          {f.file_name}
+                        </span>
+                        <label className="btn btn-ghost btn-sm" style={{ cursor: 'pointer', fontSize: '.78rem' }}>
+                          📁 替换文件
+                          <input type="file" style={{ display: 'none' }}
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) setReplacementFiles(prev => ({ ...prev, [f.id]: file }));
+                            }}
+                          />
+                        </label>
+                      </div>
+                      {replacementFiles[f.id] && (
+                        <div style={{ fontSize: '.78rem', color: 'var(--primary)', paddingLeft: 28, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          ✅ 将替换为：{replacementFiles[f.id].name}
+                          <button className="btn btn-ghost btn-sm" style={{ fontSize: '.72rem', padding: '0 4px' }}
+                            onClick={() => setReplacementFiles(prev => { const n = { ...prev }; delete n[f.id]; return n; })}>
+                            ✕ 取消
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
+              )}
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                <button className="btn btn-primary" onClick={handleSaveInputs} disabled={savingInputs}>
+                  {savingInputs ? '保存中…' : '💾 保存修改'}
+                </button>
+                <button className="btn btn-ghost" onClick={() => { setEditingInputs(false); setReplacementFiles({}); }}>
+                  取消
+                </button>
               </div>
-            );
-          })}
-          {fileInputs.length > 0 && (
-            <div style={{ marginTop: textInputs.length ? 12 : 0 }}>
-              <div style={{ fontSize: '.78rem', fontWeight: 600, color: 'var(--gray-500)', marginBottom: 8 }}>上传的文件</div>
-              {fileInputs.map((f: any) => (
-                <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'var(--gray-50)', borderRadius: 6, marginBottom: 6 }}>
-                  <span>{f.mime_type?.includes('pdf') ? '📄' : '🖼️'}</span>
-                  <span style={{ flex: 1, fontSize: '.875rem' }}>{f.file_name}</span>
-                  <a className="btn btn-ghost btn-sm" href={'/api/upload/' + f.file_path?.split('/').pop()} target="_blank" rel="noreferrer">查看</a>
-                </div>
-              ))}
             </div>
           )}
         </div>

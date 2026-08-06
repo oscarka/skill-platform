@@ -1,6 +1,15 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
 import * as db from '../db';
+
+// Multer for ticket input file replacement
+const UPLOADS_DIR = path.resolve(__dirname, '..', '..', '..', 'uploads', 'inputs');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+const inputUpload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 30 * 1024 * 1024 } });
+
 
 export const ticketRouter = express.Router();
 
@@ -290,6 +299,82 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
     res.json({ ok: true });
   } catch (err: any) {
     console.error('[TicketAgent] Callback error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PUT /api/tickets/:id/inputs — Staff edits submitted inputs ───────────────
+// Accepts multipart/form-data:
+//   fields         — JSON string: { fieldKey: newValue, ... }  (text inputs)
+//   file_<inputId> — replacement file for that specific input row
+ticketRouter.put('/:id/inputs', inputUpload.any(), async (req, res) => {
+  try {
+    const ticket = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    const now = Date.now();
+    const files = (req.files as Express.Multer.File[]) || [];
+
+    // ── Update text fields ────────────────────────────────────────────────────
+    let fields: Record<string, string> = {};
+    try {
+      fields = req.body.fields ? JSON.parse(req.body.fields) : {};
+    } catch { fields = {}; }
+
+    for (const [fieldKey, newValue] of Object.entries(fields)) {
+      const strValue = typeof newValue === 'object'
+        ? JSON.stringify(newValue)
+        : String(newValue ?? '');
+      const existing = await db.getAsync<any>(
+        'SELECT id FROM ticket_inputs WHERE ticket_id=? AND field_key=? AND field_type=?',
+        [ticket.id, fieldKey, 'text']
+      );
+      if (existing) {
+        await db.runAsync('UPDATE ticket_inputs SET value=? WHERE id=?', [strValue, existing.id]);
+      } else {
+        await db.runAsync(
+          `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, value, created_at) VALUES (?,?,?,?,?,?)`,
+          [uuidv4(), ticket.id, fieldKey, 'text', strValue, now]
+        );
+      }
+    }
+
+    // ── Replace file inputs ───────────────────────────────────────────────────
+    for (const file of files) {
+      const match = file.fieldname.match(/^file_(.+)$/);
+      if (!match) continue;
+      const inputId = match[1];
+
+      let fileName = file.originalname;
+      try { fileName = Buffer.from(file.originalname, 'latin1').toString('utf8'); } catch {}
+
+      const oldRow = await db.getAsync<any>('SELECT * FROM ticket_inputs WHERE id=?', [inputId]);
+      const fieldKey = oldRow?.field_key || 'file';
+      if (oldRow) {
+        if (oldRow.file_path && fs.existsSync(oldRow.file_path)) {
+          try { fs.unlinkSync(oldRow.file_path); } catch {}
+        }
+        await db.runAsync('DELETE FROM ticket_inputs WHERE id=?', [inputId]);
+      }
+
+      await db.runAsync(
+        `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+        [uuidv4(), ticket.id, fieldKey, 'file', file.path, fileName, file.mimetype, now]
+      );
+    }
+
+    // Ensure ticket is reprocessable
+    if (!['submitted', 'done', 'error'].includes(ticket.status)) {
+      await db.runAsync(`UPDATE tickets SET status='submitted', updated_at=? WHERE id=?`, [now, ticket.id]);
+    } else {
+      await db.runAsync(`UPDATE tickets SET updated_at=? WHERE id=?`, [now, ticket.id]);
+    }
+
+    const updatedInputs = await db.allAsync<any>(
+      'SELECT * FROM ticket_inputs WHERE ticket_id=? ORDER BY created_at', [ticket.id]
+    );
+    res.json({ ok: true, inputs: updatedInputs });
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });

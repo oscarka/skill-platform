@@ -1,0 +1,293 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ticketRouter = void 0;
+const express_1 = __importDefault(require("express"));
+const uuid_1 = require("uuid");
+const db = __importStar(require("../db"));
+exports.ticketRouter = express_1.default.Router();
+const EXPIRY_DAYS = async () => {
+    const row = await db.getAsync('SELECT value FROM settings WHERE key=?', ['ticket_expiry_days']);
+    return parseInt(row?.value || '3', 10);
+};
+const STATUS_LABEL = {
+    created: '待发送', waiting_input: '等待提交', submitted: '已提交',
+    processing: 'AI 处理中', done: '已完成', returned: '已打回',
+    expired: '已过期', error: '处理出错',
+};
+async function h5BaseUrl() {
+    const row = await db.getAsync('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
+    return row?.value || `http://localhost:3100/h5`;
+}
+async function ticketToResponse(t, skill) {
+    return {
+        id: t.id,
+        skill_id: t.skill_id,
+        skill_name: skill?.name,
+        token: t.token,
+        title: t.title,
+        patient_name: t.patient_name,
+        patient_phone: t.patient_phone,
+        notes: t.notes,
+        created_by: t.created_by,
+        status: t.status,
+        status_label: STATUS_LABEL[t.status] || t.status,
+        return_reason: t.return_reason,
+        return_count: t.return_count,
+        h5_url: `${await h5BaseUrl()}?token=${t.token}`,
+        h5_submitted_at: t.h5_submitted_at,
+        ai_started_at: t.ai_started_at,
+        ai_completed_at: t.ai_completed_at,
+        expires_at: t.expires_at,
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+    };
+}
+// ─── POST /api/tickets — Create ticket ────────────────────────────────────────
+exports.ticketRouter.post('/', async (req, res) => {
+    try {
+        const { skill_id, title, patient_name, patient_phone, notes, created_by } = req.body;
+        if (!skill_id)
+            return res.status(400).json({ error: '"skill_id" is required' });
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [skill_id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        if (skill.status !== 'published')
+            return res.status(400).json({ error: 'Skill must be published before creating tickets' });
+        if (skill.type !== 'external')
+            return res.status(400).json({ error: 'Tickets can only be created for external skills' });
+        const id = (0, uuid_1.v4)();
+        const token = (0, uuid_1.v4)().replace(/-/g, '');
+        const now = Date.now();
+        const expiresAt = (now + (await EXPIRY_DAYS()) * 24 * 60 * 60 * 1000);
+        await db.runAsync(`INSERT INTO tickets
+        (id, skill_id, token, title, patient_name, patient_phone, notes,
+         created_by, status, return_count, expires_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, skill_id, token,
+            title || `${skill.name} — ${new Date(now).toLocaleDateString('zh-CN')}`,
+            patient_name || null, patient_phone || null, notes || null,
+            created_by || null, 'created', 0, expiresAt, now, now]);
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [id]);
+        res.status(201).json({ ticket: await ticketToResponse(ticket, skill) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/tickets — List tickets ──────────────────────────────────────────
+exports.ticketRouter.get('/', async (req, res) => {
+    try {
+        const { status, skill_id, q } = req.query;
+        let sql = `SELECT t.*, s.name as skill_name FROM tickets t
+               LEFT JOIN skills s ON t.skill_id = s.id WHERE 1=1`;
+        const params = [];
+        if (status) {
+            sql += ' AND t.status=?';
+            params.push(status);
+        }
+        if (skill_id) {
+            sql += ' AND t.skill_id=?';
+            params.push(skill_id);
+        }
+        if (q) {
+            sql += ' AND (t.title LIKE ? OR t.patient_name LIKE ? OR t.token LIKE ?)';
+            params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+        }
+        sql += ' ORDER BY t.created_at DESC LIMIT 100';
+        const rows = await db.allAsync(sql, params);
+        const base = await h5BaseUrl();
+        const tickets = await Promise.all(rows.map(async (t) => ({
+            ...(await ticketToResponse(t)),
+            skill_name: t.skill_name,
+            h5_url: `${base}?token=${t.token}`,
+        })));
+        res.json({ tickets });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/tickets/:id — Ticket detail ─────────────────────────────────────
+exports.ticketRouter.get('/:id', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [ticket.skill_id]);
+        const inputs = await db.allAsync('SELECT * FROM ticket_inputs WHERE ticket_id=? ORDER BY created_at', [ticket.id]);
+        const result = await db.getAsync('SELECT * FROM ticket_results WHERE ticket_id=?', [ticket.id]);
+        res.json({
+            ticket: await ticketToResponse(ticket, skill),
+            skill: skill ? { id: skill.id, name: skill.name, type: skill.type, h5_config: skill.h5_config ? JSON.parse(skill.h5_config) : null } : null,
+            inputs,
+            result,
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/tickets/token/:token — Get by token (H5 uses this) ──────────────
+exports.ticketRouter.get('/token/:token', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE token=?', [req.params.token]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Invalid or expired link' });
+        if (Date.now() > ticket.expires_at && ticket.status !== 'submitted' && ticket.status !== 'done')
+            return res.status(410).json({ error: 'Link has expired', expired: true });
+        const skill = await db.getAsync('SELECT id, name, type, h5_config FROM skills WHERE id=?', [ticket.skill_id]);
+        res.json({
+            ticket: { id: ticket.id, status: ticket.status, expires_at: ticket.expires_at, return_reason: ticket.return_reason },
+            skill: skill ? { id: skill.id, name: skill.name, h5_config: skill.h5_config ? JSON.parse(skill.h5_config) : null } : null,
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/tickets/:id/return — Return ticket to client ────────────────────
+exports.ticketRouter.put('/:id/return', async (req, res) => {
+    try {
+        const { reason } = req.body;
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const now = Date.now();
+        const newExpiry = (now + (await EXPIRY_DAYS()) * 24 * 60 * 60 * 1000);
+        await db.runAsync(`UPDATE tickets SET status='returned', return_reason=?, return_count=return_count+1,
+       expires_at=?, updated_at=? WHERE id=?`, [reason || '请补充信息后重新提交', newExpiry, now, ticket.id]);
+        const updated = await db.getAsync('SELECT * FROM tickets WHERE id=?', [ticket.id]);
+        res.json({ ticket: await ticketToResponse(updated) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/tickets/:id/status — Poll status ────────────────────────────────
+exports.ticketRouter.get('/:id/status', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT status, updated_at FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        res.json({ status: ticket.status, status_label: STATUS_LABEL[ticket.status], updated_at: ticket.updated_at });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/tickets/:id/agent-callback — Cloud Run Job result for plugin skills ──
+// runner.py calls this when Agent finishes (same format as sandbox-callback in skillRoutes)
+exports.ticketRouter.post('/:id/agent-callback', async (req, res) => {
+    try {
+        const EXPECTED_SECRET = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+        const secret = req.headers['x-sandbox-secret'];
+        if (secret !== EXPECTED_SECRET) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const ticketId = req.params.id;
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [ticketId]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const body = req.body;
+        // ─── 实时流式进度上报 (Real-time CUA Transcript Streaming) ─────────────────────
+        if (body?.type === 'progress' || body?.type === 'transcript_step') {
+            const stepEntry = body.entry || {
+                type: 'event',
+                event: body.event?.step || 'progress',
+                detail: body.event?.detail || '',
+                ts: body.event?.ts || new Date().toISOString()
+            };
+            const now = Date.now();
+            const existing = await db.getAsync('SELECT * FROM ticket_results WHERE ticket_id=?', [ticketId]);
+            let currentLog = [];
+            if (existing?.ai_log) {
+                try {
+                    currentLog = JSON.parse(existing.ai_log);
+                }
+                catch {
+                    currentLog = [];
+                }
+            }
+            // 避免基于 ID 重复添加
+            if (!stepEntry.id || !currentLog.some(e => e.id === stepEntry.id)) {
+                currentLog.push(stepEntry);
+            }
+            const updatedAiLog = JSON.stringify(currentLog, null, 2);
+            if (existing) {
+                await db.runAsync(`UPDATE ticket_results SET ai_log=?, updated_at=? WHERE ticket_id=?`, [updatedAiLog, now, ticketId]);
+            }
+            else {
+                const { v4: uuidv4 } = require('uuid');
+                await db.runAsync(`INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`, [uuidv4(), ticketId, '(处理中...)', updatedAiLog, now, now]);
+            }
+            if (ticket.status !== 'processing') {
+                await db.runAsync(`UPDATE tickets SET status='processing', updated_at=? WHERE id=?`, [now, ticketId]);
+            }
+            return res.json({ ok: true, streamed: true });
+        }
+        // ─── 最终回调（Agent 执行完成或失败）────────────────────────────────────────
+        const passed = body?.passed ?? false;
+        let rawResult = body?.output || '';
+        if (!rawResult && Array.isArray(body?.test_results) && body.test_results.length > 0) {
+            rawResult = body.test_results[0]?.output || body.test_results[0]?.result || '';
+        }
+        if (!rawResult)
+            rawResult = passed ? '(Agent completed, no output)' : '(Agent failed)';
+        // Store transcript as ai_log for display
+        const aiLog = body?.transcript
+            ? JSON.stringify(body.transcript, null, 2)
+            : '';
+        const now = Date.now();
+        const existing = await db.getAsync('SELECT id FROM ticket_results WHERE ticket_id=?', [ticketId]);
+        if (existing) {
+            await db.runAsync(`UPDATE ticket_results SET raw_result=?, ai_log=?, updated_at=? WHERE ticket_id=?`, [rawResult, aiLog, now, ticketId]);
+        }
+        else {
+            const { v4: uuidv4 } = require('uuid');
+            await db.runAsync(`INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`, [uuidv4(), ticketId, rawResult, aiLog, now, now]);
+        }
+        const newStatus = passed ? 'done' : 'error';
+        await db.runAsync(`UPDATE tickets SET status=?, ai_completed_at=?, updated_at=? WHERE id=?`, [newStatus, now, now, ticketId]);
+        console.log(`[TicketAgent] Callback for ticket ${ticketId}: passed=${passed}, preview=${rawResult.slice(0, 80)}`);
+        res.json({ ok: true });
+    }
+    catch (err) {
+        console.error('[TicketAgent] Callback error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});

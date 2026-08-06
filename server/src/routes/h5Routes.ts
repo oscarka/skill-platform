@@ -95,20 +95,28 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
     // Save text fields
     for (const [key, value] of Object.entries(fields)) {
       if (key === 'fields') continue;
+      const strValue = (value === null || value === undefined)
+        ? ''
+        : (typeof value === 'object' ? JSON.stringify(value) : String(value));
       await db.runAsync(
         `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, value, created_at)
          VALUES (?,?,?,?,?,?)`,
-        [uuidv4(), ticket.id, key, 'text', String(value), now]
+        [uuidv4(), ticket.id, key, 'text', strValue, now]
       );
     }
 
     // Save uploaded files
     const files = (req.files as Express.Multer.File[]) || [];
     for (const file of files) {
+      // multer decodes originalname as latin1; re-encode as utf8 for Chinese filenames
+      let fileName = file.originalname;
+      try {
+        fileName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+      } catch { /* keep original if conversion fails */ }
       await db.runAsync(
         `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
          VALUES (?,?,?,?,?,?,?,?)`,
-        [uuidv4(), ticket.id, 'file', 'file', file.path, file.originalname, file.mimetype, now]
+        [uuidv4(), ticket.id, 'file', 'file', file.path, fileName, file.mimetype, now]
       );
     }
 
