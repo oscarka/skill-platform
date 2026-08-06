@@ -1102,14 +1102,15 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   if (selectedSkillId && selectedSkillName) {
     const skillDesc = availableSkills.find(s => s.id === selectedSkillId);
+    const _wikiForLog = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
     void appendTaskEvent(requestId, 'skill_started', {
       skillId: selectedSkillId,
       skillName: selectedSkillName,
       description: (skillDesc as any)?.description?.slice(0, 200) || '',
       context_summary: [
-        wikiCtx?.user_profile ? `用户画像 ${wikiCtx.user_profile.length}字` : '无用户画像',
-        wikiCtx?.health_wiki ? `健康档案 ${wikiCtx.health_wiki.length}字` : '无健康档案',
-        `历史 ${history.length} 条`,
+        _wikiForLog?.user_profile ? `用户画像 ${_wikiForLog.user_profile.length}字` : '无用户画像',
+        _wikiForLog?.health_wiki  ? `健康档案 ${_wikiForLog.health_wiki.length}字` : '无健康档案',
+        `历史 ${(req.history || []).length} 条`,
       ].join(' · '),
     });
     const skillResult = await handleHealthSkill(
