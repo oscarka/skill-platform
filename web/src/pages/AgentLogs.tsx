@@ -157,7 +157,7 @@ function AgentTasksPanel() {
   const [selected, setSelected] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [filter, setFilter] = useState({ channel: '', status: '' });
-  const [detailTab, setDetailTab] = useState<'events' | 'transcript' | 'context'>('events');
+  const [polling, setPolling] = useState<ReturnType<typeof setInterval> | null>(null);
 
   const loadTasks = async () => {
     try {
@@ -180,8 +180,19 @@ function AgentTasksPanel() {
     const data = await res.json();
     setSelected(data);
     setEvents(data.events || []);
-    setDetailTab('events'); // reset tab on task change
   };
+
+  // Auto-refresh selected task when executing
+  useEffect(() => {
+    if (!selected) return;
+    if (selected.status === 'executing' || selected.status === 'routing') {
+      const t = setInterval(() => loadTaskDetail(selected.id), 3000);
+      setPolling(t);
+      return () => clearInterval(t);
+    } else {
+      if (polling) { clearInterval(polling); setPolling(null); }
+    }
+  }, [selected?.status, selected?.id]);
 
   useEffect(() => { loadTasks(); }, [filter]);
   useEffect(() => {
@@ -190,54 +201,113 @@ function AgentTasksPanel() {
   }, [filter]);
 
   const fmtTime = (ts: any) => ts ? new Date(Number(ts)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
-  const fmtDur  = (ms: number) => ms ? (ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`) : '-';
+  const fmtTimeShort = (ts: any) => ts ? new Date(Number(ts)).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  const fmtDur = (ms: number) => ms ? (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`) : '-';
+
+  // ── Build unified timeline: merge agent events + transcript steps sorted by ts ──
+  const buildTimeline = (): any[] => {
+    if (!selected) return [];
+    const timeline: any[] = [];
+
+    // Add context snapshot as first synthetic item
+    if (selected.context_snapshot) {
+      const ctx = selected.context_snapshot;
+      timeline.push({ _kind: 'context', ts: selected.started_at, ctx });
+    }
+
+    // Agent-level events
+    for (const ev of (events || [])) {
+      timeline.push({ _kind: 'agent_event', ts: Number(ev.ts), ev });
+    }
+
+    // Transcript steps (from Cloud Run Job)
+    if (selected.job_transcript && Array.isArray(selected.job_transcript)) {
+      for (const t of selected.job_transcript) {
+        const ts = t.ts ? new Date(t.ts).getTime() : 0;
+        timeline.push({ _kind: 'transcript', ts, t });
+      }
+    }
+
+    // Sort by ts
+    timeline.sort((a, b) => a.ts - b.ts);
+    return timeline;
+  };
+
+  const timeline = buildTimeline();
+
+  // ── Status config ────────────────────────────────────────────────────────────
+  const statusCfg: Record<string, { label: string; dot: string; bg: string; text: string }> = {
+    done:      { label: '完成', dot: '#22c55e', bg: '#dcfce7', text: '#15803d' },
+    failed:    { label: '失败', dot: '#ef4444', bg: '#fee2e2', text: '#dc2626' },
+    executing: { label: '执行中', dot: '#f59e0b', bg: '#fef3c7', text: '#d97706' },
+    routing:   { label: '路由中', dot: '#8b5cf6', bg: '#ede9fe', text: '#6d28d9' },
+  };
 
   return (
-    <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden', height: '100%' }}>
-      {/* Left list */}
-      <div className="card" style={{ width: 340, display: 'flex', flexDirection: 'column', padding: 12, overflow: 'hidden' }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
-          <select className="form-control" value={filter.channel} onChange={e => setFilter(f => ({ ...f, channel: e.target.value }))} style={{ flex: 1, fontSize: '.8rem', padding: '4px 8px' }}>
+    <div style={{ display: 'flex', gap: 0, flex: 1, minHeight: 0, overflow: 'hidden', height: '100%' }}>
+
+      {/* ── LEFT PANEL (CUA log style) ──────────────────────────────────────── */}
+      <div style={{ width: 320, display: 'flex', flexDirection: 'column', borderRight: '1px solid #e2e8f0', overflow: 'hidden', background: '#fafafa' }}>
+        {/* Filter bar */}
+        <div style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 6, flexShrink: 0 }}>
+          <select value={filter.channel} onChange={e => setFilter(f => ({ ...f, channel: e.target.value }))}
+            style={{ flex: 1, fontSize: '.78rem', padding: '4px 7px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}>
             <option value="">全部渠道</option>
             <option value="wecom">企业微信</option>
             <option value="api">API</option>
           </select>
-          <select className="form-control" value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))} style={{ flex: 1, fontSize: '.8rem', padding: '4px 8px' }}>
+          <select value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))}
+            style={{ flex: 1, fontSize: '.78rem', padding: '4px 7px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}>
             <option value="">全部状态</option>
             <option value="done">已完成</option>
             <option value="failed">失败</option>
             <option value="executing">执行中</option>
           </select>
-          <button className="btn btn-sm btn-ghost" onClick={loadTasks} title="刷新">↻</button>
+          <button onClick={loadTasks} style={{ border: '1px solid #d1d5db', background: '#fff', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: '.9rem' }}>↻</button>
         </div>
-        <div style={{ fontSize: '.75rem', color: '#64748b', marginBottom: 8, flexShrink: 0 }}>共 {total} 条记录</div>
+        <div style={{ padding: '4px 12px 6px', fontSize: '.72rem', color: '#9ca3af', flexShrink: 0 }}>共 {total} 条</div>
+
+        {/* Task list */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {loading && <div style={{ textAlign: 'center', padding: 20, color: '#64748b' }}>加载中...</div>}
-          {!loading && tasks.length === 0 && <div style={{ textAlign: 'center', padding: 20, color: '#64748b' }}>暂无数据<br/><span style={{ fontSize: '.75rem' }}>渠道消息到来后会自动记录</span></div>}
-          {tasks.map(t => {
-            const sc = CHANNEL_STATUS[t.status] || { label: t.status, dot: '#94a3b8' };
+          {loading && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8' }}>加载中...</div>}
+          {!loading && tasks.length === 0 && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>暂无数据</div>}
+          {tasks.map((t: any) => {
+            const sc = statusCfg[t.status] || { label: t.status, dot: '#94a3b8', bg: '#f1f5f9', text: '#475569' };
             const isActive = selected?.id === t.id;
+            const initial = (t.user_id || '?')[0].toUpperCase();
             return (
               <div key={t.id} onClick={() => loadTaskDetail(t.id)} style={{
-                padding: '10px 12px', marginBottom: 6, borderRadius: 8, cursor: 'pointer',
-                background: isActive ? '#eff6ff' : '#f8fafc',
-                border: `1px solid ${isActive ? '#3b82f6' : '#e2e8f0'}`,
-                transition: 'all .15s',
+                padding: '11px 14px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer',
+                background: isActive ? '#eff6ff' : '#fafafa',
+                borderLeft: `3px solid ${isActive ? '#3b82f6' : 'transparent'}`,
+                transition: 'all .12s',
               }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                  <span style={{ fontSize: '.8rem', fontWeight: 600, color: '#1e293b' }}>{t.user_id || '-'}</span>
-                  <span style={{ fontSize: '.7rem', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: sc.dot, display: 'inline-block' }} />
-                    {sc.label}
-                  </span>
-                </div>
-                <div style={{ fontSize: '.75rem', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>
-                  {t.input_content?.slice(0, 50) || '-'}
-                </div>
-                <div style={{ fontSize: '.7rem', color: '#94a3b8', display: 'flex', gap: 8 }}>
-                  <span>{t.source_channel || '-'}</span>
-                  <span>{t.route_type || '-'}</span>
-                  <span>{fmtTime(t.started_at)}</span>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  {/* Avatar */}
+                  <div style={{
+                    flexShrink: 0, width: 36, height: 36, borderRadius: '50%',
+                    background: isActive ? '#3b82f6' : '#e2e8f0',
+                    color: isActive ? '#fff' : '#475569',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontWeight: 700, fontSize: '.9rem',
+                  }}>{initial}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                      <span style={{ fontSize: '.85rem', fontWeight: 600, color: '#1e293b' }}>{t.user_id || '-'}</span>
+                      <span style={{ fontSize: '.68rem', padding: '2px 6px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
+                        <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: sc.dot, marginRight: 3, verticalAlign: 'middle' }} />
+                        {sc.label}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '.78rem', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>
+                      {t.input_content?.slice(0, 45) || '-'}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, fontSize: '.7rem', color: '#9ca3af' }}>
+                      <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3, fontSize: '.67rem' }}>{t.source_channel || '-'}</span>
+                      {t.route_type && <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3, fontSize: '.67rem' }}>{t.route_type}</span>}
+                      <span style={{ marginLeft: 'auto' }}>{fmtTime(t.started_at)}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             );
@@ -245,182 +315,214 @@ function AgentTasksPanel() {
         </div>
       </div>
 
-
-      {/* Right detail */}
-      <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 16, overflow: 'hidden' }}>
-        {!selected && <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}><div style={{ fontSize: 48, marginBottom: 12 }}>📋</div>点击左侧任务查看事件流</div>}
+      {/* ── RIGHT PANEL: unified timeline ───────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#fff' }}>
+        {!selected && (
+          <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>💬</div>
+            <div style={{ fontSize: '.9rem' }}>选择左侧会话查看完整链路日志</div>
+          </div>
+        )}
         {selected && <>
-          {/* Task header — rich info bar */}
-          <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: 14, marginBottom: 14, flexShrink: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 700, fontSize: '1rem', color: '#1e293b' }}>{selected.user_id}</span>
-                  <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600 }}>{selected.source_channel}</span>
-                  {selected.status === 'done' && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#dcfce7', color: '#15803d', fontWeight: 600 }}>✓ 已完成</span>}
-                  {selected.status === 'failed' && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#fee2e2', color: '#dc2626', fontWeight: 600 }}>✗ 失败</span>}
-                  {(selected.status === 'executing' || selected.status === 'routing') && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#fef3c7', color: '#d97706', fontWeight: 600 }}>⟳ {selected.status === 'routing' ? '路由中' : '执行中'}</span>}
-                  {selected.duration_ms && <span style={{ fontSize: '.72rem', color: '#64748b' }}>⏱ {fmtDur(selected.duration_ms)}</span>}
+          {/* ── Session header bar ──────────────────────────────────────────── */}
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid #e2e8f0', background: '#fafafa', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              {/* Avatar */}
+              <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#3b82f6', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '1rem', flexShrink: 0 }}>
+                {(selected.user_id || '?')[0].toUpperCase()}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <span style={{ fontWeight: 700, fontSize: '.95rem', color: '#111827' }}>{selected.user_id}</span>
+                  <span style={{ fontSize: '.72rem', padding: '1px 7px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600 }}>{selected.source_channel}</span>
+                  {(() => {
+                    const sc = statusCfg[selected.status] || { label: selected.status, bg: '#f1f5f9', text: '#64748b' };
+                    return <span style={{ fontSize: '.72rem', padding: '1px 7px', borderRadius: 4, background: sc.bg, color: sc.text, fontWeight: 600 }}>{sc.label}</span>;
+                  })()}
+                  {selected.duration_ms && <span style={{ fontSize: '.72rem', color: '#6b7280' }}>⏱ {fmtDur(selected.duration_ms)}</span>}
                 </div>
-                <div style={{ fontSize: '.88rem', color: '#374151', fontWeight: 500, marginBottom: 5 }}>{selected.input_content}</div>
-                <div style={{ display: 'flex', gap: 12, fontSize: '.72rem', color: '#64748b', flexWrap: 'wrap' }}>
-                  <span>ID: <code style={{ fontSize: '.7rem' }}>{selected.id}</code></span>
-                  {selected.route_type && <span>路由: <strong style={{ color: '#374151' }}>{selected.route_type}</strong></span>}
-                  {selected.skill_id && <span>Skill: <code style={{ fontSize: '.7rem' }}>{selected.skill_id.slice(0,8)}</code></span>}
-                </div>
+                <div style={{ fontSize: '.85rem', color: '#374151' }}>{selected.input_content}</div>
+              </div>
+              <div style={{ textAlign: 'right', fontSize: '.7rem', color: '#9ca3af', flexShrink: 0 }}>
+                <div><code>{selected.id?.slice(0, 14)}</code></div>
+                {selected.route_type && <div>{selected.route_type}</div>}
               </div>
             </div>
-            {/* Failure error banner */}
+            {/* Failure banner */}
             {selected.status === 'failed' && selected.error_message && (
-              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '10px 14px', marginTop: 8 }}>
-                <div style={{ fontSize: '.78rem', fontWeight: 700, color: '#dc2626', marginBottom: 4 }}>❌ 失败原因</div>
-                <div style={{ fontSize: '.8rem', color: '#7f1d1d', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>{selected.error_message}</div>
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 7, padding: '8px 12px', marginTop: 6 }}>
+                <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#dc2626' }}>❌ 失败原因: </span>
+                <span style={{ fontSize: '.78rem', color: '#7f1d1d', fontFamily: 'monospace' }}>{selected.error_message}</span>
               </div>
             )}
+            {/* Stats row */}
+            <div style={{ display: 'flex', gap: 12, marginTop: 8, fontSize: '.72rem', color: '#6b7280' }}>
+              <span>📋 事件 {events.length}</span>
+              {selected.job_transcript && <span>🎬 AI步骤 {(selected.job_transcript || []).length}</span>}
+              {selected.context_snapshot?.history_count > 0 && <span>📜 历史 {selected.context_snapshot.history_count} 条</span>}
+            </div>
           </div>
 
+          {/* ── Unified timeline scroll area ────────────────────────────────── */}
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 20px' }}>
+            {timeline.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无日志数据</div>}
 
-          {/* ── Detail Tab Bar ─────────────────────────────────────────────── */}
-          <div style={{ display: 'flex', gap: 0, borderBottom: '2px solid #e2e8f0', marginBottom: 0, flexShrink: 0 }}>
-            {[
-              { key: 'events', label: '📋 事件流', count: events.length },
-              { key: 'transcript', label: '🎬 执行详情', count: selected.job_transcript ? selected.job_transcript.length : 0 },
-              { key: 'context', label: '📜 上下文', count: 0 },
-            ].map(({ key, label, count }) => (
-              <button key={key} onClick={() => setDetailTab(key as any)} style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '8px 14px', fontSize: '.78rem', fontWeight: detailTab === key ? 700 : 500,
-                color: detailTab === key ? '#2563eb' : '#64748b',
-                borderBottom: `2px solid ${detailTab === key ? '#2563eb' : 'transparent'}`,
-                marginBottom: -2, transition: 'all .15s',
-              }}>
-                {label}{count > 0 && <span style={{ marginLeft: 4, background: '#e2e8f0', color: '#475569', borderRadius: 8, padding: '0 5px', fontSize: '.68rem' }}>{count}</span>}
-              </button>
-            ))}
-          </div>
-
-          {/* ── Tab Content ────────────────────────────────────────────── */}
-
-          {/* Events Tab */}
-          {detailTab === 'events' && <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
-            <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#64748b', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '.06em' }}>事件流 ({events.length})</div>
-            {events.length === 0 && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无事件记录</div>}
-            {events.map((ev: any, i: number) => {
-              const prevTs = i > 0 ? Number(events[i - 1].ts) : Number(ev.ts);
-              const stepMs = Number(ev.ts) - prevTs;
-              const p: any = ev.payload || {};
-              const evType: string = ev.event_type;
-              type CardCfg = { bg: string; border: string; label: string; icon: string; lc: string };
-              const cfgMap: Record<string, CardCfg> = {
-                message_received: { bg: '#eff6ff', border: '#bfdbfe', label: '收到消息', icon: '📩', lc: '#1d4ed8' },
-                wiki_fetched:     { bg: '#f0fdf4', border: '#bbf7d0', label: 'Wiki 上下文', icon: '📚', lc: '#15803d' },
-                route_decided:    { bg: '#faf5ff', border: '#e9d5ff', label: '路由决策', icon: '🔀', lc: '#7c3aed' },
-                skill_selected:   { bg: '#fff7ed', border: '#fed7aa', label: 'Skill 选择', icon: '🎯', lc: '#c2410c' },
-                skill_input:      { bg: '#f8fafc', border: '#cbd5e1', label: '发给 Skill 的上下文', icon: '📤', lc: '#374151' },
-                skill_started:    { bg: '#fefce8', border: '#fef08a', label: 'Skill 启动', icon: '🚀', lc: '#854d0e' },
-                reassurance_sent: { bg: '#ecfdf5', border: '#a7f3d0', label: '安抚消息', icon: '💬', lc: '#065f46' },
-                skill_done:       { bg: '#f0fdf4', border: '#86efac', label: 'Skill 完成', icon: '✅', lc: '#15803d' },
-                reply_sent:       { bg: '#eff6ff', border: '#93c5fd', label: '回复发送', icon: '✉️', lc: '#1e40af' },
-                task_failed:      { bg: '#fef2f2', border: '#fca5a5', label: '任务失败', icon: '❌', lc: '#dc2626' },
-              };
-              const cfg: CardCfg = cfgMap[evType] || { bg: '#f8fafc', border: '#e2e8f0', label: evType, icon: '•', lc: '#374151' };
-              return (
-                <div key={ev.id || i} style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-                  <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: '50%', background: cfg.bg, border: `2px solid ${cfg.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '.9rem', marginTop: 2 }}>
-                    {cfg.icon}
-                  </div>
-                  <div style={{ flex: 1, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 10, padding: '10px 13px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: '.75rem', fontWeight: 700, color: cfg.lc, textTransform: 'uppercase', letterSpacing: '.04em' }}>{cfg.label}</span>
-                        {i > 0 && stepMs > 0 && <span style={{ fontSize: '.68rem', padding: '1px 5px', borderRadius: 4, background: 'rgba(0,0,0,.06)', color: '#64748b' }}>+{stepMs < 1000 ? `${stepMs}ms` : `${(stepMs/1000).toFixed(1)}s`}</span>}
-                      </div>
-                      <span style={{ fontSize: '.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>{fmtTime(ev.ts)}</span>
+            {timeline.map((item: any, idx: number) => {
+              /* ── Context / History item ──────────────────────────────────── */
+              if (item._kind === 'context') {
+                const ctx = item.ctx;
+                return (
+                  <div key={`ctx-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#1e293b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px' }}>📜</div>
+                      <div style={{ width: 1, flex: 1, background: '#e2e8f0', marginTop: 4 }} />
                     </div>
-
-                    {evType === 'message_received' && (
-                      <div style={{ fontSize: '.82rem', color: '#1e3a5f' }}>
-                        {p.from_name && <div style={{ marginBottom: 5 }}><strong>「{p.from_name}」</strong> → {p.source}</div>}
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {(p.history_count > 0) && <span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📜 历史 {p.history_count} 条</span>}
-                          {p.has_notes && <span style={{ background: '#e0e7ff', color: '#4338ca', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📝 含备注</span>}
+                    <div style={{ flex: 1, paddingBottom: 14 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', color: '#374151', background: '#f1f5f9', padding: '2px 8px', borderRadius: 5 }}>SESSION CONTEXT</span>
+                        <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace' }}>{fmtTimeShort(item.ts)}</span>
+                      </div>
+                      {/* Dark bar */}
+                      <div style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', flexWrap: 'wrap' as const, gap: 6 }}>
+                        <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>INGEST</span>
+                        <span style={{ color: '#f1f5f9' }}>/api/orch/ingest</span>
+                        <div style={{ display: 'flex', gap: 10 }}>
+                          {ctx.history_count > 0 && <span style={{ color: '#c084fc' }}>history: {ctx.history_count}</span>}
+                          {ctx.from_name && <span style={{ color: '#34d399' }}>from: {ctx.from_name}</span>}
+                          {ctx.notes && <span style={{ color: '#f59e0b' }}>notes: yes</span>}
                         </div>
                       </div>
-                    )}
-                    {evType === 'wiki_fetched' && (
-                      <div>
-                        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: (p.profile_preview || p.wiki_preview) ? 8 : 0 }}>
-                          {p.profile_chars > 0 ? <span style={{ background: '#dcfce7', color: '#166534', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>👤 用户画像 {p.profile_chars} 字</span> : <span style={{ color: '#94a3b8', fontSize: '.75rem' }}>暂无用户画像</span>}
-                          {p.wiki_chars > 0 && <span style={{ background: '#d1fae5', color: '#065f46', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📖 健康档案 {p.wiki_chars} 字</span>}
+                      {/* History preview */}
+                      {ctx.history && ctx.history.length > 0 && (
+                        <details>
+                          <summary style={{ fontSize: '.75rem', color: '#64748b', cursor: 'pointer', padding: '4px 0' }}>
+                            ▶ 展开对话历史 ({ctx.history.length} 条)
+                          </summary>
+                          <div style={{ marginTop: 8, background: '#f8fafc', borderRadius: 8, padding: '10px 12px', border: '1px solid #e2e8f0', maxHeight: 300, overflow: 'auto' }}>
+                            {ctx.history.map((h: any, hi: number) => (
+                              <div key={hi} style={{ marginBottom: 8, display: 'flex', gap: 8 }}>
+                                <span style={{ flexShrink: 0, fontSize: '.68rem', padding: '2px 6px', borderRadius: 4, fontWeight: 600, background: h.role === 'user' ? '#dbeafe' : '#d1fae5', color: h.role === 'user' ? '#1d4ed8' : '#065f46' }}>
+                                  {h.role === 'user' ? '用户' : 'AI'}
+                                </span>
+                                <div style={{ fontSize: '.78rem', color: '#374151', lineHeight: 1.5 }}>{(h.content || '').slice(0, 200)}{(h.content || '').length > 200 ? '…' : ''}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                      {ctx.notes && (
+                        <div style={{ marginTop: 6, background: '#fffbeb', borderRadius: 7, padding: '7px 10px', border: '1px solid #fde68a', fontSize: '.78rem', color: '#78350f' }}>
+                          📝 备注: {ctx.notes}
                         </div>
-                        {p.profile_preview && <details style={{ marginTop: 4 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开用户画像</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.profile_preview}</pre></details>}
-                        {p.wiki_preview && <details style={{ marginTop: 4 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开健康档案</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.wiki_preview}</pre></details>}
-                      </div>
-                    )}
-                    {evType === 'route_decided' && (
-                      <div style={{ fontSize: '.82rem', color: '#5b21b6' }}>路由类型: <strong>{p.routeType}</strong></div>
-                    )}
-                    {evType === 'skill_selected' && (
-                      <div>
-                        <div style={{ fontSize: '.82rem', marginBottom: 5 }}>
-                          <strong style={{ color: '#c2410c' }}>{p.skillName}</strong>
-                          <code style={{ marginLeft: 7, fontSize: '.7rem', color: '#64748b' }}>{(p.skillId || '').slice(0, 8)}</code>
-                        </div>
-                        {p.reason && <div style={{ fontSize: '.78rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '6px 9px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.5 }}>{p.reason}</div>}
-                      </div>
-                    )}
-                    {evType === 'skill_input' && (
-                      <div>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
-                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: p.has_wiki ? '#d1fae5' : '#f1f5f9', color: p.has_wiki ? '#065f46' : '#94a3b8' }}>📖 {p.has_wiki ? `健康档案 ${p.wiki_chars}字` : '无健康档案'}</span>
-                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: p.has_profile ? '#dcfce7' : '#f1f5f9', color: p.has_profile ? '#166534' : '#94a3b8' }}>👤 {p.has_profile ? `用户画像 ${p.profile_chars}字` : '无用户画像'}</span>
-                          {p.history_count > 0 && <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8' }}>📜 历史 {p.history_count} 条</span>}
-                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: '#f3f4f6', color: '#6b7280' }}>总长 {p.message_chars} 字</span>
-                        </div>
-                        {p.message_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开发给 Skill 的完整上下文</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 220, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #e5e7eb' }}>{p.message_preview}</pre></details>}
-                      </div>
-                    )}
-                    {evType === 'reassurance_sent' && p.reply && (
-                      <div style={{ fontSize: '.83rem', color: '#065f46', background: 'rgba(255,255,255,.7)', padding: '8px 11px', borderRadius: 7, borderLeft: '3px solid #34d399', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{p.reply}</div>
-                    )}
-                    {evType === 'skill_done' && (
-                      <div style={{ fontSize: '.78rem', color: '#15803d' }}>输出长度: {p.outputLen || 0} 字符</div>
-                    )}
-                    {evType === 'task_failed' && (
-                      <div>
-                        <div style={{ fontSize: '.82rem', color: '#dc2626', fontFamily: 'monospace', marginBottom: p.stack ? 6 : 0 }}>{p.error}</div>
-                        {p.stack && <details><summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>展开 Stack Trace</summary><pre style={{ fontSize: '.68rem', color: '#7f1d1d', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto' }}>{p.stack}</pre></details>}
-                      </div>
-                    )}
-                    {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed'].includes(evType) && ev.payload && (
-                      <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', background: 'rgba(255,255,255,.6)', padding: '6px 8px', borderRadius: 6, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
-                    )}
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              }
 
-            {/* Final reply */}
-            {selected.reply_content && (
-              <div style={{ marginTop: 12, padding: '12px 16px', background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)', borderRadius: 10, border: '1px solid #86efac' }}>
-                <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#166534', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.05em' }}>💬 最终回复</div>
-                <div style={{ fontSize: '.85rem', color: '#14532d', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{selected.reply_content}</div>
-              </div>
-            )}
-          </div>}
+              /* ── Agent event item ────────────────────────────────────────── */
+              if (item._kind === 'agent_event') {
+                const ev = item.ev;
+                const p: any = ev.payload || {};
+                const prevTs = idx > 0 ? timeline[idx - 1].ts : item.ts;
+                const stepMs = item.ts - prevTs;
+                const evType: string = ev.event_type;
+                const evCfg: Record<string, { icon: string; label: string; dotBg: string; cardBg: string; cardBorder: string; textColor: string }> = {
+                  message_received: { icon: '📩', label: '收到消息', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#bfdbfe', textColor: '#1e40af' },
+                  wiki_fetched:     { icon: '📚', label: 'Wiki 上下文', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#bbf7d0', textColor: '#065f46' },
+                  route_decided:    { icon: '🔀', label: '路由决策', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#e9d5ff', textColor: '#5b21b6' },
+                  skill_selected:   { icon: '🎯', label: 'Skill 选择', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#c2410c' },
+                  skill_input:      { icon: '📤', label: '发送上下文', dotBg: '#475569', cardBg: '#f8fafc', cardBorder: '#cbd5e1', textColor: '#334155' },
+                  skill_started:    { icon: '🚀', label: 'Skill 启动', dotBg: '#ca8a04', cardBg: '#fefce8', cardBorder: '#fef08a', textColor: '#854d0e' },
+                  reassurance_sent: { icon: '💬', label: '安抚消息', dotBg: '#059669', cardBg: '#ecfdf5', cardBorder: '#a7f3d0', textColor: '#065f46' },
+                  skill_done:       { icon: '✅', label: 'Skill 完成', dotBg: '#16a34a', cardBg: '#f0fdf4', cardBorder: '#86efac', textColor: '#15803d' },
+                  reply_sent:       { icon: '✉️', label: '回复发送', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
+                  task_failed:      { icon: '❌', label: '任务失败', dotBg: '#dc2626', cardBg: '#fef2f2', cardBorder: '#fca5a5', textColor: '#dc2626' },
+                };
+                const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
-          {/* Transcript Tab — CUA Timeline (same renderer as ticket logs) */}
-          {detailTab === 'transcript' && (
-            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
-              {!selected.job_transcript && (
-                <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
-                  <div style={{ fontSize: 32, marginBottom: 8 }}>🎬</div>
-                  <div style={{ fontSize: '.85rem' }}>执行详情尚未到达</div>
-                  <div style={{ fontSize: '.78rem', marginTop: 4 }}>Skill 运行中会实时推送，完成后可在此查看完整 AI 调用链</div>
-                </div>
-              )}
-              {selected.job_transcript && selected.job_transcript.map((t: any, i: number) => {
-                const timeStr = t.ts ? new Date(t.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+                return (
+                  <div key={`ev-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: cfg.dotBg, border: '2px solid rgba(255,255,255,.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }}>{cfg.icon}</div>
+                      {idx < timeline.length - 1 && <div style={{ width: 1, flex: 1, background: '#e2e8f0', marginTop: 4 }} />}
+                    </div>
+                    <div style={{ flex: 1, paddingBottom: 14 }}>
+                      {/* Header */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', color: cfg.textColor, background: cfg.cardBg, border: `1px solid ${cfg.cardBorder}`, padding: '2px 8px', borderRadius: 5 }}>{cfg.label}</span>
+                        {idx > 0 && stepMs > 0 && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 5px', borderRadius: 4 }}>+{stepMs < 1000 ? `${stepMs}ms` : `${(stepMs / 1000).toFixed(1)}s`}</span>}
+                        <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace', marginLeft: 'auto' }}>{fmtTimeShort(item.ts)}</span>
+                      </div>
+                      {/* Card body */}
+                      <div style={{ background: cfg.cardBg, border: `1px solid ${cfg.cardBorder}`, borderRadius: 10, padding: '10px 14px' }}>
+                        {evType === 'message_received' && (
+                          <div>
+                            <div style={{ fontSize: '.85rem', fontWeight: 500, color: '#1e293b', marginBottom: 6 }}>「{p.content || selected.input_content}」</div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+                              <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8' }}>来源: {p.source || selected.source_channel}</span>
+                              {p.history_count > 0 && <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#e0e7ff', color: '#4338ca' }}>📜 历史 {p.history_count} 条</span>}
+                              {p.has_notes && <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e' }}>📝 含备注</span>}
+                            </div>
+                          </div>
+                        )}
+                        {evType === 'wiki_fetched' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const, marginBottom: (p.profile_preview || p.wiki_preview) ? 8 : 0 }}>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: p.profile_chars > 0 ? '#dcfce7' : '#f1f5f9', color: p.profile_chars > 0 ? '#166534' : '#94a3b8' }}>👤 用户画像 {p.profile_chars > 0 ? `${p.profile_chars}字` : '暂无'}</span>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: p.wiki_chars > 0 ? '#d1fae5' : '#f1f5f9', color: p.wiki_chars > 0 ? '#065f46' : '#94a3b8' }}>📖 健康档案 {p.wiki_chars > 0 ? `${p.wiki_chars}字` : '暂无'}</span>
+                            </div>
+                            {p.profile_preview && <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开用户画像</summary><pre style={{ fontSize: '.72rem', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.profile_preview}</pre></details>}
+                            {p.wiki_preview && <details style={{ marginTop: 4 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开健康档案</summary><pre style={{ fontSize: '.72rem', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.wiki_preview}</pre></details>}
+                          </div>
+                        )}
+                        {evType === 'route_decided' && (
+                          <div style={{ fontSize: '.85rem', color: '#5b21b6' }}>路由类型: <strong>{p.routeType}</strong></div>
+                        )}
+                        {evType === 'skill_selected' && (
+                          <div>
+                            <div style={{ fontSize: '.9rem', fontWeight: 600, color: '#c2410c', marginBottom: 6 }}>{p.skillName} <code style={{ fontSize: '.7rem', color: '#78716c', fontWeight: 400 }}>{(p.skillId || '').slice(0, 8)}</code></div>
+                            {p.reason && <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '6px 10px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.6 }}>{p.reason}</div>}
+                          </div>
+                        )}
+                        {evType === 'skill_input' && (
+                          <div>
+                            <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6, fontSize: '11px', fontFamily: 'monospace' }}>
+                              <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>POST</span> <span style={{ color: '#f1f5f9' }}>/skill/execute</span></div>
+                              <div style={{ display: 'flex', gap: 10 }}>
+                                <span style={{ color: '#c084fc' }}>wiki: {p.wiki_chars || 0}字</span>
+                                <span style={{ color: '#34d399' }}>profile: {p.profile_chars || 0}字</span>
+                                <span style={{ color: '#f59e0b' }}>history: {p.history_count || 0}</span>
+                                <span style={{ color: '#94a3b8' }}>total: {p.message_chars || 0}字</span>
+                              </div>
+                            </div>
+                            {p.message_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开发送给 Skill 的完整上下文</summary><pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 280, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #e5e7eb' }}>{p.message_preview}</pre></details>}
+                          </div>
+                        )}
+                        {evType === 'reassurance_sent' && p.reply && (
+                          <div style={{ fontSize: '.85rem', color: '#065f46', borderLeft: '3px solid #34d399', paddingLeft: 10, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{p.reply}</div>
+                        )}
+                        {evType === 'skill_done' && (
+                          <div style={{ fontSize: '.82rem', color: '#15803d' }}>输出 {p.outputLen || 0} 字符 · 执行完成</div>
+                        )}
+                        {evType === 'task_failed' && (
+                          <div>
+                            <div style={{ fontSize: '.85rem', color: '#dc2626', fontFamily: 'monospace', marginBottom: 6 }}>{p.error}</div>
+                            {p.stack && <details><summary style={{ fontSize: '.72rem', color: '#9ca3af', cursor: 'pointer' }}>Stack Trace</summary><pre style={{ fontSize: '10px', color: '#7f1d1d', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', marginTop: 4 }}>{p.stack}</pre></details>}
+                          </div>
+                        )}
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed'].includes(evType) && (
+                          <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              /* ── Transcript step (CUA Timeline style) ───────────────────── */
+              if (item._kind === 'transcript') {
+                const t = item.t;
                 const usage = t.usage || {};
                 const reqMeta = t.request_meta || {};
                 const isSystem = t.role === 'system';
@@ -428,113 +530,101 @@ function AgentTasksPanel() {
                 const isTool = t.role === 'tool';
                 const isEvent = t.type === 'event' || t.type === 'header';
                 const themeMap: Record<string, any> = {
-                  header:    { dotBg: '#7c3aed', dotBorder: '#c4b5fd', dotChar: '⚡', label: 'START',    badgeBg: '#ede9fe', badgeColor: '#5b21b6', cardBg: '#faf5ff', cardBorder: '#e9d5ff' },
-                  event:     { dotBg: '#d97706', dotBorder: '#fcd34d', dotChar: '◆', label: 'EVENT',    badgeBg: '#fef3c7', badgeColor: '#92400e', cardBg: '#fffbeb', cardBorder: '#fde68a' },
-                  system:    { dotBg: '#0f172a', dotBorder: '#334155', dotChar: '⌨', label: 'PROMPT',   badgeBg: '#1e293b', badgeColor: '#94a3b8', cardBg: '#0f172a', cardBorder: '#334155' },
-                  assistant: { dotBg: '#059669', dotBorder: '#6ee7b7', dotChar: '🤖', label: 'AI',      badgeBg: '#d1fae5', badgeColor: '#065f46', cardBg: '#f0fdf4', cardBorder: '#a7f3d0' },
-                  tool:      { dotBg: '#ea580c', dotBorder: '#fdba74', dotChar: '🔧', label: 'TOOL',    badgeBg: '#fff7ed', badgeColor: '#c2410c', cardBg: '#fff7ed', cardBorder: '#fed7aa' },
+                  header:    { dot: '#7c3aed', icon: '⚡', badge: 'START',    badgeBg: '#ede9fe', badgeFg: '#5b21b6', cardBg: '#faf5ff', border: '#e9d5ff' },
+                  event:     { dot: '#d97706', icon: '◆', badge: 'EVENT',    badgeBg: '#fef3c7', badgeFg: '#92400e', cardBg: '#fffbeb', border: '#fde68a' },
+                  system:    { dot: '#1e293b', icon: '⌨', badge: 'SYSTEM PROMPT', badgeBg: '#1e293b', badgeFg: '#94a3b8', cardBg: '#0f172a', border: '#334155' },
+                  assistant: { dot: '#059669', icon: '🤖', badge: 'AI THINKING', badgeBg: '#d1fae5', badgeFg: '#065f46', cardBg: '#f0fdf4', border: '#a7f3d0' },
+                  tool:      { dot: '#ea580c', icon: '🔧', badge: 'TOOL',    badgeBg: '#fff7ed', badgeFg: '#c2410c', cardBg: '#fff7ed', border: '#fed7aa' },
                 };
                 const roleKey = isEvent ? (t.type || 'event') : (t.role || 'event');
-                const theme = themeMap[roleKey] || themeMap['event'];
-                return (
-                  <div key={i} style={{ position: 'relative', paddingLeft: 36, marginBottom: 10 }}>
-                    <div style={{ position: 'absolute', left: 0, top: 4, width: 24, height: 24, borderRadius: '50%', background: theme.dotBg, border: `2px solid ${theme.dotBorder}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px' }}>
-                      {theme.dotChar}
-                    </div>
-                    <div style={{ borderRadius: 10, border: `1px solid ${theme.cardBorder}`, background: theme.cardBg, padding: '9px 13px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                          <span style={{ display: 'inline-block', padding: '2px 7px', borderRadius: 5, fontSize: '10px', fontWeight: 700, textTransform: 'uppercase' as const, background: theme.badgeBg, color: theme.badgeColor }}>
-                            {isEvent ? (t.event || t.type || theme.label) : isSystem ? 'SYSTEM PROMPT' : isAssistant ? `AI · TURN ${t.turn ?? i}` : isTool ? `TOOL · ${t.tool || 'MCP'}` : theme.label}
-                          </span>
-                          {t.label && <span style={{ fontSize: '.7rem', color: '#64748b' }}>[{t.label}]</span>}
-                        </div>
-                        <span style={{ fontSize: '.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>{timeStr}</span>
-                      </div>
-                      {(isSystem || isAssistant || isTool) && (
-                        <div style={{ margin: '5px 0 7px', padding: '5px 9px', background: '#0f172a', borderRadius: 7, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 6 }}>
-                          <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>{reqMeta.method || (isTool ? 'EXEC' : 'POST')}</span> <span style={{ color: '#f1f5f9' }}>{reqMeta.endpoint || (isTool ? `tool://${t.tool || 'mcp'}` : '/chat/completions')}</span></div>
-                          <div style={{ display: 'flex', gap: 10, fontSize: '10px', flexWrap: 'wrap' as const }}>
-                            {t.model && <span style={{ color: '#c084fc' }}>model: {t.model}</span>}
-                            {usage.prompt_tokens != null && <span style={{ color: '#34d399' }}>in: {usage.prompt_tokens} / out: {usage.completion_tokens ?? 0}</span>}
-                            {t.finish_reason && <span style={{ color: '#f59e0b' }}>finish: {t.finish_reason}</span>}
-                          </div>
-                        </div>
-                      )}
-                      {isEvent && <div style={{ fontSize: '.82rem', color: '#92400e' }}>{t.detail || t.message || t.event || JSON.stringify(t)}</div>}
-                      {isSystem && t.content && (
-                        <details open={false}>
-                          <summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开 System Prompt ({(t.content || '').length} 字符)</summary>
-                          <pre style={{ fontSize: '11px', color: '#e2e8f0', background: '#0f172a', padding: '8px 10px', borderRadius: 6, whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 400, overflow: 'auto' }}>{t.content}</pre>
-                        </details>
-                      )}
-                      {isAssistant && t.content && (
-                        <details open={false}>
-                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ AI 输出 ({(t.content || '').length} 字符)</summary>
-                          <pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 300, overflow: 'auto' }}>{t.content}</pre>
-                        </details>
-                      )}
-                      {isTool && t.content && (
-                        <details open={false}>
-                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ Tool 输出</summary>
-                          <pre style={{ fontSize: '11px', color: '#78350f', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto' }}>{typeof t.content === 'string' ? t.content : JSON.stringify(t.content, null, 2)}</pre>
-                        </details>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                const th = themeMap[roleKey] || themeMap['event'];
+                const turnLabel = isAssistant ? `AI · TURN ${t.turn ?? (idx + 1)}` : th.badge;
+                const cardLabel = isEvent ? (t.event || t.type || th.badge) : isSystem ? 'SYSTEM PROMPT' : isTool ? `TOOL · ${t.tool || 'MCP'}` : turnLabel;
 
-          {/* Context Tab — full history, notes, system prompt */}
-          {detailTab === 'context' && (
-            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
-              {!selected.context_snapshot && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无上下文快照</div>}
-              {selected.context_snapshot && (() => {
-                const ctx = selected.context_snapshot;
                 return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {/* Basic info */}
-                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px' }}>
-                      <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>📋 基本信息</div>
-                      <div style={{ fontSize: '.78rem', color: '#475569', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-                        <span>用户: <strong>{ctx.from_name || '-'}</strong></span>
-                        <span>会话: <code style={{ fontSize: '.72rem' }}>{(ctx.session_id || '').slice(0, 12)}</code></span>
-                        <span>历史条数: <strong style={{ color: '#2563eb' }}>{ctx.history_count ?? 0} 条</strong></span>
-                        <span>是否含备注: <strong>{ctx.notes ? '是' : '否'}</strong></span>
+                  <div key={`tr-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: th.dot, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '13px', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }}>{th.icon}</div>
+                      {idx < timeline.length - 1 && <div style={{ width: 1, flex: 1, background: '#e2e8f0', marginTop: 4 }} />}
+                    </div>
+                    <div style={{ flex: 1, paddingBottom: 14 }}>
+                      {/* Header */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', background: th.badgeBg, color: th.badgeFg, padding: '2px 8px', borderRadius: 5 }}>{cardLabel}</span>
+                        {t.label && <span style={{ fontSize: '.7rem', color: '#64748b' }}>[{t.label}]</span>}
+                        <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace', marginLeft: 'auto' }}>{fmtTimeShort(item.ts)}</span>
+                      </div>
+                      {/* Card */}
+                      <div style={{ borderRadius: 10, border: `1px solid ${th.border}`, background: th.cardBg, padding: '10px 14px' }}>
+                        {/* Dark HTTP bar for AI / system / tool */}
+                        {(isSystem || isAssistant || isTool) && (
+                          <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', flexWrap: 'wrap' as const, gap: 6 }}>
+                            <div>
+                              <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>{reqMeta.method || (isTool ? 'EXEC' : 'POST')}</span>
+                              {' '}
+                              <span style={{ color: '#f1f5f9' }}>{reqMeta.endpoint || (isTool ? `tool://${t.tool || 'mcp'}` : '/chat/completions')}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                              {t.model && <span style={{ color: '#c084fc' }}>model: {t.model}</span>}
+                              {usage.prompt_tokens != null && <span style={{ color: '#34d399' }}>in: {usage.prompt_tokens} / out: {usage.completion_tokens ?? 0}</span>}
+                              {t.finish_reason && <span style={{ color: '#f59e0b' }}>finish: {t.finish_reason}</span>}
+                              {reqMeta.status_code && <span style={{ color: reqMeta.status_code < 300 ? '#34d399' : '#f87171' }}>HTTP {reqMeta.status_code}</span>}
+                            </div>
+                          </div>
+                        )}
+                        {/* Event content */}
+                        {isEvent && <div style={{ fontSize: '.82rem', color: '#92400e' }}>{t.detail || t.message || t.event || JSON.stringify(t)}</div>}
+                        {/* System prompt */}
+                        {isSystem && t.content && (
+                          <details>
+                            <summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开 System Prompt ({(t.content || '').length} 字符)</summary>
+                            <pre style={{ fontSize: '11px', color: '#e2e8f0', background: '#0f172a', padding: '10px 12px', borderRadius: 7, whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 400, overflow: 'auto' }}>{t.content}</pre>
+                          </details>
+                        )}
+                        {/* AI thinking */}
+                        {isAssistant && t.content && (
+                          <details>
+                            <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ AI 输出 ({(t.content || '').length} 字符)</summary>
+                            <pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 320, overflow: 'auto' }}>{t.content}</pre>
+                          </details>
+                        )}
+                        {/* Tool output */}
+                        {isTool && t.content && (
+                          <details>
+                            <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ Tool 返回</summary>
+                            <pre style={{ fontSize: '11px', color: '#78350f', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 240, overflow: 'auto' }}>{typeof t.content === 'string' ? t.content : JSON.stringify(t.content, null, 2)}</pre>
+                          </details>
+                        )}
                       </div>
                     </div>
-                    {/* Notes */}
-                    {ctx.notes && (
-                      <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 14px' }}>
-                        <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#92400e', marginBottom: 6 }}>📝 客户备注</div>
-                        <pre style={{ fontSize: '.78rem', color: '#78350f', whiteSpace: 'pre-wrap', margin: 0 }}>{ctx.notes}</pre>
-                      </div>
-                    )}
-                    {/* Full history */}
-                    {ctx.history && ctx.history.length > 0 && (
-                      <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '10px 14px' }}>
-                        <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#0369a1', marginBottom: 10 }}>📜 对话历史 ({ctx.history.length} 条)</div>
-                        {ctx.history.map((h: any, idx: number) => (
-                          <div key={idx} style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                            <span style={{ flexShrink: 0, fontSize: '.7rem', padding: '2px 6px', borderRadius: 4, background: h.role === 'user' ? '#dbeafe' : '#d1fae5', color: h.role === 'user' ? '#1d4ed8' : '#065f46', fontWeight: 600, marginTop: 1 }}>{h.role === 'user' ? '用户' : 'AI'}</span>
-                            <div style={{ fontSize: '.78rem', color: '#374151', lineHeight: 1.5 }}>{(h.content || '').slice(0, 300)}{(h.content || '').length > 300 ? '…' : ''}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 );
-              })()}
-            </div>
-          )}
+              }
+
+              return null;
+            })}
+
+            {/* Final reply */}
+            {selected.reply_content && (
+              <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: '50%', background: '#16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px' }}>💬</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: '.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.06em', background: '#dcfce7', color: '#15803d', padding: '2px 8px', borderRadius: 5 }}>FINAL REPLY</span>
+                  </div>
+                  <div style={{ background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)', border: '1px solid #86efac', borderRadius: 10, padding: '12px 16px', fontSize: '.88rem', color: '#14532d', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                    {selected.reply_content}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </>}
       </div>
-
     </div>
   );
 }
+
 
 // ─── Component State ─────────────────────────────────────────────────────────
 export default function AgentLogs() {
