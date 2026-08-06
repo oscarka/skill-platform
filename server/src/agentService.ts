@@ -38,7 +38,7 @@ export async function createAgentTask(opts: {
 export async function updateAgentTask(id: string, fields: {
   status?: string; routeType?: string; skillId?: string;
   replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
-  jobTranscript?: string; contextSnapshot?: string;
+  jobTranscript?: string; contextSnapshot?: string; cuaEvents?: string;
 }): Promise<void> {
   try {
     const sets: string[] = []; const vals: any[] = [];
@@ -51,6 +51,7 @@ export async function updateAgentTask(id: string, fields: {
     if (fields.durationMs     !== undefined) { sets.push('duration_ms=?');      vals.push(fields.durationMs); }
     if (fields.jobTranscript  !== undefined) { sets.push('job_transcript=?');   vals.push(fields.jobTranscript); }
     if (fields.contextSnapshot!== undefined) { sets.push('context_snapshot=?'); vals.push(fields.contextSnapshot); }
+    if (fields.cuaEvents      !== undefined) { sets.push('cua_events=?');       vals.push(fields.cuaEvents); }
     if (!sets.length) return;
     vals.push(id);
     await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);

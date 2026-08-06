@@ -171,6 +171,7 @@ agentRouter.get('/tasks/:id', async (req, res) => {
       meta:             task.meta             ? JSON.parse(task.meta)             : null,
       job_transcript:   task.job_transcript   ? JSON.parse(task.job_transcript)   : null,
       context_snapshot: task.context_snapshot ? JSON.parse(task.context_snapshot) : null,
+      cua_events:       task.cua_events       ? JSON.parse(task.cua_events)       : null,
       events: events.map((e: any) => ({
         ...e,
         payload: e.payload ? JSON.parse(e.payload) : null,
@@ -263,6 +264,55 @@ agentRouter.post('/job-callback/:requestId', async (req, res) => {
   handleJobCallback(requestId, body).catch(err =>
     console.error(`[AgentRoute] job-callback forward error for ${requestId}:`, err)
   );
+});
+
+// ─── POST /api/v1/agent/cua-done/:requestId — CUA 执行完成后回传事件 ─────────────
+
+agentRouter.post('/cua-done/:requestId', async (req, res) => {
+  const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+  const secret   = req.headers['x-sandbox-secret'];
+
+  if (secret !== EXPECTED) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { requestId } = req.params;
+  const body = req.body as any;
+
+  res.json({ ok: true });
+
+  try {
+    const cuaEvents = body.cua_events || [];
+    const deliveredAt = body.delivered_at || Date.now();
+    const success = body.success !== false;
+
+    // Store CUA events as cua_events column
+    await updateAgentTask(requestId, {
+      cuaEvents: JSON.stringify({
+        events: cuaEvents,
+        delivered_at: deliveredAt,
+        success,
+        recipient: body.recipient,
+        app: body.app,
+      }),
+    } as any);
+
+    // Also append a summary event to agent_task_events
+    await appendTaskEvent(requestId, 'cua_delivered', {
+      success,
+      recipient: body.recipient,
+      app: body.app || '企业微信',
+      step_count: cuaEvents.length,
+      delivered_at: deliveredAt,
+      events_preview: cuaEvents.slice(0, 5).map((e: any) => ({
+        type: e.type, phase: e.phase, text: (e.text || e.detail || e.content || '').slice(0, 80),
+      })),
+    });
+
+    console.log(`[AgentRoute] cua-done: requestId=${requestId}, events=${cuaEvents.length}, success=${success}`);
+  } catch (err: any) {
+    console.error(`[AgentRoute] cua-done error for ${requestId}:`, err.message);
+  }
 });
 
 // ─── GET /api/v1/agent/profile ────────────────────────────────────────────────
