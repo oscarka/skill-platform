@@ -107,3 +107,21 @@ testRouter.get('/run/:runId', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── POST /api/test/agent-task — 测试 agent_tasks INSERT ─────────────────────
+testRouter.post('/agent-task', async (req, res) => {
+  const testId = `test_${Date.now()}`;
+  try {
+    await db.runAsync(
+      `INSERT INTO agent_tasks (id, session_id, user_id, source_channel, input_content, status, meta)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      [testId, 'test_session', 'test_user', 'api', 'test content', JSON.stringify({ test: true })]
+    );
+    const row = await db.getAsync<any>('SELECT * FROM agent_tasks WHERE id=?', [testId]);
+    // cleanup
+    await db.runAsync('DELETE FROM agent_tasks WHERE id=?', [testId]);
+    res.json({ ok: true, inserted: row });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message, testId });
+  }
+});

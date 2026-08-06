@@ -17,6 +17,53 @@ import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
 import { submitSandboxJob } from './cloudRunJobsClient';
 
+// ─── Agent Task Tracking ─────────────────────────────────────────────────────
+// 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
+
+async function createAgentTask(opts: {
+  id: string; sessionId: string; userId: string;
+  sourceChannel: string; inputContent: string; meta?: Record<string, any>;
+}): Promise<void> {
+  try {
+    await db.runAsync(
+      `INSERT INTO agent_tasks (id, session_id, user_id, source_channel, input_content, status, meta)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      [opts.id, opts.sessionId, opts.userId, opts.sourceChannel,
+       opts.inputContent, opts.meta ? JSON.stringify(opts.meta) : null]
+    );
+  } catch (err: any) { console.warn('[AgentTask] createAgentTask failed:', err.message); }
+}
+
+async function updateAgentTask(id: string, fields: {
+  status?: string; routeType?: string; skillId?: string;
+  replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
+}): Promise<void> {
+  try {
+    const sets: string[] = []; const vals: any[] = [];
+    if (fields.status       !== undefined) { sets.push('status=?');        vals.push(fields.status); }
+    if (fields.routeType    !== undefined) { sets.push('route_type=?');    vals.push(fields.routeType); }
+    if (fields.skillId      !== undefined) { sets.push('skill_id=?');      vals.push(fields.skillId); }
+    if (fields.replyContent !== undefined) { sets.push('reply_content=?'); vals.push(fields.replyContent); }
+    if (fields.errorMessage !== undefined) { sets.push('error_message=?'); vals.push(fields.errorMessage); }
+    if (fields.endedAt      !== undefined) { sets.push('ended_at=?');      vals.push(fields.endedAt); }
+    if (fields.durationMs   !== undefined) { sets.push('duration_ms=?');   vals.push(fields.durationMs); }
+    if (!sets.length) return;
+    vals.push(id);
+    await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);
+  } catch (err: any) { console.warn('[AgentTask] updateAgentTask failed:', err.message); }
+}
+
+async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
+  try {
+    const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await db.runAsync(
+      `INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`,
+      [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, Date.now()]
+    );
+  } catch (err: any) { console.warn('[AgentTask] appendTaskEvent failed:', err.message); }
+}
+
+
 // ─── LLMWiki Integration ──────────────────────────────────────────────────────
 const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
 
@@ -777,6 +824,11 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
 
   console.log(`[AgentService] Job done for ${requestId}, output length=${agentOutput.length}`);
 
+  // ── 更新 agent_task 为完成状态 ──
+  void updateAgentTask(requestId, { status: 'done', replyContent: agentOutput.slice(0, 500), endedAt: Date.now() });
+  void appendTaskEvent(requestId, 'skill_done', { outputLen: agentOutput.length });
+  void appendTaskEvent(requestId, 'reply_sent', { channel: delivery.app, recipient: delivery.recipient });
+
   // ── LLMWiki: Skill 完成后写日志 + 触发 sync + 重置计数器 ──
   backgroundPostLog(userId, userContent, agentOutput);
   triggerWikiSync(userId, `skill_complete:${requestId}`);
@@ -817,16 +869,28 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   const requestId  = `req_${uuidv4().replace(/-/g, '').slice(0, 10)}`;
   const serviceUrl = process.env.SERVICE_URL || '';
+  const taskStartMs = Date.now();
 
   const app       = req.context.available_apps?.[0] || '企业微信';
   const recipient = req.context.current_recipient || req.meta.from_name || '';
   const delivery: AgentDelivery = { app, recipient, action: 'type_and_send' };
 
-  console.log(`[AgentService] request_id=${requestId} session=${req.session_id} source=${req.source}`);
+  const userId      = req.meta?.user_id || '';
+  const sessionId   = req.session_id || userId;
+  const srcChannel  = (req as any).source_channel || req.source || 'wecom';
+
+  console.log(`[AgentService] request_id=${requestId} session=${sessionId} source=${srcChannel}`);
+
+  // ── 创建 agent_task 记录（await 确保写入，不受 fire-and-forget 影响）──────────
+  await createAgentTask({
+    id: requestId, sessionId, userId, sourceChannel: srcChannel,
+    inputContent: req.content,
+    meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
+  });
+  void appendTaskEvent(requestId, 'message_received', { content: req.content.slice(0, 200), source: srcChannel });
 
   // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
   // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
-  const userId = req.meta?.user_id || '';
   if (userId && LLMWIKI_BASE) {
     const wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
     (req as any)._wikiContext = wikiCtx;
@@ -867,13 +931,20 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   }
 
   // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
+  void updateAgentTask(requestId, { status: 'routing' });
   const routeType = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);
   console.log(`[AgentService] → routed as: ${routeType}`);
+  void appendTaskEvent(requestId, 'route_decided', { routeType });
 
   // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
   if (routeType !== 'health') {
+    void updateAgentTask(requestId, { status: 'executing', routeType: 'chat' });
     const profile = await loadAgentProfile();
-    return handleChatReply(req, apiKey, requestId, delivery, profile);
+    const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
+    const endMs = Date.now();
+    void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: chatResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
+    void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length });
+    return chatResult;
   }
 
   // ── Step 3: 健康问题 — 加载 Agent Profile + 可用 skill ─────────────────────
@@ -912,15 +983,24 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   };
 
   // ── Step 5: 执行 ─────────────────────────────────────────────────────────────
+  void appendTaskEvent(requestId, 'skill_selected', { skillId: selectedSkillId, skillName: selectedSkillName, reason: routeReason });
+  void updateAgentTask(requestId, { status: 'executing', routeType: 'health', skillId: selectedSkillId || undefined });
+
   if (selectedSkillId && selectedSkillName) {
-    return handleHealthSkill(
+    void appendTaskEvent(requestId, 'skill_started', { skillId: selectedSkillId, skillName: selectedSkillName });
+    const skillResult = await handleHealthSkill(
       req, apiKey, requestId, delivery,
       profile, selectedSkillId, selectedSkillName,
       skillRouteLog, serviceUrl
     );
+    void appendTaskEvent(requestId, 'reassurance_sent', { reply: skillResult.reply?.slice(0, 200) });
+    return skillResult;
   } else {
-    // 无匹配 skill，降级为带档案的直接 AI 回复
-    return handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
+    const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
+    const endMs = Date.now();
+    void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
+    void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length });
+    return directResult;
   }
 }
 
