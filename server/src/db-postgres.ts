@@ -305,7 +305,9 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   meta            TEXT,
   started_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   ended_at        BIGINT,
-  duration_ms     INTEGER
+  duration_ms     INTEGER,
+  job_transcript  TEXT,
+  context_snapshot TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(session_id);
@@ -340,6 +342,8 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS plugin_config TEXT`,
       `ALTER TABLE ticket_results ADD COLUMN IF NOT EXISTS ai_log TEXT`,
       `ALTER TABLE skills ADD COLUMN IF NOT EXISTS mcp_names TEXT DEFAULT NULL`,
+      `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS job_transcript TEXT`,
+      `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS context_snapshot TEXT`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }

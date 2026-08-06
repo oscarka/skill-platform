@@ -38,6 +38,7 @@ export async function createAgentTask(opts: {
 export async function updateAgentTask(id: string, fields: {
   status?: string; routeType?: string; skillId?: string;
   replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
+  jobTranscript?: string; contextSnapshot?: string;
 }): Promise<void> {
   try {
     const sets: string[] = []; const vals: any[] = [];
@@ -47,7 +48,9 @@ export async function updateAgentTask(id: string, fields: {
     if (fields.replyContent !== undefined) { sets.push('reply_content=?'); vals.push(fields.replyContent); }
     if (fields.errorMessage !== undefined) { sets.push('error_message=?'); vals.push(fields.errorMessage); }
     if (fields.endedAt      !== undefined) { sets.push('ended_at=?');      vals.push(fields.endedAt); }
-    if (fields.durationMs   !== undefined) { sets.push('duration_ms=?');   vals.push(fields.durationMs); }
+    if (fields.durationMs     !== undefined) { sets.push('duration_ms=?');      vals.push(fields.durationMs); }
+    if (fields.jobTranscript  !== undefined) { sets.push('job_transcript=?');   vals.push(fields.jobTranscript); }
+    if (fields.contextSnapshot!== undefined) { sets.push('context_snapshot=?'); vals.push(fields.contextSnapshot); }
     if (!sets.length) return;
     vals.push(id);
     await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);
@@ -860,8 +863,14 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
 
   console.log(`[AgentService] Job done for ${requestId}, output length=${agentOutput.length}`);
 
-  // ── 更新 agent_task 为完成状态 ──
-  void updateAgentTask(requestId, { status: 'done', replyContent: agentOutput.slice(0, 500), endedAt: Date.now() });
+  // ── 更新 agent_task 为完成状态（含完整 transcript）──
+  const transcriptJson = jobResult?.transcript ? JSON.stringify(jobResult.transcript) : null;
+  void updateAgentTask(requestId, {
+    status: 'done',
+    replyContent: agentOutput.slice(0, 500),
+    endedAt: Date.now(),
+    ...(transcriptJson ? { jobTranscript: transcriptJson } : {}),
+  });
   void appendTaskEvent(requestId, 'skill_done', { outputLen: agentOutput.length });
   void appendTaskEvent(requestId, 'reply_sent', { channel: delivery.app, recipient: delivery.recipient });
 
@@ -923,6 +932,17 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     inputContent: req.content,
     meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
   });
+  // ── 存完整上下文快照（历史、备注）供日志查看 ─────────────────────────────────
+  void updateAgentTask(requestId, {
+    contextSnapshot: JSON.stringify({
+      history: req.history || [],
+      notes: req.notes || '',
+      history_count: (req.history || []).length,
+      from_name: req.meta?.from_name,
+      session_id: req.session_id,
+    }),
+  });
+
   void appendTaskEvent(requestId, 'message_received', {
     content: req.content.slice(0, 300),
     source: srcChannel,

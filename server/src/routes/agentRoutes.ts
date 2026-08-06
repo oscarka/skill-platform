@@ -168,7 +168,9 @@ agentRouter.get('/tasks/:id', async (req, res) => {
 
     res.json({
       ...task,
-      meta: task.meta ? JSON.parse(task.meta) : null,
+      meta:             task.meta             ? JSON.parse(task.meta)             : null,
+      job_transcript:   task.job_transcript   ? JSON.parse(task.job_transcript)   : null,
+      context_snapshot: task.context_snapshot ? JSON.parse(task.context_snapshot) : null,
       events: events.map((e: any) => ({
         ...e,
         payload: e.payload ? JSON.parse(e.payload) : null,
@@ -229,11 +231,36 @@ agentRouter.post('/job-callback/:requestId', async (req, res) => {
   }
 
   const { requestId } = req.params;
-  console.log(`[AgentRoute] job-callback received for requestId=${requestId}`);
+  const body = req.body as any;
 
+  // ── 实时流式 transcript 上报（和工单系统相同机制）──────────────────────────
+  if (body?.type === 'progress' || body?.type === 'transcript_step') {
+    const stepEntry = body.entry || {
+      type: 'event',
+      event: body.event?.step || 'progress',
+      detail: body.event?.detail || '',
+      ts: body.event?.ts || new Date().toISOString(),
+    };
+
+    // 追加到 job_transcript JSON 数组（存在 agent_tasks 表）
+    const taskRow = await db.getAsync<any>('SELECT job_transcript FROM agent_tasks WHERE id=?', [requestId]);
+    let currentLog: any[] = [];
+    if (taskRow?.job_transcript) {
+      try { currentLog = JSON.parse(taskRow.job_transcript); } catch { currentLog = []; }
+    }
+    if (!stepEntry.id || !currentLog.some((e: any) => e.id === stepEntry.id)) {
+      currentLog.push(stepEntry);
+    }
+    void updateAgentTask(requestId, { jobTranscript: JSON.stringify(currentLog) });
+
+    return res.json({ ok: true, streamed: true });
+  }
+
+  // ── 最终结果回调 ──────────────────────────────────────────────────────────
+  console.log(`[AgentRoute] job-callback received for requestId=${requestId}`);
   res.json({ ok: true });
 
-  handleJobCallback(requestId, req.body).catch(err =>
+  handleJobCallback(requestId, body).catch(err =>
     console.error(`[AgentRoute] job-callback forward error for ${requestId}:`, err)
   );
 });

@@ -157,6 +157,7 @@ function AgentTasksPanel() {
   const [selected, setSelected] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [filter, setFilter] = useState({ channel: '', status: '' });
+  const [detailTab, setDetailTab] = useState<'events' | 'transcript' | 'context'>('events');
 
   const loadTasks = async () => {
     try {
@@ -179,6 +180,7 @@ function AgentTasksPanel() {
     const data = await res.json();
     setSelected(data);
     setEvents(data.events || []);
+    setDetailTab('events'); // reset tab on task change
   };
 
   useEffect(() => { loadTasks(); }, [filter]);
@@ -277,8 +279,30 @@ function AgentTasksPanel() {
             )}
           </div>
 
-          {/* Rich Events timeline */}
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+
+          {/* ── Detail Tab Bar ─────────────────────────────────────────────── */}
+          <div style={{ display: 'flex', gap: 0, borderBottom: '2px solid #e2e8f0', marginBottom: 0, flexShrink: 0 }}>
+            {[
+              { key: 'events', label: '📋 事件流', count: events.length },
+              { key: 'transcript', label: '🎬 执行详情', count: selected.job_transcript ? selected.job_transcript.length : 0 },
+              { key: 'context', label: '📜 上下文', count: 0 },
+            ].map(({ key, label, count }) => (
+              <button key={key} onClick={() => setDetailTab(key as any)} style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: '8px 14px', fontSize: '.78rem', fontWeight: detailTab === key ? 700 : 500,
+                color: detailTab === key ? '#2563eb' : '#64748b',
+                borderBottom: `2px solid ${detailTab === key ? '#2563eb' : 'transparent'}`,
+                marginBottom: -2, transition: 'all .15s',
+              }}>
+                {label}{count > 0 && <span style={{ marginLeft: 4, background: '#e2e8f0', color: '#475569', borderRadius: 8, padding: '0 5px', fontSize: '.68rem' }}>{count}</span>}
+              </button>
+            ))}
+          </div>
+
+          {/* ── Tab Content ────────────────────────────────────────────── */}
+
+          {/* Events Tab */}
+          {detailTab === 'events' && <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
             <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#64748b', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '.06em' }}>事件流 ({events.length})</div>
             {events.length === 0 && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无事件记录</div>}
             {events.map((ev: any, i: number) => {
@@ -383,7 +407,128 @@ function AgentTasksPanel() {
                 <div style={{ fontSize: '.85rem', color: '#14532d', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{selected.reply_content}</div>
               </div>
             )}
-          </div>
+          </div>}
+
+          {/* Transcript Tab — CUA Timeline (same renderer as ticket logs) */}
+          {detailTab === 'transcript' && (
+            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
+              {!selected.job_transcript && (
+                <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🎬</div>
+                  <div style={{ fontSize: '.85rem' }}>执行详情尚未到达</div>
+                  <div style={{ fontSize: '.78rem', marginTop: 4 }}>Skill 运行中会实时推送，完成后可在此查看完整 AI 调用链</div>
+                </div>
+              )}
+              {selected.job_transcript && selected.job_transcript.map((t: any, i: number) => {
+                const timeStr = t.ts ? new Date(t.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+                const usage = t.usage || {};
+                const reqMeta = t.request_meta || {};
+                const isSystem = t.role === 'system';
+                const isAssistant = t.role === 'assistant';
+                const isTool = t.role === 'tool';
+                const isEvent = t.type === 'event' || t.type === 'header';
+                const themeMap: Record<string, any> = {
+                  header:    { dotBg: '#7c3aed', dotBorder: '#c4b5fd', dotChar: '⚡', label: 'START',    badgeBg: '#ede9fe', badgeColor: '#5b21b6', cardBg: '#faf5ff', cardBorder: '#e9d5ff' },
+                  event:     { dotBg: '#d97706', dotBorder: '#fcd34d', dotChar: '◆', label: 'EVENT',    badgeBg: '#fef3c7', badgeColor: '#92400e', cardBg: '#fffbeb', cardBorder: '#fde68a' },
+                  system:    { dotBg: '#0f172a', dotBorder: '#334155', dotChar: '⌨', label: 'PROMPT',   badgeBg: '#1e293b', badgeColor: '#94a3b8', cardBg: '#0f172a', cardBorder: '#334155' },
+                  assistant: { dotBg: '#059669', dotBorder: '#6ee7b7', dotChar: '🤖', label: 'AI',      badgeBg: '#d1fae5', badgeColor: '#065f46', cardBg: '#f0fdf4', cardBorder: '#a7f3d0' },
+                  tool:      { dotBg: '#ea580c', dotBorder: '#fdba74', dotChar: '🔧', label: 'TOOL',    badgeBg: '#fff7ed', badgeColor: '#c2410c', cardBg: '#fff7ed', cardBorder: '#fed7aa' },
+                };
+                const roleKey = isEvent ? (t.type || 'event') : (t.role || 'event');
+                const theme = themeMap[roleKey] || themeMap['event'];
+                return (
+                  <div key={i} style={{ position: 'relative', paddingLeft: 36, marginBottom: 10 }}>
+                    <div style={{ position: 'absolute', left: 0, top: 4, width: 24, height: 24, borderRadius: '50%', background: theme.dotBg, border: `2px solid ${theme.dotBorder}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px' }}>
+                      {theme.dotChar}
+                    </div>
+                    <div style={{ borderRadius: 10, border: `1px solid ${theme.cardBorder}`, background: theme.cardBg, padding: '9px 13px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                          <span style={{ display: 'inline-block', padding: '2px 7px', borderRadius: 5, fontSize: '10px', fontWeight: 700, textTransform: 'uppercase' as const, background: theme.badgeBg, color: theme.badgeColor }}>
+                            {isEvent ? (t.event || t.type || theme.label) : isSystem ? 'SYSTEM PROMPT' : isAssistant ? `AI · TURN ${t.turn ?? i}` : isTool ? `TOOL · ${t.tool || 'MCP'}` : theme.label}
+                          </span>
+                          {t.label && <span style={{ fontSize: '.7rem', color: '#64748b' }}>[{t.label}]</span>}
+                        </div>
+                        <span style={{ fontSize: '.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>{timeStr}</span>
+                      </div>
+                      {(isSystem || isAssistant || isTool) && (
+                        <div style={{ margin: '5px 0 7px', padding: '5px 9px', background: '#0f172a', borderRadius: 7, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' as const, gap: 6 }}>
+                          <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>{reqMeta.method || (isTool ? 'EXEC' : 'POST')}</span> <span style={{ color: '#f1f5f9' }}>{reqMeta.endpoint || (isTool ? `tool://${t.tool || 'mcp'}` : '/chat/completions')}</span></div>
+                          <div style={{ display: 'flex', gap: 10, fontSize: '10px', flexWrap: 'wrap' as const }}>
+                            {t.model && <span style={{ color: '#c084fc' }}>model: {t.model}</span>}
+                            {usage.prompt_tokens != null && <span style={{ color: '#34d399' }}>in: {usage.prompt_tokens} / out: {usage.completion_tokens ?? 0}</span>}
+                            {t.finish_reason && <span style={{ color: '#f59e0b' }}>finish: {t.finish_reason}</span>}
+                          </div>
+                        </div>
+                      )}
+                      {isEvent && <div style={{ fontSize: '.82rem', color: '#92400e' }}>{t.detail || t.message || t.event || JSON.stringify(t)}</div>}
+                      {isSystem && t.content && (
+                        <details open={false}>
+                          <summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开 System Prompt ({(t.content || '').length} 字符)</summary>
+                          <pre style={{ fontSize: '11px', color: '#e2e8f0', background: '#0f172a', padding: '8px 10px', borderRadius: 6, whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 400, overflow: 'auto' }}>{t.content}</pre>
+                        </details>
+                      )}
+                      {isAssistant && t.content && (
+                        <details open={false}>
+                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ AI 输出 ({(t.content || '').length} 字符)</summary>
+                          <pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 300, overflow: 'auto' }}>{t.content}</pre>
+                        </details>
+                      )}
+                      {isTool && t.content && (
+                        <details open={false}>
+                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ Tool 输出</summary>
+                          <pre style={{ fontSize: '11px', color: '#78350f', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto' }}>{typeof t.content === 'string' ? t.content : JSON.stringify(t.content, null, 2)}</pre>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Context Tab — full history, notes, system prompt */}
+          {detailTab === 'context' && (
+            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingTop: 12 }}>
+              {!selected.context_snapshot && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无上下文快照</div>}
+              {selected.context_snapshot && (() => {
+                const ctx = selected.context_snapshot;
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {/* Basic info */}
+                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px' }}>
+                      <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#374151', marginBottom: 6 }}>📋 基本信息</div>
+                      <div style={{ fontSize: '.78rem', color: '#475569', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                        <span>用户: <strong>{ctx.from_name || '-'}</strong></span>
+                        <span>会话: <code style={{ fontSize: '.72rem' }}>{(ctx.session_id || '').slice(0, 12)}</code></span>
+                        <span>历史条数: <strong style={{ color: '#2563eb' }}>{ctx.history_count ?? 0} 条</strong></span>
+                        <span>是否含备注: <strong>{ctx.notes ? '是' : '否'}</strong></span>
+                      </div>
+                    </div>
+                    {/* Notes */}
+                    {ctx.notes && (
+                      <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '10px 14px' }}>
+                        <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#92400e', marginBottom: 6 }}>📝 客户备注</div>
+                        <pre style={{ fontSize: '.78rem', color: '#78350f', whiteSpace: 'pre-wrap', margin: 0 }}>{ctx.notes}</pre>
+                      </div>
+                    )}
+                    {/* Full history */}
+                    {ctx.history && ctx.history.length > 0 && (
+                      <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '10px 14px' }}>
+                        <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#0369a1', marginBottom: 10 }}>📜 对话历史 ({ctx.history.length} 条)</div>
+                        {ctx.history.map((h: any, idx: number) => (
+                          <div key={idx} style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                            <span style={{ flexShrink: 0, fontSize: '.7rem', padding: '2px 6px', borderRadius: 4, background: h.role === 'user' ? '#dbeafe' : '#d1fae5', color: h.role === 'user' ? '#1d4ed8' : '#065f46', fontWeight: 600, marginTop: 1 }}>{h.role === 'user' ? '用户' : 'AI'}</span>
+                            <div style={{ fontSize: '.78rem', color: '#374151', lineHeight: 1.5 }}>{(h.content || '').slice(0, 300)}{(h.content || '').length > 300 ? '…' : ''}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
         </>}
       </div>
 
