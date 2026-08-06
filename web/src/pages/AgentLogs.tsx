@@ -631,7 +631,7 @@ function AgentTasksPanel() {
                 const isTool = t.role === 'tool';
                 const isEvent = t.type === 'event' || t.type === 'header';
                 const themeMap: Record<string, any> = {
-                  header:    { dot: '#7c3aed', icon: '⚡', badge: '沙箱启动',    badgeBg: '#ede9fe', badgeFg: '#5b21b6', cardBg: '#faf5ff', border: '#e9d5ff' },
+                  header:    { dot: '#7c3aed', icon: '⚡', badge: '任务启动',    badgeBg: '#ede9fe', badgeFg: '#5b21b6', cardBg: '#faf5ff', border: '#e9d5ff' },
                   event:     { dot: '#d97706', icon: '◆', badge: '执行事件',    badgeBg: '#fef3c7', badgeFg: '#92400e', cardBg: '#fffbeb', border: '#fde68a' },
                   system:    { dot: '#1e293b', icon: '⌨', badge: '系统提示词', badgeBg: '#1e293b', badgeFg: '#94a3b8', cardBg: '#0f172a', border: '#334155' },
                   assistant: { dot: '#059669', icon: '🤖', badge: 'AI 推理', badgeBg: '#d1fae5', badgeFg: '#065f46', cardBg: '#f0fdf4', border: '#a7f3d0' },
@@ -673,8 +673,18 @@ function AgentTasksPanel() {
                             </div>
                           </div>
                         )}
-                        {/* Event content — show full with expand button if truncated */}
+                        {/* Event content — header type collapses JSON, others show as before */}
                         {isEvent && (() => {
+                          const isHeader = t.type === 'header';
+                          if (isHeader) {
+                            // Header: show "任务启动" with collapsed JSON details
+                            return (
+                              <details>
+                                <summary style={{ fontSize: '.72rem', color: '#7c3aed', cursor: 'pointer' }}>▶ 查看启动信息（skill_id, context_window 等）</summary>
+                                <pre style={{ fontSize: '11px', color: '#5b21b6', whiteSpace: 'pre-wrap', marginTop: 6, background: '#f5f3ff', padding: 8, borderRadius: 6, border: '1px solid #e9d5ff' }}>{JSON.stringify(t, null, 2)}</pre>
+                              </details>
+                            );
+                          }
                           const raw = t.detail || t.message || t.event || JSON.stringify(t);
                           const truncMatch = typeof raw === 'string' && raw.match(/\[(\d+)\s*chars?\s*total\]/);
                           const fullText = t.full_content || (typeof raw === 'string' ? raw : '');

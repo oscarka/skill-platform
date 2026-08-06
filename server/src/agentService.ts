@@ -984,6 +984,33 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     if (profileMeaningful.length < 30) {
       wikiCtx = { ...wikiCtx, user_profile: '' };
       console.log(`[AgentService] Profile 为纯模板，过滤掉（有效字符=${profileMeaningful.length}）`);
+    } else {
+      // Profile 有实质内容，但仍清除其中的空白小节（## 标题 + 注释 + 暂无记录）
+      const cleanedProfile = wikiCtx.user_profile
+        .replace(/##\s+[^\n]*\n<!--[^>]*-->\n暂无记录。?\n?/g, '')  // ## 标题 + 注释 + 暂无记录
+        .replace(/\n{3,}/g, '\n\n')  // 合并多余空行
+        .trim();
+      if (cleanedProfile !== wikiCtx.user_profile) {
+        wikiCtx = { ...wikiCtx, user_profile: cleanedProfile };
+        console.log(`[AgentService] Profile 清除空白小节: ${wikiCtx.user_profile.length}字 → ${cleanedProfile.length}字`);
+      }
+    }
+
+    // ── 清理 wiki 中的空模板内容 ──────────────────────────────────────────────
+    if (wikiCtx.health_wiki) {
+      let cleanedWiki = wikiCtx.health_wiki
+        // 去掉只有「暂无记录」的表格行（如 | 用药 | 暂无记录 | – | – | – |）
+        .replace(/\|[^|]*\|\s*暂无记录\s*\|[\s\-|]*\n?/g, '')
+        // 去掉空表格（只剩表头+分隔线，没有数据行）
+        .replace(/(\|[^\n]+\|\n\|[-|\s]+\|\n)(?=\n|$)/g, '')
+        // 去掉空的 code block 模板（```xxx-block\n...\ncontent: ""\n```）
+        .replace(/```[\w-]+-block\n[\s\S]*?content:\s*""\n```\n?/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      if (cleanedWiki.length < wikiCtx.health_wiki.length) {
+        console.log(`[AgentService] Wiki 清除空模板: ${wikiCtx.health_wiki.length}字 → ${cleanedWiki.length}字`);
+        wikiCtx = { ...wikiCtx, health_wiki: cleanedWiki };
+      }
     }
 
     (req as any)._wikiContext = wikiCtx;
