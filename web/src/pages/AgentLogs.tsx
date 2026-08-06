@@ -191,7 +191,7 @@ function AgentTasksPanel() {
   const fmtDur  = (ms: number) => ms ? (ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`) : '-';
 
   return (
-    <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0, overflow: 'hidden', height: '100%' }}>
       {/* Left list */}
       <div className="card" style={{ width: 340, display: 'flex', flexDirection: 'column', padding: 12, overflow: 'hidden' }}>
         <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
@@ -476,7 +476,7 @@ export default function AgentLogs() {
 
       {/* ── 渠道消息面板 ─────────────────────────────────────── */}
       {mainTab === 'channel' && (
-        <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, padding: '0 0 12px 0' }}>
+        <div style={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <AgentTasksPanel />
         </div>
       )}
