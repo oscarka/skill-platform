@@ -265,7 +265,7 @@ function AgentTasksPanel() {
           </div>
 
           {/* Events timeline */}
-          <div style={{ flex: 1, overflowY: 'auto' }}>
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
             <div style={{ fontSize: '.8rem', fontWeight: 600, color: '#64748b', marginBottom: 10 }}>事件流 ({events.length})</div>
             {events.length === 0 && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无事件记录</div>}
             {events.map((ev, i) => (
