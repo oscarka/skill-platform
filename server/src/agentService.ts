@@ -514,7 +514,10 @@ async function callGeminiMessages(
 
 // ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
 
-async function routeMessage(content: string, notes: string, history: { role: string; content: string }[], apiKey: string): Promise<'chat' | 'health'> {
+// Route result also carries timing and prompt for logging
+export interface RouteResult { type: 'chat' | 'health'; durationMs: number; systemPrompt: string; userMsg: string; rawResult: string; }
+
+async function routeMessage(content: string, notes: string, history: { role: string; content: string }[], apiKey: string): Promise<RouteResult> {
   const systemPrompt = `你是一个智能分诊助手。根据客户消息和近期对话历史判断属于哪一类：
 - "chat"：普通问候、闲聊、询问服务范围/是否可以咨询、非健康相关问题、一般性商务咨询、价格询问等
 - "health"：客户本人或家人有具体的健康症状/指标需要分析，包括：健康症状描述、体检报告解读、饮食调理、用药咨询、身体指标数值解读等
@@ -527,15 +530,18 @@ async function routeMessage(content: string, notes: string, history: { role: str
   const recentHistory = history.slice(-20).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
+  const t0 = Date.now();
   try {
     const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: userMsg }], apiKey, 1024);
+    const durationMs = Date.now() - t0;
     const match = result.match(/"type"\s*:\s*"(chat|health)"/);
     const type = match?.[1] as 'chat' | 'health' | undefined;
-    console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'}`);
-    return type || 'chat';
+    console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'} (${durationMs}ms)`);
+    return { type: type || 'chat', durationMs, systemPrompt, userMsg, rawResult: result.trim() };
   } catch (err) {
+    const durationMs = Date.now() - t0;
     console.warn('[AgentService] Route call failed, defaulting to chat:', err);
-    return 'chat';
+    return { type: 'chat', durationMs, systemPrompt, userMsg, rawResult: '(error)' };
   }
 }
 
@@ -871,8 +877,18 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
     endedAt: Date.now(),
     ...(transcriptJson ? { jobTranscript: transcriptJson } : {}),
   });
-  void appendTaskEvent(requestId, 'skill_done', { outputLen: agentOutput.length });
-  void appendTaskEvent(requestId, 'reply_sent', { channel: delivery.app, recipient: delivery.recipient });
+  void appendTaskEvent(requestId, 'skill_done', {
+    outputLen: agentOutput.length,
+    output_preview: agentOutput.slice(0, 400),
+  });
+  void appendTaskEvent(requestId, 'reply_sent', {
+    reply: agentOutput.slice(0, 600),
+    replyLen: agentOutput.length,
+    channel: delivery.app,
+    recipient: delivery.recipient,
+    delivery_action: delivery.action,
+    cua_url: process.env.CUA_SEND_URL || '',
+  });
 
   // ── LLMWiki: Skill 完成后写日志 + 触发 sync + 重置计数器 ──
   backgroundPostLog(userId, userContent, agentOutput);
@@ -1001,9 +1017,17 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
   void updateAgentTask(requestId, { status: 'routing' });
-  const routeType = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);
-  console.log(`[AgentService] → routed as: ${routeType}`);
-  void appendTaskEvent(requestId, 'route_decided', { routeType });
+  const routeResult = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);
+  const routeType = routeResult.type;
+  console.log(`[AgentService] → routed as: ${routeType} (${routeResult.durationMs}ms)`);
+  void appendTaskEvent(requestId, 'route_decided', {
+    routeType,
+    durationMs: routeResult.durationMs,
+    systemPrompt: routeResult.systemPrompt,
+    userMsg: routeResult.userMsg.slice(0, 800),
+    rawResult: routeResult.rawResult,
+    model: 'gemini-flash',
+  });
 
   // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
   if (routeType !== 'health') {
@@ -1012,7 +1036,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: chatResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
-    void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length });
+    void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length, reply: chatResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
     return chatResult;
   }
 
@@ -1052,7 +1076,12 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   };
 
   // ── Step 5: 执行 ─────────────────────────────────────────────────────────────
-  void appendTaskEvent(requestId, 'skill_selected', { skillId: selectedSkillId, skillName: selectedSkillName, reason: routeReason });
+  void appendTaskEvent(requestId, 'skill_selected', {
+    skillId: selectedSkillId,
+    skillName: selectedSkillName,
+    reason: routeReason,
+    available_skills: availableSkills.map(s => ({ id: s.id, name: s.name })),
+  });
   void updateAgentTask(requestId, { status: 'executing', routeType: 'health', skillId: selectedSkillId || undefined });
 
   if (selectedSkillId && selectedSkillName) {
@@ -1068,7 +1097,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
-    void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length });
+    void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
     return directResult;
   }
 }

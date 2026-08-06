@@ -436,7 +436,7 @@ function AgentTasksPanel() {
                   skill_started:    { icon: '🚀', label: 'Skill 启动', dotBg: '#ca8a04', cardBg: '#fefce8', cardBorder: '#fef08a', textColor: '#854d0e' },
                   reassurance_sent: { icon: '💬', label: '安抚消息', dotBg: '#059669', cardBg: '#ecfdf5', cardBorder: '#a7f3d0', textColor: '#065f46' },
                   skill_done:       { icon: '✅', label: 'Skill 完成', dotBg: '#16a34a', cardBg: '#f0fdf4', cardBorder: '#86efac', textColor: '#15803d' },
-                  reply_sent:       { icon: '✉️', label: '回复发送', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
+                  reply_sent:       { icon: '✉️', label: '发送给用户', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
                   task_failed:      { icon: '❌', label: '任务失败', dotBg: '#dc2626', cardBg: '#fef2f2', cardBorder: '#fca5a5', textColor: '#dc2626' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
@@ -477,12 +477,40 @@ function AgentTasksPanel() {
                           </div>
                         )}
                         {evType === 'route_decided' && (
-                          <div style={{ fontSize: '.85rem', color: '#5b21b6' }}>路由类型: <strong>{p.routeType}</strong></div>
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' as const }}>
+                              <span style={{ fontSize: '.88rem', fontWeight: 700, color: '#5b21b6' }}>{p.routeType === 'health' ? '🏥 健康咨询' : '💬 普通对话'}</span>
+                              {p.durationMs && <span style={{ fontSize: '.72rem', background: '#ede9fe', color: '#6d28d9', padding: '1px 6px', borderRadius: 4 }}>⏱ {p.durationMs}ms</span>}
+                              {p.model && <span style={{ fontSize: '.72rem', background: '#f1f5f9', color: '#475569', padding: '1px 6px', borderRadius: 4 }}>model: {p.model}</span>}
+                            </div>
+                            {/* Route AI call - dark HTTP bar */}
+                            <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6 }}>
+                              <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>POST</span> <span style={{ color: '#f1f5f9' }}>/chat/completions</span></div>
+                              <span style={{ color: '#c084fc' }}>分诊路由 AI</span>
+                            </div>
+                            {p.systemPrompt && <details style={{ marginBottom: 6 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 System Prompt ({p.systemPrompt.length} 字符)</summary><pre style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}>{p.systemPrompt}</pre></details>}
+                            {p.userMsg && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开用户消息 (含近期历史)</summary><pre style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}>{p.userMsg}</pre></details>}
+                          </div>
                         )}
                         {evType === 'skill_selected' && (
                           <div>
-                            <div style={{ fontSize: '.9rem', fontWeight: 600, color: '#c2410c', marginBottom: 6 }}>{p.skillName} <code style={{ fontSize: '.7rem', color: '#78716c', fontWeight: 400 }}>{(p.skillId || '').slice(0, 8)}</code></div>
-                            {p.reason && <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '6px 10px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.6 }}>{p.reason}</div>}
+                            {/* Available skills */}
+                            {p.available_skills && p.available_skills.length > 0 && (
+                              <div style={{ marginBottom: 8 }}>
+                                <div style={{ fontSize: '.72rem', color: '#64748b', marginBottom: 5 }}>可用 Skill：</div>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+                                  {(p.available_skills as any[]).map((s: any) => (
+                                    <span key={s.id} style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400 }}>
+                                      {s.name}{s.id === p.skillId ? ' ✓' : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            <div style={{ fontSize: '.88rem', fontWeight: 600, color: '#c2410c', marginBottom: 6 }}>
+                              选中：{p.skillName} <code style={{ fontSize: '.7rem', color: '#78716c', fontWeight: 400 }}>{(p.skillId || '').slice(0, 8)}</code>
+                            </div>
+                            {p.reason && <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '7px 10px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.6 }}>理由：{p.reason}</div>}
                           </div>
                         )}
                         {evType === 'skill_input' && (
@@ -503,7 +531,24 @@ function AgentTasksPanel() {
                           <div style={{ fontSize: '.85rem', color: '#065f46', borderLeft: '3px solid #34d399', paddingLeft: 10, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{p.reply}</div>
                         )}
                         {evType === 'skill_done' && (
-                          <div style={{ fontSize: '.82rem', color: '#15803d' }}>输出 {p.outputLen || 0} 字符 · 执行完成</div>
+                          <div>
+                            <div style={{ fontSize: '.82rem', color: '#15803d', marginBottom: p.output_preview ? 6 : 0 }}>输出 {p.outputLen || 0} 字符 · 执行完成</div>
+                            {p.output_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开回复内容</summary><pre style={{ fontSize: '.82rem', color: '#14532d', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 280, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 10, borderRadius: 7, lineHeight: 1.6 }}>{p.output_preview}</pre></details>}
+                          </div>
+                        )}
+                        {evType === 'reply_sent' && (
+                          <div>
+                            {/* CUA delivery dark bar */}
+                            <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6 }}>
+                              <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>SEND</span> <span style={{ color: '#f1f5f9' }}>{p.channel || '企业微信'}</span></div>
+                              <div style={{ display: 'flex', gap: 10 }}>
+                                {p.recipient && <span style={{ color: '#34d399' }}>→ {p.recipient}</span>}
+                                {p.delivery_action && <span style={{ color: '#c084fc' }}>{p.delivery_action}</span>}
+                                {p.replyLen && <span style={{ color: '#94a3b8' }}>{p.replyLen} 字符</span>}
+                              </div>
+                            </div>
+                            {p.reply && <div style={{ fontSize: '.85rem', color: '#1e3a5f', borderLeft: '3px solid #3b82f6', paddingLeft: 10, lineHeight: 1.7, whiteSpace: 'pre-wrap', background: 'rgba(255,255,255,.7)', padding: '8px 8px 8px 12px', borderRadius: '0 7px 7px 0' }}>{p.reply}</div>}
+                          </div>
                         )}
                         {evType === 'task_failed' && (
                           <div>
