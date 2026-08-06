@@ -971,9 +971,23 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
   // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
   if (userId && LLMWIKI_BASE) {
-    const wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
+    let wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
+
+    // ── 过滤纯模板 profile（只有 HTML 注释和"暂无记录"，无实质内容）──────────────
+    const profileMeaningful = (wikiCtx.user_profile || '')
+      .replace(/<!--[\s\S]*?-->/g, '')   // 去掉 HTML 注释块
+      .replace(/暂无记录。?/g, '')          // 去掉占位符
+      .replace(/#+\s[^\n]*/g, '')         // 去掉标题行
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (profileMeaningful.length < 30) {
+      wikiCtx = { ...wikiCtx, user_profile: '' };
+      console.log(`[AgentService] Profile 为纯模板，过滤掉（有效字符=${profileMeaningful.length}）`);
+    }
+
     (req as any)._wikiContext = wikiCtx;
     console.log(`[AgentService] WikiContext injected: mode=${wikiCtx.mode} wiki=${wikiCtx.health_wiki.length}字 profile=${wikiCtx.user_profile.length}字`);
+
   void appendTaskEvent(requestId, 'wiki_fetched', {
     mode: wikiCtx.mode,
     wiki_chars: wikiCtx.health_wiki.length,
