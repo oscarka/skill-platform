@@ -778,7 +778,7 @@ async function handleHealthSkill(
 
   // 记录发给 Skill 的完整上下文（含 profile/wiki 注入情况）
   void appendTaskEvent(requestId, 'skill_input', {
-    message_preview: sandboxUserMessage.slice(0, 3000), // 扩大到3000字，便于完整审查
+    message_preview: sandboxUserMessage, // 完整存储，不截断
     message_chars: sandboxUserMessage.length,
     has_wiki: !!(wikiCtx?.health_wiki),
     has_profile: !!(wikiCtx?.user_profile),

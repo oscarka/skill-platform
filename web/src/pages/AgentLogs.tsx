@@ -228,14 +228,10 @@ function AgentTasksPanel() {
       }
     }
 
-    // CUA execution events (from Mac mini callback)
+    // CUA execution events → 合并成一个分组项（不再散成32个单独 timeline item）
     if (selected.cua_events?.events && Array.isArray(selected.cua_events.events)) {
-      const baseTs = selected.cua_events.delivered_at || Date.now();
-      for (let i = 0; i < selected.cua_events.events.length; i++) {
-        const ce = selected.cua_events.events[i];
-        const ts = ce._ts || (baseTs - (selected.cua_events.events.length - i) * 200);
-        timeline.push({ _kind: 'cua_event', ts, ce, cuaMeta: selected.cua_events });
-      }
+      const deliveredTs = selected.cua_events.delivered_at || Date.now();
+      timeline.push({ _kind: 'cua_group', ts: deliveredTs, cuaEvents: selected.cua_events });
     }
 
     // Sort by ts
@@ -394,10 +390,10 @@ function AgentTasksPanel() {
                         <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace' }}>{fmtTimeShort(item.ts)}</span>
                       </div>
                       {/* Dark bar */}
-                      <div style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', flexWrap: 'wrap' as const, gap: 6 }}>
+                      <div style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px', marginBottom: 8, display: 'flex', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', flexWrap: 'wrap' as const, gap: 10 }}>
                         <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>📥 接收消息</span>
                         <span style={{ color: '#f1f5f9' }}>/api/orch/ingest</span>
-                        <div style={{ display: 'flex', gap: 10 }}>
+                        <div style={{ display: 'flex', gap: 10, marginLeft: 'auto' }}>
                           {ctx.history_count > 0 && <span style={{ color: '#c084fc' }}>history: {ctx.history_count}</span>}
                           {ctx.from_name && <span style={{ color: '#34d399' }}>from: {ctx.from_name}</span>}
                           {ctx.notes && <span style={{ color: '#f59e0b' }}>notes: yes</span>}
@@ -517,8 +513,17 @@ function AgentTasksPanel() {
                                 <div style={{ fontSize: '.72rem', color: '#64748b', marginBottom: 5 }}>可用 Skill：</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
                                   {(p.available_skills as any[]).map((s: any) => (
-                                    <span key={s.id} title={s.description || ''} style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400, cursor: s.description ? 'help' : 'default' }}>
-                                      {s.name}{s.id === p.skillId ? ' ✓' : ''}
+                                    <span key={s.id} style={{ position: 'relative' as const, display: 'inline-block' }}
+                                      onMouseEnter={(e) => { const tip = (e.currentTarget as HTMLElement).querySelector('[data-tip]') as HTMLElement; if (tip) tip.style.display = 'block'; }}
+                                      onMouseLeave={(e) => { const tip = (e.currentTarget as HTMLElement).querySelector('[data-tip]') as HTMLElement; if (tip) tip.style.display = 'none'; }}>
+                                      <span style={{ fontSize: '.75rem', padding: '2px 8px', borderRadius: 12, background: s.id === p.skillId ? '#fff7ed' : '#f1f5f9', color: s.id === p.skillId ? '#c2410c' : '#475569', border: `1px solid ${s.id === p.skillId ? '#fed7aa' : '#e2e8f0'}`, fontWeight: s.id === p.skillId ? 700 : 400, cursor: s.description ? 'help' : 'default' }}>
+                                        {s.name}{s.id === p.skillId ? ' ✓' : ''}
+                                      </span>
+                                      {s.description && (
+                                        <div data-tip="1" style={{ display: 'none', position: 'absolute' as const, bottom: '100%', left: 0, marginBottom: 6, background: '#1e293b', color: '#f1f5f9', fontSize: '.7rem', padding: '6px 10px', borderRadius: 6, whiteSpace: 'normal' as const, width: 220, lineHeight: 1.4, zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,.25)', pointerEvents: 'none' as const }}>
+                                          {s.description}
+                                        </div>
+                                      )}
                                     </span>
                                   ))}
                                 </div>
@@ -716,69 +721,64 @@ function AgentTasksPanel() {
                 );
               }
 
-              /* ── CUA execution event ──────────────────────────────────── */
-              if (item._kind === 'cua_event') {
-                const ce = item.ce;
-                const cuaMeta = item.cuaMeta;
-                const prevTs = idx > 0 ? timeline[idx - 1].ts : item.ts;
-                const stepMs = item.ts - prevTs;
-                const evType: string = ce.type || 'cua';
-                const cuaCfg: Record<string, { icon: string; label: string; dot: string; bg: string; border: string; textColor: string }> = {
-                  task_start:        { icon: '🎬', label: 'CUA 开始',    dot: '#7c3aed', bg: '#faf5ff', border: '#e9d5ff', textColor: '#5b21b6' },
-                  phase:             { icon: '⚙️', label: 'CUA 阶段',    dot: '#64748b', bg: '#f8fafc', border: '#e2e8f0', textColor: '#475569' },
-                  cua_instruction:   { icon: '🤖', label: 'CUA 指令',    dot: '#2563eb', bg: '#eff6ff', border: '#bfdbfe', textColor: '#1d4ed8' },
-                  agent_reply_ready: { icon: '💡', label: 'Agent 回复就绪', dot: '#059669', bg: '#f0fdf4', border: '#bbf7d0', textColor: '#065f46' },
-                  tool_call:         { icon: '🔧', label: 'Tool 调用',    dot: '#ea580c', bg: '#fff7ed', border: '#fed7aa', textColor: '#c2410c' },
-                  tool_result:       { icon: '📤', label: 'Tool 结果',    dot: '#d97706', bg: '#fefce8', border: '#fef08a', textColor: '#92400e' },
-                  text:              { icon: '💬', label: 'AI 输出',      dot: '#0891b2', bg: '#ecfeff', border: '#a5f3fc', textColor: '#0e7490' },
-                  task_done:         { icon: '✅', label: 'CUA 完成',    dot: '#16a34a', bg: '#f0fdf4', border: '#86efac', textColor: '#15803d' },
-                  task_failed:       { icon: '❌', label: 'CUA 失败',    dot: '#dc2626', bg: '#fef2f2', border: '#fca5a5', textColor: '#dc2626' },
-                };
-                const cfg = cuaCfg[evType] || { icon: '•', label: evType, dot: '#94a3b8', bg: '#f8fafc', border: '#e2e8f0', textColor: '#475569' };
-
+              /* ── CUA execution group (collapsed, expandable) ────────────── */
+              if (item._kind === 'cua_group') {
+                const cuaData = item.cuaEvents;
+                const allEvents = cuaData.events || [];
+                const success = cuaData.success !== false;
+                const toolCalls = allEvents.filter((e: any) => e.type === 'tool_call');
+                const textEvents = allEvents.filter((e: any) => e.type === 'text');
+                
                 return (
-                  <div key={`cua-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                  <div key={`cua-grp-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
                     <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: cfg.dot, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '13px', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }}>{cfg.icon}</div>
+                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: success ? '#059669' : '#dc2626', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }}>🖥️</div>
                       {idx < timeline.length - 1 && <div style={{ width: 1, flex: 1, background: '#e2e8f0', marginTop: 4 }} />}
                     </div>
                     <div style={{ flex: 1, paddingBottom: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                        <span style={{ fontSize: '.7rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '.05em', background: cfg.bg, color: cfg.textColor, border: `1px solid ${cfg.border}`, padding: '2px 8px', borderRadius: 5 }}>CUA · {cfg.label}</span>
-                        {idx > 0 && stepMs > 10 && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 5px', borderRadius: 4 }}>+{stepMs < 1000 ? `${stepMs}ms` : `${(stepMs / 1000).toFixed(1)}s`}</span>}
+                        <span style={{ fontSize: '.72rem', fontWeight: 700, letterSpacing: '.05em', background: success ? '#d1fae5' : '#fee2e2', color: success ? '#065f46' : '#dc2626', padding: '2px 8px', borderRadius: 5 }}>CUA 执行</span>
+                        <span style={{ fontSize: '.72rem', background: '#f1f5f9', color: '#475569', padding: '1px 6px', borderRadius: 4 }}>{allEvents.length} 步</span>
+                        {toolCalls.length > 0 && <span style={{ fontSize: '.68rem', color: '#6b7280' }}>{toolCalls.length} 个工具调用</span>}
                         <span style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace', marginLeft: 'auto' }}>{fmtTimeShort(item.ts)}</span>
                       </div>
-                      <div style={{ background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 10, padding: '10px 14px' }}>
-                        {evType === 'cua_instruction' && (
-                          <div>
-                            <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6 }}>
-                              <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>SEND</span> <span style={{ color: '#f1f5f9' }}>{ce.app || '企业微信'}</span></div>
-                              <div style={{ display: 'flex', gap: 10 }}>
-                                {ce.recipient && <span style={{ color: '#34d399' }}>→ {ce.recipient}</span>}
-                                {ce.action && <span style={{ color: '#c084fc' }}>{ce.action}</span>}
-                              </div>
-                            </div>
-                            {ce.content_preview && <div style={{ fontSize: '.83rem', color: '#1e3a5f', borderLeft: '3px solid #3b82f6', paddingLeft: 10, lineHeight: 1.7, whiteSpace: 'pre-wrap', background: 'rgba(255,255,255,.7)', padding: '8px 8px 8px 12px', borderRadius: '0 7px 7px 0' }}>{ce.content_preview?.slice(0, 400)}</div>}
+                      <div style={{ background: success ? '#f0fdf4' : '#fef2f2', border: `1px solid ${success ? '#bbf7d0' : '#fca5a5'}`, borderRadius: 10, padding: '10px 14px' }}>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                          <span style={{ fontSize: '.85rem', fontWeight: 600, color: success ? '#059669' : '#dc2626' }}>
+                            {success ? '✅ 已成功送达' : '⚠️ 送达异常'}
+                          </span>
+                          {cuaData.recipient && <span style={{ fontSize: '.78rem', color: '#475569' }}>→ {cuaData.recipient}</span>}
+                          {cuaData.app && <span style={{ fontSize: '.72rem', background: '#e2e8f0', color: '#475569', padding: '1px 6px', borderRadius: 4 }}>{cuaData.app}</span>}
+                        </div>
+                        <details>
+                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 CUA 执行步骤（{allEvents.length} 步）</summary>
+                          <div style={{ marginTop: 8, borderTop: '1px solid #e2e8f0', paddingTop: 8 }}>
+                            {allEvents.map((ce: any, i: number) => {
+                              const evType = ce.type || 'unknown';
+                              const cfgMap: Record<string, { icon: string; color: string }> = {
+                                phase: { icon: '⚙️', color: '#64748b' },
+                                text: { icon: '💬', color: '#0891b2' },
+                                tool_call: { icon: '🔧', color: '#ea580c' },
+                                tool_result: { icon: '📤', color: '#d97706' },
+                                cua_full_prompt: { icon: '📋', color: '#7c3aed' },
+                                cua_instruction: { icon: '🤖', color: '#2563eb' },
+                                task_done: { icon: '✅', color: '#16a34a' },
+                                task_failed: { icon: '❌', color: '#dc2626' },
+                              };
+                              const c = cfgMap[evType] || { icon: '•', color: '#94a3b8' };
+                              const label = ce.content || ce.text || ce.phase || ce.tool || ce.name || (typeof ce === 'string' ? ce : '');
+                              const shortLabel = typeof label === 'string' ? label.slice(0, 120) + (label.length > 120 ? '...' : '') : JSON.stringify(label).slice(0, 80);
+                              
+                              return (
+                                <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid #f5f5f5', fontSize: '.75rem', alignItems: 'flex-start' }}>
+                                  <span style={{ flexShrink: 0, width: 18, textAlign: 'center' as const }}>{c.icon}</span>
+                                  <span style={{ flexShrink: 0, width: 80, color: c.color, fontFamily: 'monospace', fontSize: '.68rem' }}>{evType}</span>
+                                  <span style={{ color: '#374151', flex: 1, wordBreak: 'break-all' as const }}>{shortLabel}</span>
+                                </div>
+                              );
+                            })}
                           </div>
-                        )}
-                        {evType === 'tool_call' && (
-                          <div style={{ fontSize: '.82rem', color: '#c2410c' }}>
-                            <span style={{ background: '#fff7ed', padding: '2px 7px', borderRadius: 4, border: '1px solid #fed7aa', fontFamily: 'monospace' }}>{ce.tool || ce.name || 'tool'}</span>
-                            {ce.input && <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 输入参数</summary><pre style={{ fontSize: '10px', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ce.input, null, 2)}</pre></details>}
-                          </div>
-                        )}
-                        {evType === 'text' && ce.text && (
-                          <details>
-                            <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ AI 输出 ({(ce.text || '').length} 字符)</summary>
-                            <pre style={{ fontSize: '.8rem', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 250, overflow: 'auto' }}>{ce.text}</pre>
-                          </details>
-                        )}
-                        {evType === 'phase' && <div style={{ fontSize: '.82rem', color: '#475569' }}>阶段: <strong>{ce.phase}</strong></div>}
-                        {evType === 'task_done' && <div style={{ fontSize: '.82rem', color: '#15803d' }}>✓ CUA 执行完成，消息已发送给 <strong>{cuaMeta.recipient}</strong></div>}
-                        {evType === 'task_failed' && <div style={{ fontSize: '.82rem', color: '#dc2626' }}>{ce.error || ce.detail || '执行失败'}</div>}
-                        {!['cua_instruction','tool_call','tool_result','text','phase','task_start','task_done','task_failed','agent_reply_ready'].includes(evType) && (
-                          <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto' }}>{JSON.stringify(ce, null, 2)}</pre>
-                        )}
+                        </details>
                       </div>
                     </div>
                   </div>
