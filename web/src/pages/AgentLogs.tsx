@@ -615,9 +615,13 @@ function AgentTasksPanel() {
                           </div>
                         )}
                         {evType === 'app_prewarm' && (
-                          <div style={{ fontSize: '.82rem', color: p.ready ? '#059669' : '#dc2626' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                              <span>{p.ready ? '✅ 企业微信已就绪' : '⚠️ 预热失败'}</span>
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', color: p.skipped ? '#6b7280' : p.ready ? '#059669' : '#dc2626' }}>
+                              <span>
+                                {p.skipped ? '⏭ CUA 暂不可用（已跳过）'
+                                  : p.ready ? '✅ 企业微信已就绪'
+                                  : '⚠️ 预热失败'}
+                              </span>
                               {p.pid && <span style={{ fontSize: '.72rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>PID {p.pid}</span>}
                             </div>
                             {p.error && <div style={{ fontSize: '.72rem', color: '#dc2626', marginTop: 4 }}>{p.error}</div>}

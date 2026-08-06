@@ -898,7 +898,20 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
   syncCounters.set(userId, 0); // Skill sync 已触发，重置30轮计数器
 
   if (!callbackUrl) {
-    console.log(`[AgentService] No callback_url configured for ${requestId}`);
+    // /orch/ingest 路径没有 callbackUrl，用 CUA_SEND_URL 直接发送
+    const cuaSendUrl = process.env.CUA_SEND_URL;
+    if (cuaSendUrl) {
+      console.log(`[AgentService] No callback_url, sending via CUA_SEND_URL for ${requestId}`);
+      fetch(`${cuaSendUrl}/api/agent-callback`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': process.env.AGENT_SECRET || '' },
+        body:    JSON.stringify(callbackBody),
+        signal:  AbortSignal.timeout(30_000),
+      }).then(r => console.log(`[AgentService] CUA final reply HTTP ${r.status}`))
+        .catch(e => console.warn(`[AgentService] CUA final reply failed:`, e.message));
+    } else {
+      console.log(`[AgentService] No callback_url and no CUA_SEND_URL for ${requestId}`);
+    }
     return;
   }
 
@@ -984,13 +997,23 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       signal: AbortSignal.timeout(15_000),
     }).then(async r => {
       const data = await r.json().catch(() => ({})) as any;
-      console.log(`[Prewarm] ✅ ready=${data.ready} pid=${data.pid}`);
-      void appendTaskEvent(requestId, 'app_prewarm', {
-        ready: data.ready,
-        pid: data.pid,
-        app: data.app || '企业微信',
-        error: data.error || '',
-      });
+      console.log(`[Prewarm] ready=${data.ready} pid=${data.pid} status=${data.status}`);
+      // skipped = driver 不可用（不算失败）
+      if (data.status === 'skipped') {
+        void appendTaskEvent(requestId, 'app_prewarm', {
+          ready: null,
+          skipped: true,
+          app: '企业微信',
+          error: '',
+        });
+      } else {
+        void appendTaskEvent(requestId, 'app_prewarm', {
+          ready: data.ready ?? false,
+          pid: data.pid,
+          app: data.app || '企业微信',
+          error: data.error || '',
+        });
+      }
     }).catch(e => {
       console.warn(`[Prewarm] ⚠️ 预热失败: ${e.message}`);
       void appendTaskEvent(requestId, 'app_prewarm', {

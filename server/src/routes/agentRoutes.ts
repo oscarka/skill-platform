@@ -83,23 +83,25 @@ agentRouter.post('/ingest', async (req, res) => {
     // 异步执行（fire and forget），错误只写日志不影响响应
     processAgentChat(agentReq as any).then(result => {
       console.log(`[Orch/Ingest] done from=${from_name} status=${result.status} reply="${(result.reply || '').slice(0, 60)}"`);
-      // 若是同步回复（chat 或 health_direct），主动推给 CUA 发送
-      if (result.status === 'done' && result.reply && CUA_SEND_URL) {
-        // 同步回复：直接推给 CUA /api/agent-callback 执行发送
+
+      // 有回复就推给 CUA 发送（done=同步回复, processing=安抚消息）
+      if (result.reply && CUA_SEND_URL) {
+        const cuaBody = {
+          request_id: result.request_id,
+          session_id: sessionId,
+          status:     result.status === 'processing' ? 'done' : result.status,  // CUA 不认识 processing，统一用 done
+          reply:      result.reply,
+          delivery:   result.delivery || { app: '企业微信', recipient: from_name, action: 'type_and_send' },
+          reasoning:  result.reasoning,
+        };
+        const label = result.status === 'processing' ? '安抚消息' : '同步回复';
         fetch(`${CUA_SEND_URL}/api/agent-callback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': process.env.AGENT_SECRET || '' },
-          body: JSON.stringify({
-            request_id: result.request_id,
-            session_id: sessionId,
-            status:     'done',
-            reply:      result.reply,
-            delivery:   result.delivery || { app: '企业微信', recipient: from_name, action: 'type_and_send' },
-            reasoning:  result.reasoning,
-          }),
+          body: JSON.stringify(cuaBody),
           signal: AbortSignal.timeout(30_000),
-        }).then(r => console.log(`[Orch/Ingest] CUA callback HTTP ${r.status}`))
-          .catch(e => console.warn(`[Orch/Ingest] CUA callback failed:`, e.message));
+        }).then(r => console.log(`[Orch/Ingest] CUA ${label} HTTP ${r.status}`))
+          .catch(e => console.warn(`[Orch/Ingest] CUA ${label} failed:`, e.message));
       }
     }).catch(err => {
       console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
@@ -119,6 +121,8 @@ agentRouter.post('/ingest', async (req, res) => {
 // ─── GET /api/v1/agent/tasks — 统一任务日志 ──────────────────────────────────
 
 agentRouter.get('/tasks', async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
   try {
     const limit  = Math.min(parseInt(String(req.query.limit  || '50')), 200);
     const offset = parseInt(String(req.query.offset || '0'));
@@ -155,6 +159,8 @@ agentRouter.get('/tasks', async (req, res) => {
 // ─── GET /api/v1/agent/tasks/:id — 单个任务 + 事件流 ────────────────────────
 
 agentRouter.get('/tasks/:id', async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
   try {
     const task = await db.getAsync<any>(
       `SELECT * FROM agent_tasks WHERE id=?`, [req.params.id]
