@@ -22,7 +22,9 @@ const DATABASE_URL =
 const DB_SCHEMA = process.env.DB_SCHEMA || 'skill_platform';
 
 export const pool = new Pool({
-  connectionString: DATABASE_URL,
+  connectionString: DATABASE_URL.includes('?')
+    ? DATABASE_URL + `&options=-csearch_path%3D${DB_SCHEMA}`
+    : DATABASE_URL + `?options=-csearch_path%3D${DB_SCHEMA}`,
   // 强制使用代码级 SSL 配置，避免连接串里的 sslmode 被新版 pg 解析为 verify-full
   ssl: DATABASE_URL.includes('supabase.co')
     ? { rejectUnauthorized: false, checkServerIdentity: () => undefined }
@@ -32,9 +34,9 @@ export const pool = new Pool({
   connectionTimeoutMillis: 15000,
 });
 
-// 每个连接建立后设置 search_path，让 SQL 无需写 schema 前缀
+// 每个连接建立后也设置 search_path（双保险，用于非 pgBouncer 直连场景）
 pool.on('connect', (client) => {
-  client.query(`SET search_path TO ${DB_SCHEMA}, public`);
+  client.query(`SET search_path TO ${DB_SCHEMA}, public`).catch(() => {});
 });
 
 pool.on('error', (err) => {
