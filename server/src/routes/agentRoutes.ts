@@ -12,7 +12,7 @@
  */
 
 import express from 'express';
-import { processAgentChat, handleJobCallback, saveAgentProfile } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile, updateAgentTask, appendTaskEvent } from '../agentService';
 import * as db from '../db';
 
 export const agentRouter = express.Router();
@@ -103,6 +103,11 @@ agentRouter.post('/ingest', async (req, res) => {
       }
     }).catch(err => {
       console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
+      // 把错误写回 agent_task 记录
+      const reqIdMatch = err.stack ? null : null; // requestId is in agentReq.request_id if set
+      const failedReqId = (agentReq as any)._requestId || '';
+      void updateAgentTask(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
+      void appendTaskEvent(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
     });
 
   } catch (err: any) {

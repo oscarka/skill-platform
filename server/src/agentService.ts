@@ -21,7 +21,7 @@ import { submitToSandboxService } from './sandboxServiceClient';
 // ─── Agent Task Tracking ─────────────────────────────────────────────────────
 // 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
 
-async function createAgentTask(opts: {
+export async function createAgentTask(opts: {
   id: string; sessionId: string; userId: string;
   sourceChannel: string; inputContent: string; meta?: Record<string, any>;
 }): Promise<void> {
@@ -35,7 +35,7 @@ async function createAgentTask(opts: {
   } catch (err: any) { console.warn('[AgentTask] createAgentTask failed:', err.message); }
 }
 
-async function updateAgentTask(id: string, fields: {
+export async function updateAgentTask(id: string, fields: {
   status?: string; routeType?: string; skillId?: string;
   replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
 }): Promise<void> {
@@ -54,7 +54,7 @@ async function updateAgentTask(id: string, fields: {
   } catch (err: any) { console.warn('[AgentTask] updateAgentTask failed:', err.message); }
 }
 
-async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
+export async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
   try {
     const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await db.runAsync(
@@ -765,6 +765,17 @@ async function handleHealthSkill(
     `\n请以亲切专业的口吻回复，不要使用 Markdown 格式，称呼客户为"${fromName}"。`,
   ].filter(Boolean).join('\n\n');
 
+  // 记录发给 Skill 的完整上下文（含 profile/wiki 注入情况）
+  void appendTaskEvent(requestId, 'skill_input', {
+    message_preview: sandboxUserMessage.slice(0, 600),
+    message_chars: sandboxUserMessage.length,
+    has_wiki: !!(wikiCtx?.health_wiki),
+    has_profile: !!(wikiCtx?.user_profile),
+    history_count: history.length,
+    wiki_chars: wikiCtx?.health_wiki?.length || 0,
+    profile_chars: wikiCtx?.user_profile?.length || 0,
+  });
+
   const jobCallbackUrl = serviceUrl
     ? `${serviceUrl}/api/v1/agent/job-callback/${requestId}`
     : '';
@@ -912,7 +923,13 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     inputContent: req.content,
     meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
   });
-  void appendTaskEvent(requestId, 'message_received', { content: req.content.slice(0, 200), source: srcChannel });
+  void appendTaskEvent(requestId, 'message_received', {
+    content: req.content.slice(0, 300),
+    source: srcChannel,
+    from_name: req.meta?.from_name || '',
+    history_count: (req.history || []).length,
+    has_notes: !!(req.notes),
+  });
 
   // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
   // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
@@ -920,6 +937,13 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     const wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
     (req as any)._wikiContext = wikiCtx;
     console.log(`[AgentService] WikiContext injected: mode=${wikiCtx.mode} wiki=${wikiCtx.health_wiki.length}字 profile=${wikiCtx.user_profile.length}字`);
+  void appendTaskEvent(requestId, 'wiki_fetched', {
+    mode: wikiCtx.mode,
+    wiki_chars: wikiCtx.health_wiki.length,
+    profile_chars: wikiCtx.user_profile.length,
+    profile_preview: wikiCtx.user_profile.slice(0, 400),
+    wiki_preview: wikiCtx.health_wiki.slice(0, 400),
+  });
 
     // ── 新用户 + 带历史对话 → 把历史写入日志并立即 sync ──
     if ((wikiCtx.mode === 'auto_created' || wikiCtx.mode === 'new_user') && req.history && req.history.length > 0) {

@@ -243,60 +243,150 @@ function AgentTasksPanel() {
         </div>
       </div>
 
+
       {/* Right detail */}
       <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 16, overflow: 'hidden' }}>
         {!selected && <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}><div style={{ fontSize: 48, marginBottom: 12 }}>📋</div>点击左侧任务查看事件流</div>}
         {selected && <>
-          {/* Task header */}
-          <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: 12, marginBottom: 14, flexShrink: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: '1rem', color: '#1e293b', marginBottom: 4 }}>
-                  {selected.user_id} · {selected.source_channel}
+          {/* Task header — rich info bar */}
+          <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: 14, marginBottom: 14, flexShrink: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 700, fontSize: '1rem', color: '#1e293b' }}>{selected.user_id}</span>
+                  <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600 }}>{selected.source_channel}</span>
+                  {selected.status === 'done' && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#dcfce7', color: '#15803d', fontWeight: 600 }}>✓ 已完成</span>}
+                  {selected.status === 'failed' && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#fee2e2', color: '#dc2626', fontWeight: 600 }}>✗ 失败</span>}
+                  {(selected.status === 'executing' || selected.status === 'routing') && <span style={{ fontSize: '.75rem', padding: '1px 7px', borderRadius: 4, background: '#fef3c7', color: '#d97706', fontWeight: 600 }}>⟳ {selected.status === 'routing' ? '路由中' : '执行中'}</span>}
+                  {selected.duration_ms && <span style={{ fontSize: '.72rem', color: '#64748b' }}>⏱ {fmtDur(selected.duration_ms)}</span>}
                 </div>
-                <div style={{ fontSize: '.82rem', color: '#475569' }}>{selected.input_content}</div>
-              </div>
-              <div style={{ textAlign: 'right', fontSize: '.75rem', color: '#64748b' }}>
-                <div>ID: <code style={{ fontSize: '.72rem' }}>{selected.id}</code></div>
-                <div>时长: {fmtDur(selected.duration_ms)}</div>
-                <div>路由: {selected.route_type || '-'} {selected.skill_id ? `· ${selected.skill_id.slice(0,8)}` : ''}</div>
+                <div style={{ fontSize: '.88rem', color: '#374151', fontWeight: 500, marginBottom: 5 }}>{selected.input_content}</div>
+                <div style={{ display: 'flex', gap: 12, fontSize: '.72rem', color: '#64748b', flexWrap: 'wrap' }}>
+                  <span>ID: <code style={{ fontSize: '.7rem' }}>{selected.id}</code></span>
+                  {selected.route_type && <span>路由: <strong style={{ color: '#374151' }}>{selected.route_type}</strong></span>}
+                  {selected.skill_id && <span>Skill: <code style={{ fontSize: '.7rem' }}>{selected.skill_id.slice(0,8)}</code></span>}
+                </div>
               </div>
             </div>
+            {/* Failure error banner */}
+            {selected.status === 'failed' && selected.error_message && (
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '10px 14px', marginTop: 8 }}>
+                <div style={{ fontSize: '.78rem', fontWeight: 700, color: '#dc2626', marginBottom: 4 }}>❌ 失败原因</div>
+                <div style={{ fontSize: '.8rem', color: '#7f1d1d', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>{selected.error_message}</div>
+              </div>
+            )}
           </div>
 
-          {/* Events timeline */}
+          {/* Rich Events timeline */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            <div style={{ fontSize: '.8rem', fontWeight: 600, color: '#64748b', marginBottom: 10 }}>事件流 ({events.length})</div>
+            <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#64748b', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '.06em' }}>事件流 ({events.length})</div>
             {events.length === 0 && <div style={{ color: '#94a3b8', fontSize: '.82rem' }}>暂无事件记录</div>}
-            {events.map((ev, i) => (
-              <div key={ev.id || i} style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
-                <div style={{ flexShrink: 0, width: 28, height: 28, borderRadius: '50%', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '.9rem' }}>
-                  {EVENT_ICONS[ev.event_type] || '•'}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                    <span style={{ fontSize: '.8rem', fontWeight: 600, color: '#334155' }}>{ev.event_type}</span>
-                    <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>{fmtTime(ev.ts)}</span>
+            {events.map((ev: any, i: number) => {
+              const prevTs = i > 0 ? Number(events[i - 1].ts) : Number(ev.ts);
+              const stepMs = Number(ev.ts) - prevTs;
+              const p: any = ev.payload || {};
+              const evType: string = ev.event_type;
+              type CardCfg = { bg: string; border: string; label: string; icon: string; lc: string };
+              const cfgMap: Record<string, CardCfg> = {
+                message_received: { bg: '#eff6ff', border: '#bfdbfe', label: '收到消息', icon: '📩', lc: '#1d4ed8' },
+                wiki_fetched:     { bg: '#f0fdf4', border: '#bbf7d0', label: 'Wiki 上下文', icon: '📚', lc: '#15803d' },
+                route_decided:    { bg: '#faf5ff', border: '#e9d5ff', label: '路由决策', icon: '🔀', lc: '#7c3aed' },
+                skill_selected:   { bg: '#fff7ed', border: '#fed7aa', label: 'Skill 选择', icon: '🎯', lc: '#c2410c' },
+                skill_input:      { bg: '#f8fafc', border: '#cbd5e1', label: '发给 Skill 的上下文', icon: '📤', lc: '#374151' },
+                skill_started:    { bg: '#fefce8', border: '#fef08a', label: 'Skill 启动', icon: '🚀', lc: '#854d0e' },
+                reassurance_sent: { bg: '#ecfdf5', border: '#a7f3d0', label: '安抚消息', icon: '💬', lc: '#065f46' },
+                skill_done:       { bg: '#f0fdf4', border: '#86efac', label: 'Skill 完成', icon: '✅', lc: '#15803d' },
+                reply_sent:       { bg: '#eff6ff', border: '#93c5fd', label: '回复发送', icon: '✉️', lc: '#1e40af' },
+                task_failed:      { bg: '#fef2f2', border: '#fca5a5', label: '任务失败', icon: '❌', lc: '#dc2626' },
+              };
+              const cfg: CardCfg = cfgMap[evType] || { bg: '#f8fafc', border: '#e2e8f0', label: evType, icon: '•', lc: '#374151' };
+              return (
+                <div key={ev.id || i} style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                  <div style={{ flexShrink: 0, width: 30, height: 30, borderRadius: '50%', background: cfg.bg, border: `2px solid ${cfg.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '.9rem', marginTop: 2 }}>
+                    {cfg.icon}
                   </div>
-                  {ev.payload && (
-                    <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', background: '#f8fafc', padding: '6px 8px', borderRadius: 6, border: '1px solid #e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 120, overflow: 'auto' }}>
-                      {JSON.stringify(ev.payload, null, 2)}
-                    </pre>
-                  )}
-                </div>
-              </div>
-            ))}
+                  <div style={{ flex: 1, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 10, padding: '10px 13px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: '.75rem', fontWeight: 700, color: cfg.lc, textTransform: 'uppercase', letterSpacing: '.04em' }}>{cfg.label}</span>
+                        {i > 0 && stepMs > 0 && <span style={{ fontSize: '.68rem', padding: '1px 5px', borderRadius: 4, background: 'rgba(0,0,0,.06)', color: '#64748b' }}>+{stepMs < 1000 ? `${stepMs}ms` : `${(stepMs/1000).toFixed(1)}s`}</span>}
+                      </div>
+                      <span style={{ fontSize: '.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>{fmtTime(ev.ts)}</span>
+                    </div>
 
-            {/* Reply preview */}
+                    {evType === 'message_received' && (
+                      <div style={{ fontSize: '.82rem', color: '#1e3a5f' }}>
+                        {p.from_name && <div style={{ marginBottom: 5 }}><strong>「{p.from_name}」</strong> → {p.source}</div>}
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {(p.history_count > 0) && <span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📜 历史 {p.history_count} 条</span>}
+                          {p.has_notes && <span style={{ background: '#e0e7ff', color: '#4338ca', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📝 含备注</span>}
+                        </div>
+                      </div>
+                    )}
+                    {evType === 'wiki_fetched' && (
+                      <div>
+                        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: (p.profile_preview || p.wiki_preview) ? 8 : 0 }}>
+                          {p.profile_chars > 0 ? <span style={{ background: '#dcfce7', color: '#166534', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>👤 用户画像 {p.profile_chars} 字</span> : <span style={{ color: '#94a3b8', fontSize: '.75rem' }}>暂无用户画像</span>}
+                          {p.wiki_chars > 0 && <span style={{ background: '#d1fae5', color: '#065f46', padding: '1px 7px', borderRadius: 4, fontSize: '.72rem' }}>📖 健康档案 {p.wiki_chars} 字</span>}
+                        </div>
+                        {p.profile_preview && <details style={{ marginTop: 4 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开用户画像</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.profile_preview}</pre></details>}
+                        {p.wiki_preview && <details style={{ marginTop: 4 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开健康档案</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6 }}>{p.wiki_preview}</pre></details>}
+                      </div>
+                    )}
+                    {evType === 'route_decided' && (
+                      <div style={{ fontSize: '.82rem', color: '#5b21b6' }}>路由类型: <strong>{p.routeType}</strong></div>
+                    )}
+                    {evType === 'skill_selected' && (
+                      <div>
+                        <div style={{ fontSize: '.82rem', marginBottom: 5 }}>
+                          <strong style={{ color: '#c2410c' }}>{p.skillName}</strong>
+                          <code style={{ marginLeft: 7, fontSize: '.7rem', color: '#64748b' }}>{(p.skillId || '').slice(0, 8)}</code>
+                        </div>
+                        {p.reason && <div style={{ fontSize: '.78rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '6px 9px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.5 }}>{p.reason}</div>}
+                      </div>
+                    )}
+                    {evType === 'skill_input' && (
+                      <div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: p.has_wiki ? '#d1fae5' : '#f1f5f9', color: p.has_wiki ? '#065f46' : '#94a3b8' }}>📖 {p.has_wiki ? `健康档案 ${p.wiki_chars}字` : '无健康档案'}</span>
+                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: p.has_profile ? '#dcfce7' : '#f1f5f9', color: p.has_profile ? '#166534' : '#94a3b8' }}>👤 {p.has_profile ? `用户画像 ${p.profile_chars}字` : '无用户画像'}</span>
+                          {p.history_count > 0 && <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8' }}>📜 历史 {p.history_count} 条</span>}
+                          <span style={{ fontSize: '.72rem', padding: '1px 6px', borderRadius: 4, background: '#f3f4f6', color: '#6b7280' }}>总长 {p.message_chars} 字</span>
+                        </div>
+                        {p.message_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>展开发给 Skill 的完整上下文</summary><pre style={{ fontSize: '.72rem', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 220, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #e5e7eb' }}>{p.message_preview}</pre></details>}
+                      </div>
+                    )}
+                    {evType === 'reassurance_sent' && p.reply && (
+                      <div style={{ fontSize: '.83rem', color: '#065f46', background: 'rgba(255,255,255,.7)', padding: '8px 11px', borderRadius: 7, borderLeft: '3px solid #34d399', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{p.reply}</div>
+                    )}
+                    {evType === 'skill_done' && (
+                      <div style={{ fontSize: '.78rem', color: '#15803d' }}>输出长度: {p.outputLen || 0} 字符</div>
+                    )}
+                    {evType === 'task_failed' && (
+                      <div>
+                        <div style={{ fontSize: '.82rem', color: '#dc2626', fontFamily: 'monospace', marginBottom: p.stack ? 6 : 0 }}>{p.error}</div>
+                        {p.stack && <details><summary style={{ fontSize: '.72rem', color: '#94a3b8', cursor: 'pointer' }}>展开 Stack Trace</summary><pre style={{ fontSize: '.68rem', color: '#7f1d1d', whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 150, overflow: 'auto' }}>{p.stack}</pre></details>}
+                      </div>
+                    )}
+                    {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed'].includes(evType) && ev.payload && (
+                      <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', background: 'rgba(255,255,255,.6)', padding: '6px 8px', borderRadius: 6, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Final reply */}
             {selected.reply_content && (
-              <div style={{ marginTop: 16, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #86efac' }}>
-                <div style={{ fontSize: '.8rem', fontWeight: 600, color: '#166534', marginBottom: 6 }}>💬 AI 回复</div>
-                <div style={{ fontSize: '.82rem', color: '#15803d', whiteSpace: 'pre-wrap' }}>{selected.reply_content}</div>
+              <div style={{ marginTop: 12, padding: '12px 16px', background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)', borderRadius: 10, border: '1px solid #86efac' }}>
+                <div style={{ fontSize: '.75rem', fontWeight: 700, color: '#166534', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.05em' }}>💬 最终回复</div>
+                <div style={{ fontSize: '.85rem', color: '#14532d', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{selected.reply_content}</div>
               </div>
             )}
           </div>
         </>}
       </div>
+
     </div>
   );
 }
