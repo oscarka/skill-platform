@@ -665,7 +665,8 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 要求：
 - 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
 - 直接称呼客户为"${fromName}"
-- 如客户涉及具体健康问题，告知正在为其准备专业分析，请稍等`;
+- 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
+- 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答`;
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
@@ -997,14 +998,14 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       signal: AbortSignal.timeout(15_000),
     }).then(async r => {
       const data = await r.json().catch(() => ({})) as any;
-      console.log(`[Prewarm] ready=${data.ready} pid=${data.pid} status=${data.status}`);
-      // skipped = driver 不可用（不算失败）
-      if (data.status === 'skipped') {
+      console.log(`[Prewarm] HTTP ${r.status} ready=${data.ready} pid=${data.pid} status=${data.status}`);
+      // 非 200 或 skipped/error/undefined → 统一当作 "跳过"（预热是 best-effort，失败不是错误）
+      if (!r.ok || data.status === 'skipped' || data.status === 'error' || data.ready === undefined) {
         void appendTaskEvent(requestId, 'app_prewarm', {
           ready: null,
           skipped: true,
           app: '企业微信',
-          error: '',
+          error: data.error || (r.ok ? '' : `HTTP ${r.status}`),
         });
       } else {
         void appendTaskEvent(requestId, 'app_prewarm', {
@@ -1015,9 +1016,10 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         });
       }
     }).catch(e => {
-      console.warn(`[Prewarm] ⚠️ 预热失败: ${e.message}`);
+      console.warn(`[Prewarm] ⚠️ 预热跳过: ${e.message}`);
       void appendTaskEvent(requestId, 'app_prewarm', {
-        ready: false,
+        ready: null,
+        skipped: true,
         error: e.message,
         app: '企业微信',
       });
