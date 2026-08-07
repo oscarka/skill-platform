@@ -1307,27 +1307,38 @@ confirm判断:
 
       try {
         const t0 = Date.now();
-        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 256);
+        // 直接 fetch + response_format json_object，强制 Gemini 只输出 JSON，不走 callGeminiMessages 的 tool-call 循环
+        const guardRes = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gemini-2.5-flash',
+            response_format: { type: 'json_object' },
+            max_tokens: 100,
+            messages: [
+              { role: 'system', content: guardSystemPrompt },
+              { role: 'user',   content: guardUserMsg },
+            ],
+          }),
+          signal: AbortSignal.timeout(15_000),
+        });
         const durationMs = Date.now() - t0;
-        // strip markdown code block wrappers (```json ... ```)，再用 [\s\S]*? 匹配多行 JSON
-        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);  // 贪婪匹配，取最完整的JSON对象
-        const parsed = JSON.parse(jsonMatch?.[0] || '{}');
+        const guardData = await guardRes.json() as any;
+        if (!guardRes.ok) throw new Error(`Guard API ${guardRes.status}: ${JSON.stringify(guardData).slice(0,100)}`);
+        const raw: string = guardData.choices?.[0]?.message?.content || '';
+        const parsed = raw ? JSON.parse(raw) : {};
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
         };
-        console.log(`[SkillGuard] 🤔 判断结果 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms)`);
-        console.log(`[SkillGuard] raw全文: ${raw.trim()}`);
+        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw=${raw.slice(0,80)}`);
         void appendTaskEvent(requestId, 'skill_guard_judgment', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
           interest: guardResult.interest,
           confirm: guardResult.confirm,
           durationMs,
-          rawResult: raw.trim().slice(0, 500),
-          cleanRaw: cleanRaw.slice(0, 300),
-          jsonMatch: jsonMatch?.[0]?.slice(0, 200) || 'null',
+          rawResult: raw.slice(0, 300),
         });
       } catch (e: any) {
         console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
