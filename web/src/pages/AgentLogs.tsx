@@ -506,6 +506,11 @@ function AgentTasksPanel() {
                   wiki_confirmed:    { icon: '✅', label: 'Wiki 用户确认', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#6ee7b7', textColor: '#065f46' },
                   wiki_declined:     { icon: '🚫', label: 'Wiki 用户取消', dotBg: '#9ca3af', cardBg: '#f9fafb', cardBorder: '#d1d5db', textColor: '#6b7280' },
                   skill_skipped_low_confidence: { icon: '💬', label: 'Skill 跳过(低置信)', dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
+                  skill_guard_activated: { icon: '🛡️', label: '守卫已激活', dotBg: '#7c3aed', cardBg: '#f5f3ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
+                  skill_guard_check:     { icon: '🔍', label: '守卫检查中', dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#0e7490' },
+                  skill_guard_judgment:  { icon: '🤔', label: '守卫判断', dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
+                  skill_guard_clarify:   { icon: '❓', label: '守卫追问', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#9a3412' },
+                  skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -697,7 +702,7 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence'].includes(evType) && (
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>

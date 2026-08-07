@@ -162,6 +162,21 @@ export function initDb(): void {
     `ALTER TABLE tickets ADD COLUMN wiki_confirmed_at INTEGER DEFAULT NULL`,
     // Ticket: wiki 取消标记（用户点了「取消」）
     `ALTER TABLE tickets ADD COLUMN wiki_declined INTEGER NOT NULL DEFAULT 0`,
+    // Skill 确认守卫表 —— skill_suggest 后激活，三值判断监听用户是否确认
+    `CREATE TABLE IF NOT EXISTS skill_confirm_guards (
+      id           TEXT PRIMARY KEY,
+      session_id   TEXT NOT NULL,
+      user_id      TEXT NOT NULL,
+      skill_id     TEXT NOT NULL,
+      skill_name   TEXT NOT NULL,
+      suggest_msg  TEXT,
+      suggest_ts   INTEGER NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'active',
+      close_reason TEXT,
+      created_at   INTEGER NOT NULL,
+      expires_at   INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status)`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

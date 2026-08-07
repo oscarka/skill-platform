@@ -330,6 +330,23 @@ CREATE TABLE IF NOT EXISTS agent_task_events (
 CREATE INDEX IF NOT EXISTS idx_agent_events_task ON agent_task_events(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_ts   ON agent_task_events(ts DESC);
 
+-- Skill 确认守卫表 —— skill_suggest 发出后激活，监听后续用户回外是否确认使用 skill
+CREATE TABLE IF NOT EXISTS skill_confirm_guards (
+  id              TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  skill_id        TEXT NOT NULL,
+  skill_name      TEXT NOT NULL,
+  suggest_msg     TEXT,                   -- agent 当时发的推荐话术
+  suggest_ts      BIGINT NOT NULL,        -- skill_suggest 发出时刻（用于截取后续对话）
+  status          TEXT NOT NULL DEFAULT 'active',  -- active | closed
+  close_reason    TEXT,                   -- user_confirmed | user_declined | expired | switched_skill
+  created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  expires_at      BIGINT NOT NULL         -- created_at + 30分钟
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status);
+
 `;
 
 export async function initDb(): Promise<void> {
@@ -348,6 +365,7 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS job_transcript TEXT`,
       `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS context_snapshot TEXT`,
       `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS cua_events TEXT`,
+      // skill_confirm_guards 表已在 SCHEMA_SQL 中创建，IF NOT EXISTS 自动安全
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }

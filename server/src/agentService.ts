@@ -1160,10 +1160,167 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     }
   }
 
+  // ── Step 0.9: Skill 确认守卫前置检查 ─────────────────────────────────────────
+  // 在 routeMessage 之前检查：当前 session 是否有激活的 skill_suggest 守卫？
+  // 如果有，运行三值判断（感兴趣/确认），跳过或改写后续路由
+  let guardHint = '';  // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
+  if (sessionId) {
+    const nowMs = Date.now();
+    const activeGuard = await db.getAsync<any>(
+      `SELECT * FROM skill_confirm_guards
+       WHERE session_id=? AND status='active' AND expires_at>?
+       ORDER BY created_at DESC LIMIT 1`,
+      [sessionId, nowMs],
+    );
+    if (activeGuard) {
+      console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name}`);
+      void appendTaskEvent(requestId, 'skill_guard_check', {
+        guardId: activeGuard.id,
+        skillId: activeGuard.skill_id,
+        skillName: activeGuard.skill_name,
+        suggestTs: activeGuard.suggest_ts,
+        userMsg: req.content.slice(0, 200),
+      });
+
+      // 截取 suggest_ts 之后的对话（让 AI 看到完整上下文，而非只看最后一条）
+      const historyAfterSuggest = (req.history || [])
+        .filter((h: any) => !h.ts || h.ts >= activeGuard.suggest_ts)
+        .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
+        .join('\n');
+
+      const guardSystemPrompt = `你是一个对话状态判断器，不做其他任何事。
+
+背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务，原话是：
+「${(activeGuard.suggest_msg || '').slice(0, 200)}」
+
+从推荐到现在的对话记录：
+${historyAfterSuggest || '（推荐后暂无其他对话）'}
+
+用户最新消息：「${req.content}」
+
+请判断以下两个维度：
+1. interest（感兴趣程度）：用户是否仍然对「${activeGuard.skill_name}」感兴趣？
+   - yes：用户没有明确拒绝，还在了解或考虑
+   - no：用户明确表示不需要/算了/不用了/或已完全转移到无关话题
+
+2. confirm（明确确认）：用户是否明确表达了要开始使用「${activeGuard.skill_name}」服务？
+   - yes：用户有清晰的启动意图（如「帮我分析」「开始吧」「好，我要用」「可以开始了」「确认使用」）
+   - no：用户明确表示不用
+   - unclear：用户说了模糊词（如单独的「好的」「嗯」「行」「知道了」），或正在提问而非确认
+
+重要原则：
+- 只有当用户的意图非常明确时才判断 confirm=yes，模糊一律为 unclear
+- 提问行为（问服务详情、问价格、问流程）= interest=yes，confirm=unclear
+- 只返回 JSON，不要有任何其他内容`;
+
+      const guardUserMsg = `请基于以上背景，只返回 JSON：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
+
+      let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
+      try {
+        const t0 = Date.now();
+        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 256);
+        const durationMs = Date.now() - t0;
+        const parsed = JSON.parse(raw.match(/\{[^}]+\}/)?.[0] || '{}');
+        guardResult = {
+          interest: parsed.interest === 'no' ? 'no' : 'yes',
+          confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
+        };
+        console.log(`[SkillGuard] 🤔 判断结果 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw=${raw.trim().slice(0,100)}`);
+        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+          guardId: activeGuard.id,
+          skillName: activeGuard.skill_name,
+          interest: guardResult.interest,
+          confirm: guardResult.confirm,
+          durationMs,
+          rawResult: raw.trim().slice(0, 200),
+        });
+      } catch (e: any) {
+        console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
+        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+          guardId: activeGuard.id,
+          error: e.message,
+          interest: 'yes',
+          confirm: 'unclear',
+        });
+      }
+
+      const closeGuard = async (reason: string) => {
+        await db.runAsync(
+          `UPDATE skill_confirm_guards SET status='closed', close_reason=? WHERE id=?`,
+          [reason, activeGuard.id],
+        );
+        console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuard.id} reason=${reason}`);
+        void appendTaskEvent(requestId, 'skill_guard_closed', {
+          guardId: activeGuard.id,
+          skillName: activeGuard.skill_name,
+          reason,
+        });
+      };
+
+      if (guardResult.interest === 'no') {
+        // ─ 用户不感兴趣 → 关闭守卫，往下游传 hint，走正常路由 ─
+        await closeGuard('user_declined');
+        guardHint = `[守卫提示：用户之前对「${activeGuard.skill_name}」服务不感兴趣，本轮消息与此无关，请正常回答]`;
+
+      } else if (guardResult.confirm === 'yes') {
+        // ─ 明确确认 → 关闭守卫，直接执行 skill（跳过 routeMessage）─
+        await closeGuard('user_confirmed');
+        console.log(`[SkillGuard] ✅ 用户确认，直接执行 skill ${activeGuard.skill_id}`);
+
+        // 将 skill_id 注入 req，让后续代码当作「前端强制指定」处理
+        (req as any).skill_id = activeGuard.skill_id;
+
+      } else if (guardResult.confirm === 'unclear') {
+        // ─ 模糊确认 → 守卫保持激活，agent 追问一次 ─
+        console.log(`[SkillGuard] ❓ 模糊确认，追问用户`);
+        const clarifyMsg = `您是想现在开始「${activeGuard.skill_name}」分析吗？如果是，请直接告诉我「开始」或「好，帮我分析」～`;
+
+        void appendTaskEvent(requestId, 'skill_guard_clarify', {
+          guardId: activeGuard.id,
+          skillName: activeGuard.skill_name,
+          clarifyMsg,
+        });
+        void appendTaskEvent(requestId, 'reply_sent', {
+          replyLen: clarifyMsg.length,
+          reply: clarifyMsg,
+          channel: delivery.app,
+          recipient: delivery.recipient,
+          note: 'guard_clarify',
+        });
+        const endMs = Date.now();
+        void updateAgentTask(requestId, {
+          status: 'done',
+          routeType: 'skill_guard_clarify',
+          replyContent: clarifyMsg,
+          endedAt: endMs,
+          durationMs: endMs - taskStartMs,
+        });
+        return {
+          request_id: requestId,
+          status:     'done',
+          reply:      clarifyMsg,
+          delivery,
+          reasoning:  `SkillGuard: 用户模糊，追问确认`,
+          route_type: 'skill_guard_clarify',
+        } as any;
+
+      } else {
+        // ─ confirm=no（明确不用）→ 关闭守卫，走正常路由 ─
+        await closeGuard('user_declined_explicit');
+        guardHint = `[守卫提示：用户明确不使用「${activeGuard.skill_name}」服务，请正常回答]`;
+      }
+    }
+  }
+
   // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
   void updateAgentTask(requestId, { status: 'routing' });
-  const routeResult = await routeMessage(req.content, req.notes || '', req.history || [], apiKey);
-  const routeType = routeResult.type;
+  const routeResult = await routeMessage(
+    guardHint ? `${req.content}\n${guardHint}` : req.content,
+    req.notes || '',
+    req.history || [],
+    apiKey,
+  );
+  const routeType = (req as any).skill_id ? 'health' : routeResult.type;  // guard 确认后强制走 health
   console.log(`[AgentService] → routed as: ${routeType} (${routeResult.durationMs}ms)`);
   void appendTaskEvent(requestId, 'route_decided', {
     routeType,
@@ -1171,7 +1328,8 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     systemPrompt: routeResult.systemPrompt,
     userMsg: routeResult.userMsg.slice(0, 800),
     rawResult: routeResult.rawResult,
-    model: routeResult.model || process.env.GEMINI_MODEL || 'gemini-2.0-flash', // 使用实际模型名
+    model: routeResult.model || process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+    guardHint: guardHint || null,
   });
 
   // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
@@ -1248,7 +1406,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       const fromName = req.meta.from_name || '您';
 
       // 组建介绍消息（简洁，不推销）
-      const suggestMsg = `${fromName}，根据您的需求，我们有一项「${route.skillName}」服务可能适合您。\n\n${skillDesc ? `📋 ${skillDesc.slice(0, 100)}${skillDesc.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？回复「是」或「好的」即可，我来为您准备。`;
+      const suggestMsg = `${fromName}，根据您的需求，我们有一项「${route.skillName}」服务可能适合您。\n\n${skillDesc ? `📋 ${skillDesc.slice(0, 100)}${skillDesc.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
 
       void appendTaskEvent(requestId, 'skill_suggest', {
         skillId: route.skillId,
@@ -1265,15 +1423,36 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         note: 'skill_suggest',
       });
 
-      const endMs = Date.now();
+      const nowTs = Date.now();
       void updateAgentTask(requestId, {
         status: 'done',
         routeType: 'skill_suggest',
         skillId: route.skillId,
         replyContent: suggestMsg.slice(0, 500),
-        endedAt: endMs,
-        durationMs: endMs - taskStartMs,
+        endedAt: nowTs,
+        durationMs: nowTs - taskStartMs,
       });
+
+      // ── 激活守卫：在 DB 记录「当前 session 正在等待用户确认 skill」──
+      const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+      try {
+        await db.runAsync(
+          `INSERT INTO skill_confirm_guards
+            (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          [guardId, sessionId, userId, route.skillId, route.skillName,
+           suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000],
+        );
+        console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${route.skillName} session=${sessionId}`);
+        void appendTaskEvent(requestId, 'skill_guard_activated', {
+          guardId,
+          skillId: route.skillId,
+          skillName: route.skillName,
+          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+        });
+      } catch (e: any) {
+        console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
+      }
 
       // 返回 reply 给调用方（agentRoutes 负责 CUA 发送，与 chat 路径相同）
       return {
