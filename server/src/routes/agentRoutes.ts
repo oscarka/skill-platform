@@ -12,7 +12,7 @@
  */
 
 import express from 'express';
-import { processAgentChat, handleJobCallback, saveAgentProfile, updateAgentTask, appendTaskEvent } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
 import * as db from '../db';
 
 export const agentRouter = express.Router();
@@ -192,6 +192,74 @@ agentRouter.get('/tasks/:id', async (req, res) => {
   }
 });
 
+// ─── GET /api/v1/agent/tasks/:id/stream — SSE 实时事件推送 ───────────────────
+
+agentRouter.get('/tasks/:id/stream', async (req, res) => {
+  const taskId = req.params.id;
+
+  // SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',  // nginx/Cloud Run: disable buffering
+  });
+  res.flushHeaders();
+
+  // Send initial events from DB
+  try {
+    const events = await db.allAsync<any>(
+      `SELECT id, event_type, payload, ts FROM agent_task_events WHERE task_id=? ORDER BY ts ASC`,
+      [taskId]
+    );
+    const parsed = events.map((e: any) => ({
+      ...e, payload: e.payload ? JSON.parse(e.payload) : null,
+    }));
+    res.write(`data: ${JSON.stringify({ type: 'init', events: parsed })}\n\n`);
+  } catch (e) { /* ignore */ }
+
+  // Subscribe to real-time events
+  const handler = (event: any) => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'event', ...event })}\n\n`);
+    } catch { /* client disconnected */ }
+  };
+  taskEventBus.on(`task:${taskId}`, handler);
+
+  // Heartbeat every 15s to keep connection alive
+  const heartbeat = setInterval(() => {
+    try { res.write(': heartbeat\n\n'); } catch { /* ignore */ }
+  }, 15000);
+
+  // Cleanup on disconnect
+  req.on('close', () => {
+    taskEventBus.removeListener(`task:${taskId}`, handler);
+    clearInterval(heartbeat);
+  });
+});
+
+// ─── POST /api/v1/agent/cua-step/:requestId — CUA 逐步事件推送 ───────────────
+
+agentRouter.post('/cua-step/:requestId', async (req, res) => {
+  const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+  if (req.headers['x-sandbox-secret'] !== EXPECTED) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.json({ ok: true }); // respond immediately
+
+  const { requestId } = req.params;
+  const { step_index, event_type, detail, tool_name, tool_result, ts } = req.body;
+
+  // Write as task event + auto-push via EventEmitter
+  void appendTaskEvent(requestId, 'cua_step', {
+    step_index,
+    event_type: event_type || 'step',
+    detail: typeof detail === 'string' ? detail.slice(0, 300) : detail,
+    tool_name,
+    tool_result: typeof tool_result === 'string' ? tool_result.slice(0, 200) : undefined,
+    ts: ts || Date.now(),
+  });
+});
 
 // ─── POST /api/v1/agent/chat ──────────────────────────────────────────────────
 

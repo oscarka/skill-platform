@@ -18,8 +18,13 @@ import * as db from './db';
 import { submitSandboxJob } from './cloudRunJobsClient';
 import { submitToSandboxService } from './sandboxServiceClient';
 
+import { EventEmitter } from 'events';
+
 // ─── Agent Task Tracking ─────────────────────────────────────────────────────
 // 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
+// SSE real-time push via EventEmitter
+export const taskEventBus = new EventEmitter();
+taskEventBus.setMaxListeners(50); // allow many SSE connections
 
 export async function createAgentTask(opts: {
   id: string; sessionId: string; userId: string;
@@ -61,10 +66,13 @@ export async function updateAgentTask(id: string, fields: {
 export async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
   try {
     const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const ts = Date.now();
     await db.runAsync(
       `INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`,
-      [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, Date.now()]
+      [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, ts]
     );
+    // Push to SSE subscribers in real-time
+    taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
   } catch (err: any) { console.warn('[AgentTask] appendTaskEvent failed:', err.message); }
 }
 

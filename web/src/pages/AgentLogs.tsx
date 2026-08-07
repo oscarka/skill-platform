@@ -158,7 +158,6 @@ function AgentTasksPanel() {
   const [selected, setSelected] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [filter, setFilter] = useState({ channel: '', status: '' });
-  const [polling, setPolling] = useState<ReturnType<typeof setInterval> | null>(null);
 
   const loadTasks = async () => {
     try {
@@ -183,17 +182,59 @@ function AgentTasksPanel() {
     setEvents(data.events || []);
   };
 
-  // Auto-refresh selected task when executing
+  // SSE: real-time event streaming for selected task
+  const sseRef = useRef<EventSource | null>(null);
   useEffect(() => {
-    if (!selected) return;
-    if (selected.status === 'executing' || selected.status === 'routing' || selected.status === 'pending' || !selected.status) {
-      const t = setInterval(() => loadTaskDetail(selected.id), 3000);
-      setPolling(t);
-      return () => clearInterval(t);
-    } else {
-      if (polling) { clearInterval(polling); setPolling(null); }
-    }
-  }, [selected?.status, selected?.id]);
+    // Close previous SSE
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    if (!selected?.id) return;
+
+    // Only connect SSE for non-done tasks (or always for initial load)
+    const isDone = selected.status === 'done' || selected.status === 'failed';
+
+    const es = new EventSource(`/api/v1/agent/tasks/${selected.id}/stream`);
+    sseRef.current = es;
+
+    es.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        if (data.type === 'init') {
+          // Full event list from DB (initial load)
+          setEvents(data.events || []);
+        } else if (data.type === 'event') {
+          // Single new event — append without duplicates
+          setEvents(prev => {
+            if (prev.some((e: any) => e.id === data.id)) return prev;
+            return [...prev, { id: data.id, event_type: data.event_type, payload: data.payload, ts: data.ts }];
+          });
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.onerror = () => {
+      // Reconnect handled automatically by EventSource, but close if task is done
+      if (isDone && sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    };
+
+    // Also poll task status every 5s to update header (status, duration etc)
+    const statusPoll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/v1/agent/tasks/${selected.id}`);
+        const data = await res.json();
+        setSelected(data);
+        // If task is done, close SSE
+        if (data.status === 'done' || data.status === 'failed') {
+          if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+          clearInterval(statusPoll);
+        }
+      } catch { /* ignore */ }
+    }, 5000);
+
+    return () => {
+      if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+      clearInterval(statusPoll);
+    };
+  }, [selected?.id]);
 
   useEffect(() => { loadTasks(); }, [filter]);
   useEffect(() => {
@@ -447,6 +488,7 @@ function AgentTasksPanel() {
                   skill_done:       { icon: '✅', label: 'Skill 完成', dotBg: '#16a34a', cardBg: '#f0fdf4', cardBorder: '#86efac', textColor: '#15803d' },
                   reply_sent:       { icon: '✉️', label: '发送给用户', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
                   task_failed:      { icon: '❌', label: '任务失败', dotBg: '#dc2626', cardBg: '#fef2f2', cardBorder: '#fca5a5', textColor: '#dc2626' },
+                  cua_step:         { icon: '🖱️', label: 'CUA 步骤', dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#155e75' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -627,7 +669,18 @@ function AgentTasksPanel() {
                             {p.error && <div style={{ fontSize: '.72rem', color: '#dc2626', marginTop: 4 }}>{p.error}</div>}
                           </div>
                         )}
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm'].includes(evType) && (
+                        {evType === 'cua_step' && (
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <span style={{ background: '#0891b2', color: '#fff', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem', fontFamily: 'monospace' }}>#{p.step_index}</span>
+                              {p.tool_name && <span style={{ background: '#e0f2fe', color: '#0369a1', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.tool_name}</span>}
+                              <span style={{ color: '#155e75', fontSize: '.75rem' }}>{p.event_type}</span>
+                            </div>
+                            {p.detail && <div style={{ marginTop: 4, fontSize: '.75rem', color: '#475569', lineHeight: 1.4 }}>{String(p.detail).slice(0, 200)}</div>}
+                          </div>
+                        )}
+
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
