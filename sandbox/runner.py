@@ -5,6 +5,12 @@ sandbox/runner.py  — AI Agent sandbox runner
 import os, sys, json, subprocess, time, textwrap, base64, re, shlex, signal
 from datetime import datetime, timezone
 
+# 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
+_home = os.path.expanduser("~")
+if os.getcwd() == "/" and os.path.isdir(_home):
+    os.chdir(_home)
+    print(f"[runner] chdir → {_home}", flush=True)
+
 # OpenClaw 风格模块
 from transcript import TranscriptManager
 from truncation import truncate_tool_result, calculate_max_chars, truncate_messages_aggregate
