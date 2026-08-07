@@ -126,6 +126,35 @@ function backgroundPostLog(userId: string, userMsg: string, aiReply: string): vo
 }
 
 /**
+ * 公开接口：写一条日志到 LLMWiki（用于报告确认等场景）
+ * 与 backgroundPostLog 不同，这是 async/await 模式，调用方可 await
+ */
+export async function writeWikiLog(userId: string, content: string, type: string = 'wechat', title?: string): Promise<void> {
+  if (!LLMWIKI_BASE || !userId) {
+    console.log(`[WriteWikiLog] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
+    return;
+  }
+  const url = `${LLMWIKI_BASE}/api/clients/${userId}/logs`;
+  const body = JSON.stringify({
+    type,
+    content,
+    title: title || `日志 ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+  });
+  console.log(`[WriteWikiLog] POST ${url} userId=${userId} type=${type} contentLen=${content.length}`);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`LLMWiki log write failed: HTTP ${res.status} ${errText}`);
+  }
+  console.log(`[WriteWikiLog] ✓ 写入成功 userId=${userId} HTTP ${res.status}`);
+}
+
+/**
  * 后台触发 LLMWiki Wiki sync Pipeline（Skill 完成后调用）
  */
 export function triggerWikiSyncPublic(userId: string, reason: string): void {

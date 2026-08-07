@@ -28,7 +28,7 @@ export interface TicketRecord {
   patient_phone?: string;
   notes?: string;
   created_by?: string;
-  status: 'created' | 'waiting_input' | 'submitted' | 'processing' | 'done' | 'returned' | 'expired' | 'error';
+  status: 'created' | 'waiting_input' | 'submitted' | 'processing' | 'done' | 'returned' | 'expired' | 'error' | 'patient_confirmed' | 'patient_rejected';
   return_reason?: string;
   return_count: number;
   h5_submitted_at?: number;
@@ -42,7 +42,7 @@ export interface TicketRecord {
 const STATUS_LABEL: Record<string, string> = {
   created: '待发送', waiting_input: '等待提交', submitted: '已提交',
   processing: 'AI 处理中', done: '已完成', returned: '已打回',
-  expired: '已过期', error: '处理出错',
+  expired: '已过期', error: '处理出错', patient_confirmed: '患者已确认', patient_rejected: '患者不认可',
 };
 
 async function h5BaseUrl(): Promise<string> {
