@@ -1312,7 +1312,7 @@ confirm判断:
           method: 'POST',
           headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.6-flash',
             response_format: { type: 'json_object' },
             max_tokens: 100,
             messages: [
@@ -1326,7 +1326,16 @@ confirm判断:
         const guardData = await guardRes.json() as any;
         if (!guardRes.ok) throw new Error(`Guard API ${guardRes.status}: ${JSON.stringify(guardData).slice(0,100)}`);
         const raw: string = guardData.choices?.[0]?.message?.content || '';
-        const parsed = raw ? JSON.parse(raw) : {};
+        // 兼容模型在 JSON 前加前缀文字（如 "Here is the JSON: {...}"）
+        let parsed: any = {};
+        if (raw) {
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            const jsonMatch = raw.match(/\{[\s\S]*\}/);
+            if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+          }
+        }
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
