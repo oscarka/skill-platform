@@ -1010,18 +1010,42 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
                  "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
-        with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
-            # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
-            try:
-                r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
-            except Exception:
-                pass
-            return _parse_sse_stream(r)
-    except urllib.error.HTTPError as e:
-        body_str = e.read().decode(errors="replace")
-        raise RuntimeError(f"AI API error {e.code}: {body_str}")
+    # 网络瞬时错误（SSL EOF、ConnectionReset）自动重试 2 次
+    last_err = None
+    for attempt in range(3):
+        try:
+            # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
+            with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
+                # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
+                try:
+                    r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
+                except Exception:
+                    pass
+                return _parse_sse_stream(r)
+        except urllib.error.HTTPError as e:
+            body_str = e.read().decode(errors="replace")
+            raise RuntimeError(f"AI API error {e.code}: {body_str}")
+        except (urllib.error.URLError, socket.error, OSError) as e:
+            last_err = e
+            err_str = str(e)
+            # SSL EOF / ConnectionReset / timeout → 可重试
+            if attempt < 2 and ('EOF' in err_str or 'ssl' in err_str.lower()
+                                or 'reset' in err_str.lower() or 'ConnectionReset' in err_str):
+                import time
+                wait = (attempt + 1) * 2  # 2s, 4s
+                print(f"[_do_ai_call] transient error (attempt {attempt+1}/3): {err_str[:80]}, retry in {wait}s", flush=True)
+                time.sleep(wait)
+                # 重建 Request（urllib.request.Request 被消费后不可重用）
+                req = urllib.request.Request(
+                    f"{base}/chat/completions",
+                    data=data,
+                    headers={"Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json"},
+                    method="POST",
+                )
+                continue
+            raise RuntimeError(f"AI API connection error: {err_str}") from e
+    raise RuntimeError(f"AI API failed after 3 attempts: {last_err}")
 
 
 def call_ai(messages: list, tools=None) -> dict:

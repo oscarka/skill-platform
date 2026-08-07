@@ -1220,6 +1220,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   let selectedSkillId: string | null = null;
   let selectedSkillName: string | null = null;
   let routeReason = '';
+  let routeConfidence: 'high' | 'low' = 'low';  // 默认 low，只有明确时才 high
 
   if (req.skill_id) {
     // 前端强制指定（优先级最高）
@@ -1228,6 +1229,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     selectedSkillId   = req.skill_id;
     selectedSkillName = (found as any)?.name || req.skill_id;
     routeReason = `前端强制指定 skill_id=${req.skill_id}`;
+    routeConfidence = 'high';  // 前端强制 = 用户已确认
     console.log(`[AgentService] skill_id forced by caller: ${selectedSkillId}`);
   } else {
     // Agent 自动路由
@@ -1235,11 +1237,12 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     selectedSkillId   = route.skillId;
     selectedSkillName = route.skillName;
     routeReason = route.reason;
+    routeConfidence = route.confidence;
 
     // ── Step 4.5: skill_suggest — 高置信度匹配时先介绍 skill，询问用户是否确认 ──
     console.log(`[AgentService] 📊 skill route: id=${route.skillId} confidence=${route.confidence} reason=${route.reason}`);
     if (route.skillId && route.skillName && route.confidence === 'high') {
-      console.log(`[AgentService] 💡 skill_suggest 蹄: skill=${route.skillName}(${route.skillId}) 高置信度匹配，向用户介绍并询问确认`);
+      console.log(`[AgentService] 💡 skill_suggest: skill=${route.skillName}(${route.skillId}) 高置信度匹配，向用户介绍并询问确认`);
       const skill = availableSkills.find(s => s.id === route.skillId);
       const skillDesc = skill?.description || '';
       const fromName = req.meta.from_name || '您';
@@ -1284,6 +1287,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     }
   }
 
+
   const skillRouteLog: SkillRouteLog = {
     available_skills: availableSkills,
     selected_id:      selectedSkillId,
@@ -1298,6 +1302,20 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     reason: routeReason,
     available_skills: availableSkills.map(s => ({ id: s.id, name: s.name, description: (s as any).description?.slice(0, 100) || '' })),
   });
+
+  // ── confidence=low 时不执行 skill，走 Gemini 直接回复 ──
+  // 只有前端强制指定 skill_id 或 skill_suggest 确认后才执行
+  if (routeConfidence === 'low' && selectedSkillId) {
+    console.log(`[AgentService] 📊 confidence=low, 不自动执行 skill「${selectedSkillName}」, 走 Gemini 直接回复`);
+    void appendTaskEvent(requestId, 'skill_skipped_low_confidence', {
+      skippedSkillId:   selectedSkillId,
+      skippedSkillName: selectedSkillName,
+      reason:           routeReason,
+      note:             'confidence=low → 走 handleHealthDirect 直接回复，不启动 sandbox skill',
+    });
+    selectedSkillId   = null;
+    selectedSkillName = null;
+  }
   void updateAgentTask(requestId, { status: 'executing', routeType: 'health', skillId: selectedSkillId || undefined });
 
   if (selectedSkillId && selectedSkillName) {
