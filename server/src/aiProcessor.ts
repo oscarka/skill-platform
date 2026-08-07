@@ -234,32 +234,19 @@ export async function processTicket(ticketId: string, opts?: { overrideModel?: s
     let rawResult: string;
     let aiLog: string = ''; // 用于记录实际发送给 AI 的内容（日志显示）
 
-    if (skill.skill_type === 'prompt') {
-      // prompt 类型：模板有 {{field}} 占位符，替换后直接调 LLM
+    if (skill.skill_type === 'prompt' || (skill.skill_type === 'plugin' && skill.prompt_template)) {
+      // prompt 和 plugin 类型：统一走 sandbox Agent Runner
+      // prompt 类型也需要 sandbox，因为 SKILL.md 可能包含代码执行指令（如 AI营养师）
+      // 与 agentService 保持一致，全部走 sandbox 环境
       if (!skill.prompt_template) throw new Error('Skill has no prompt template');
-      const finalPrompt = buildPromptFromTemplate(skill.prompt_template, inputs);
-      aiLog = `[system]你是 Skill「${skill.name}」的 AI 助手。\n\n[user]\n${finalPrompt}`;
-      const aiRes = await runAI(finalPrompt, {
-        model: skill.preferred_model || undefined,
-        fallback: skill.fallback_model || undefined,
-        systemPrompt: `你是 Skill「${skill.name}」的 AI 助手，请认真完成任务并给出专业、完整的回答。`,
-      });
-      rawResult = aiRes.text;
 
-    } else if (skill.skill_type === 'plugin' && skill.prompt_template) {
-      // plugin 类型：走 Agent Runner
-      // ── 路由策略 ────────────────────────────────────────────────────────
-      // 审核通过的 skill（status='approved'）+ 配置了 SANDBOX_SERVICE_URL
-      //   → 走持久沙箱 Service（热实例，冷启动 < 100ms）
-      // 其他（pending/rejected 或未配置 Service URL）
-      //   → 走 Cloud Run Job（原逻辑，保持不变）
       const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
       const isVerified = skill.status === 'approved' || skill.status === 'published';
       if (isVerified && sandboxServiceUrl) {
-        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Sandbox Service (model=${opts?.overrideModel || 'default'})`);
+        console.log(`[TicketAgent] skill=${skill.id} type=${skill.skill_type} status=${skill.status} → Sandbox Service (model=${opts?.overrideModel || 'default'})`);
         await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl, opts?.overrideModel);
       } else {
-        console.log(`[TicketAgent] skill=${skill.id} status=${skill.status} → Cloud Run Job (model=${opts?.overrideModel || 'default'})`);
+        console.log(`[TicketAgent] skill=${skill.id} type=${skill.skill_type} status=${skill.status} → Cloud Run Job (model=${opts?.overrideModel || 'default'})`);
         await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs, opts?.overrideModel);
       }
       // Agent 异步运行，callback 会写回结果并更新工单状态
