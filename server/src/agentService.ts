@@ -1298,9 +1298,16 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 - confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
   或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
 
-直接输出 JSON，不要任何其他内容：`;
+输出示例：
+- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
 
-      const guardUserMsg = `请只返回 JSON，格式：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
+只输出 JSON，不输出任何其他文字：`;
+
+      const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
 
       let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
 
