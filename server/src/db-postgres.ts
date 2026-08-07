@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   expires_at      BIGINT NOT NULL,
   created_at      BIGINT NOT NULL,
   updated_at      BIGINT NOT NULL,
+  delivery_info   TEXT,
   FOREIGN KEY (skill_id) REFERENCES skills(id)
 );
 
@@ -372,6 +373,8 @@ export async function initDb(): Promise<void> {
       // tickets wiki 确认字段
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_confirmed_at BIGINT DEFAULT NULL`,
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_declined INTEGER NOT NULL DEFAULT 0`,
+      // delivery_info: 存储 callback_url + delivery，AI 处理完后通知用户
+      `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }

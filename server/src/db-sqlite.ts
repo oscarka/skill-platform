@@ -182,7 +182,7 @@ export function initDb(): void {
     // 为已有表添加 check_count列
     `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
     // 为已有 tickets 表添加 delivery_info 列（存储 callback_url + delivery 供 AI 处理完后通知用户）
-    `ALTER TABLE tickets ADD COLUMN delivery_info TEXT`,
+    `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }
