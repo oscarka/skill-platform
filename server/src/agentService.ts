@@ -1147,6 +1147,28 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     void updateAgentTask(requestId, { status: 'executing', routeType: 'chat' });
     const profile = await loadAgentProfile();
     const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
+
+    // ── 任务4: 抢占检查 — 发送前看是否有更新的用户任务 ──────────────────────
+    const userId = req.meta.user_id;
+    const newerTask = await db.getAsync<any>(
+      `SELECT id FROM agent_tasks
+       WHERE session_id = ? AND id != ? AND started_at > ?
+         AND status IN ('pending','routing','executing')
+       ORDER BY started_at DESC LIMIT 1`,
+      [req.session_id, requestId, taskStartMs]
+    ).catch(() => null);
+
+    if (newerTask) {
+      // 有更新的消息正在处理，放弃发送此次回复
+      console.log(`[AgentService] Preempted by newer task ${newerTask.id}, skipping reply for ${requestId}`);
+      void appendTaskEvent(requestId, 'reply_preempted', {
+        reason: '用户有更新的消息正在处理，跳过本次回复',
+        newer_task_id: newerTask.id,
+      });
+      void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: '[已抢占，未发送]', endedAt: Date.now(), durationMs: Date.now() - taskStartMs });
+      return { ...chatResult, reply: '' };  // 空回复，不发送
+    }
+
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: chatResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length, reply: chatResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
