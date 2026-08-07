@@ -128,6 +128,10 @@ function backgroundPostLog(userId: string, userMsg: string, aiReply: string): vo
 /**
  * 后台触发 LLMWiki Wiki sync Pipeline（Skill 完成后调用）
  */
+export function triggerWikiSyncPublic(userId: string, reason: string): void {
+  triggerWikiSync(userId, reason);
+}
+
 function triggerWikiSync(userId: string, reason: string): void {
   if (!LLMWIKI_BASE || !userId) {
     console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
@@ -251,6 +255,8 @@ const pendingRequests = new Map<string, {
   delivery:     { app: string; recipient: string; action: string };
   userId:       string;   // LLMWiki 用户 ID（用于日志回写和 sync）
   userContent:  string;   // 原始用户消息（用于写日志时配对）
+  skillName:    string;   // Task 5: skill 名称（发链接消息时显示）
+  fromName:     string;   // Task 5: 用户称呼
 }>();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -773,8 +779,10 @@ async function handleHealthSkill(
     callbackUrl:  req.callback_url || '',
     sessionId:    session_id,
     delivery,
-    userId:       meta.user_id || '',      // LLMWiki: 用于日志回写
-    userContent:  content,                 // LLMWiki: 原始用户消息
+    userId:       meta.user_id || '',
+    userContent:  content,
+    skillName:    skillName || '',          // Task 5: 发链接时显示
+    fromName:     meta.from_name || '',     // Task 5: 称呼
   });
 
   const recentHistory = history.slice(-20)
@@ -871,45 +879,56 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
   }
   pendingRequests.delete(requestId);
 
-  const { callbackUrl, sessionId, delivery, userId, userContent } = pending;
+  const { callbackUrl, sessionId, delivery, userId, userContent, skillName: pendingSkillName, fromName: pendingFromName } = pending;
   const agentOutput: string = (jobResult?.output || '（Agent 未返回内容）').trim();
+
+  // ── Task 5: 存完整结果到 agent_tasks，生成查看链接 ──
+  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || '';
+  const resultViewUrl = PUBLIC_BASE ? `${PUBLIC_BASE}/skill-result/${requestId}` : '';
+  // 构建用户收到的消息：简短说明 + 链接（无 PUBLIC_BASE 时降级为前200字摘要）
+  const replyToUser = resultViewUrl
+    ? `${pendingFromName || '您'}好，您的${pendingSkillName ? `「${pendingSkillName}」` : ''}分析已完成 🎉\n\n请点击查看完整结果（可在页面确认是否将建议纳入健康档案）：\n${resultViewUrl}`
+    : agentOutput.slice(0, 200) + (agentOutput.length > 200 ? '\n\n（如需查看完整报告，请联系顾问）' : '');
 
   const callbackBody = {
     request_id: requestId,
     session_id: sessionId,
     status:     'done',
-    reply:      agentOutput,
+    reply:      replyToUser,  // Task 5: 发链接而非全文
     delivery,
     reasoning:  '健康 Skill 执行完成',
   };
 
   console.log(`[AgentService] Job done for ${requestId}, output length=${agentOutput.length}`);
 
-  // ── 更新 agent_task 为完成状态（含完整 transcript）──
+  // ── 记录事件 ──
   const transcriptJson = jobResult?.transcript ? JSON.stringify(jobResult.transcript) : null;
-  void updateAgentTask(requestId, {
-    status: 'done',
-    replyContent: agentOutput.slice(0, 500),
-    endedAt: Date.now(),
-    ...(transcriptJson ? { jobTranscript: transcriptJson } : {}),
-  });
   void appendTaskEvent(requestId, 'skill_done', {
     outputLen: agentOutput.length,
     output_preview: agentOutput.slice(0, 400),
   });
   void appendTaskEvent(requestId, 'reply_sent', {
-    reply: agentOutput.slice(0, 600),
-    replyLen: agentOutput.length,
+    reply: replyToUser.slice(0, 600),
+    replyLen: replyToUser.length,
     channel: delivery.app,
     recipient: delivery.recipient,
     delivery_action: delivery.action,
     cua_url: process.env.CUA_SEND_URL || '',
   });
 
-  // ── LLMWiki: Skill 完成后写日志 + 触发 sync + 重置计数器 ──
+  // ── Task 6: Skill 完成后不立即 wiki sync，等用户点确认 ──
+  // 写日志（保留），但不触发 sync
   backgroundPostLog(userId, userContent, agentOutput);
-  triggerWikiSync(userId, `skill_complete:${requestId}`);
-  syncCounters.set(userId, 0); // Skill sync 已触发，重置30轮计数器
+  // triggerWikiSync 移到用户点「认可并执行」后才调用
+  // 把 output + userId 存入 agent_tasks 供公开结果页使用
+  void updateAgentTask(requestId, {
+    status: 'done',
+    replyContent: agentOutput,   // 存完整 output（无截断）供结果页展示
+    endedAt: Date.now(),
+    ...(transcriptJson ? { jobTranscript: transcriptJson } : {}),
+  });
+  // 重置计数器（Skill 触发后重置，wiki sync 待用户确认）
+  syncCounters.set(userId, 0);
 
   if (!callbackUrl) {
     // /orch/ingest 路径没有 callbackUrl，用 CUA_SEND_URL 直接发送

@@ -12,11 +12,14 @@ import McpConfigs from './pages/McpConfigs';
 import OAuthManager from './pages/OAuthManager';
 import AgentProfile from './pages/AgentProfile';
 import AgentLogs from './pages/AgentLogs';
+import SkillResult from './pages/SkillResult';
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* 公开结果查看页（无需登录，用户从微信点链接进来）*/}
+        <Route path="/skill-result/:requestId" element={<SkillResult />} />
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/skills" replace />} />
           <Route path="skills" element={<SkillList />} />

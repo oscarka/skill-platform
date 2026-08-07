@@ -261,6 +261,90 @@ agentRouter.post('/cua-step/:requestId', async (req, res) => {
   });
 });
 
+// ─── GET /api/v1/agent/skill-result/:requestId — 公开结果查看（无需登录）────
+// Task 5: 用户点链接查看 skill 完整结果
+
+agentRouter.get('/skill-result/:requestId', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const task = await db.getAsync<any>(
+      `SELECT id, session_id, reply_content, status, route_type, skill_id, ended_at, started_at
+       FROM agent_tasks WHERE id=?`,
+      [requestId]
+    );
+    if (!task) return res.status(404).json({ error: 'not found' });
+    if (task.status !== 'done') return res.status(202).json({ status: task.status, message: '分析尚未完成' });
+
+    // 查 wiki 确认状态（存在 agent_tasks 的 reply_content 字段，从另一张表查更合适但这里暂存在内存中）
+    // 简单方案：在 task events 里找 wiki_confirmed 事件
+    const events = await db.allAsync<any>(
+      `SELECT event_type, payload, ts FROM agent_task_events WHERE task_id=? ORDER BY ts ASC`,
+      [requestId]
+    );
+    const confirmedEvent = events.find((e: any) => e.event_type === 'wiki_confirmed');
+    const declinedEvent  = events.find((e: any) => e.event_type === 'wiki_declined');
+
+    // 找 skill_id 对应的 skill 名称
+    const skill = task.skill_id ? await db.getAsync<any>('SELECT name, description FROM skills WHERE id=?', [task.skill_id]) : null;
+
+    res.json({
+      request_id:   requestId,
+      status:       task.status,
+      skill_name:   skill?.name || '',
+      output:       task.reply_content || '',  // 完整 skill output
+      ended_at:     task.ended_at,
+      wiki_confirmed: !!confirmedEvent,
+      wiki_declined:  !!declinedEvent,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── POST /api/v1/agent/skill-result/:requestId/wiki-confirm ─────────────────
+// Task 6: 用户点「认可并执行」→ 触发 wiki sync
+
+agentRouter.post('/skill-result/:requestId/wiki-confirm', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { action } = req.body;  // 'confirm' | 'decline'
+
+    const task = await db.getAsync<any>(
+      `SELECT id, session_id, reply_content, status FROM agent_tasks WHERE id=?`,
+      [requestId]
+    );
+    if (!task) return res.status(404).json({ error: 'not found' });
+    if (task.status !== 'done') return res.status(400).json({ error: '任务未完成' });
+
+    if (action === 'confirm') {
+      // 触发 wiki sync
+      void appendTaskEvent(requestId, 'wiki_confirmed', {
+        confirmed_at: Date.now(),
+        note: '用户点击「认可并执行」，触发 wiki 同步',
+      });
+
+      // 从 session_id 拿 userId（session_id 格式: wechat_{userId} 或直接是 userId）
+      const userId = task.session_id?.replace(/^wechat_/, '') || '';
+      if (userId) {
+        const { triggerWikiSyncPublic } = await import('../agentService');
+        triggerWikiSyncPublic(userId, `user_confirmed:${requestId}`);
+      }
+
+      res.json({ success: true, message: 'wiki 同步已触发' });
+    } else if (action === 'decline') {
+      void appendTaskEvent(requestId, 'wiki_declined', {
+        declined_at: Date.now(),
+        note: '用户点击「取消」，不写入 wiki',
+      });
+      res.json({ success: true, message: '已记录，不写入 wiki' });
+    } else {
+      res.status(400).json({ error: 'action must be confirm or decline' });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── POST /api/v1/agent/chat ──────────────────────────────────────────────────
 
 agentRouter.post('/chat', async (req, res) => {

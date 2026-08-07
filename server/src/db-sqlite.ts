@@ -158,6 +158,10 @@ export function initDb(): void {
       created_at          INTEGER NOT NULL,
       updated_at          INTEGER NOT NULL
     )`,
+    // Ticket: wiki 确认时间戳（NULL=未确认，>0=用户点了「认可并执行」）
+    `ALTER TABLE tickets ADD COLUMN wiki_confirmed_at INTEGER DEFAULT NULL`,
+    // Ticket: wiki 取消标记（用户点了「取消」）
+    `ALTER TABLE tickets ADD COLUMN wiki_declined INTEGER NOT NULL DEFAULT 0`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }
