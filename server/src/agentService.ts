@@ -580,9 +580,9 @@ async function routeSkill(
   availableSkills: { id: string; name: string; description: string }[],
   history: { role: string; content: string }[],
   apiKey: string,
-): Promise<{ skillId: string | null; skillName: string | null; reason: string }> {
+): Promise<{ skillId: string | null; skillName: string | null; reason: string; confidence: 'high' | 'low' }> {
   if (!availableSkills.length) {
-    return { skillId: null, skillName: null, reason: '无可用 skill，直接 AI 回复' };
+    return { skillId: null, skillName: null, reason: '无可用 skill，直接 AI 回复', confidence: 'low' };
   }
 
   // 描述截断 80 字，避免 prompt 过长
@@ -599,7 +599,11 @@ async function routeSkill(
 可用 skill 列表：
 ${skillList}
 
-只返回 JSON，不要有其他任何内容：{"skill_id": "xxx" 或 null, "skill_name": "xxx" 或 null, "reason": "一句话理由"}`;
+同时判断用户意图是否明确到可以主动推送 skill 给用户确认（confidence）：
+- "high"：用户明确表达了对这个 skill 的需求（如："帮我制定运动计划"、"分析一下我的血检报告"），可以主动介绍 skill 并询问是否使用
+- "low"：用户只是问了健康问题，但没有明确要求使用某项服务/技能（如："我最近血糖有点高"），应该直接 AI 回复，不要主动推销 skill
+
+只返回 JSON，不要有其他任何内容：{"skill_id": "xxx" 或 null, "skill_name": "xxx" 或 null, "confidence": "high" 或 "low", "reason": "一句话理由"}`;
 
   try {
     const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: contextMsg }], apiKey, 1024);
@@ -614,15 +618,16 @@ ${skillList}
     const parsed   = JSON.parse(result.slice(jsonStart, jsonEnd + 1));
     const skillId   = parsed.skill_id   || null;
     const skillName = parsed.skill_name || null;
+    const confidence: 'high' | 'low' = parsed.confidence === 'high' ? 'high' : 'low';
     if (skillId && !availableSkills.find(s => s.id === skillId)) {
       console.warn(`[AgentService] skill route returned unknown id=${skillId}, falling back to null`);
-      return { skillId: null, skillName: null, reason: '路由返回了未知 skill，降级直接回复' };
+      return { skillId: null, skillName: null, reason: '路由返回了未知 skill，降级直接回复', confidence: 'low' };
     }
-    console.log(`[AgentService] Skill route → id=${skillId} name=${skillName} reason=${parsed.reason}`);
-    return { skillId, skillName, reason: parsed.reason || '' };
+    console.log(`[AgentService] Skill route → id=${skillId} name=${skillName} confidence=${confidence} reason=${parsed.reason}`);
+    return { skillId, skillName, reason: parsed.reason || '', confidence };
   } catch (err) {
     console.warn('[AgentService] Skill route failed, no skill selected:', err);
-    return { skillId: null, skillName: null, reason: '路由失败，降级直接回复' };
+    return { skillId: null, skillName: null, reason: '路由失败，降级直接回复', confidence: 'low' };
   }
 }
 
@@ -1174,6 +1179,51 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     selectedSkillId   = route.skillId;
     selectedSkillName = route.skillName;
     routeReason = route.reason;
+
+    // ── Step 4.5: skill_suggest — 高置信度匹配时先介绍 skill，询问用户是否确认 ──
+    if (route.skillId && route.skillName && route.confidence === 'high') {
+      const skill = availableSkills.find(s => s.id === route.skillId);
+      const skillDesc = skill?.description || '';
+      const fromName = req.meta.from_name || '您';
+
+      // 组建介绍消息（简洁，不推销）
+      const suggestMsg = `${fromName}，根据您的需求，我们有一项「${route.skillName}」服务可能适合您。\n\n${skillDesc ? `📋 ${skillDesc.slice(0, 100)}${skillDesc.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？回复「是」或「好的」即可，我来为您准备。`;
+
+      void appendTaskEvent(requestId, 'skill_suggest', {
+        skillId: route.skillId,
+        skillName: route.skillName,
+        reason: route.reason,
+        suggestMsg,
+      });
+
+      void appendTaskEvent(requestId, 'reply_sent', {
+        replyLen: suggestMsg.length,
+        reply: suggestMsg.slice(0, 300),
+        channel: delivery.app,
+        recipient: delivery.recipient,
+        note: 'skill_suggest',
+      });
+
+      const endMs = Date.now();
+      void updateAgentTask(requestId, {
+        status: 'done',
+        routeType: 'skill_suggest',
+        skillId: route.skillId,
+        replyContent: suggestMsg.slice(0, 500),
+        endedAt: endMs,
+        durationMs: endMs - taskStartMs,
+      });
+
+      // 返回 reply 给调用方（agentRoutes 负责 CUA 发送，与 chat 路径相同）
+      return {
+        request_id:  requestId,
+        status:      'done',
+        reply:       suggestMsg,
+        delivery,
+        reasoning:   `Skill「${route.skillName}」高置信度匹配，询问用户确认`,
+        route_type:  'skill_suggest',
+      } as any;
+    }
   }
 
   const skillRouteLog: SkillRouteLog = {
