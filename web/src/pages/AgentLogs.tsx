@@ -189,8 +189,9 @@ function AgentTasksPanel() {
     if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
     if (!selected?.id) return;
 
-    // Only connect SSE for non-done tasks (or always for initial load)
     const isDone = selected.status === 'done' || selected.status === 'failed';
+    // Ticket tasks keep SSE alive after done — ticket_result_sent arrives later
+    const isTicketTask = selected.route_type === 'ticket_created' || selected.route_type === 'ticket_reused';
 
     const es = new EventSource(`/api/v1/agent/tasks/${selected.id}/stream`);
     sseRef.current = es;
@@ -212,19 +213,24 @@ function AgentTasksPanel() {
     };
 
     es.onerror = () => {
-      // Reconnect handled automatically by EventSource, but close if task is done
-      if (isDone && sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+      // Close on error only if task is done AND not a ticket task
+      if (isDone && !isTicketTask && sseRef.current) { sseRef.current.close(); sseRef.current = null; }
     };
 
-    // Also poll task status every 5s to update header (status, duration etc)
+    // Poll task status every 5s to update header (status, duration etc)
     const statusPoll = setInterval(async () => {
       try {
         const res = await fetch(`/api/v1/agent/tasks/${selected.id}`);
         const data = await res.json();
         setSelected(data);
-        // If task is done, close SSE
-        if (data.status === 'done' || data.status === 'failed') {
+        // Ticket tasks: keep SSE even after done (waiting for ticket_result_sent)
+        const taskIsTicket = data.route_type === 'ticket_created' || data.route_type === 'ticket_reused';
+        if ((data.status === 'done' || data.status === 'failed') && !taskIsTicket) {
+          // Non-ticket done tasks: close SSE and stop polling
           if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+          clearInterval(statusPoll);
+        } else if (data.status === 'done' && taskIsTicket) {
+          // Ticket done tasks: stop STATUS polling but keep SSE alive
           clearInterval(statusPoll);
         }
       } catch { /* ignore */ }
@@ -241,6 +247,40 @@ function AgentTasksPanel() {
     const t = setInterval(loadTasks, 8000);
     return () => clearInterval(t);
   }, [filter]);
+
+  // Event polling fallback for ticket tasks — catches ticket_result_sent if SSE dropped
+  const eventsRef = useRef<any[]>(events);
+  useEffect(() => { eventsRef.current = events; }, [events]);
+
+  useEffect(() => {
+    if (!selected?.id) return;
+    const isTicketTask = selected.route_type === 'ticket_created' || selected.route_type === 'ticket_reused';
+    if (!isTicketTask) return;
+
+    const poll = setInterval(async () => {
+      // Stop if result already in events
+      if (eventsRef.current.some((e: any) => e.event_type === 'ticket_result_sent')) {
+        clearInterval(poll);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/v1/agent/tasks/${selected.id}`);
+        const data = await res.json();
+        if (data.events?.length) {
+          setEvents(prev => {
+            const prevIds = new Set(prev.map((e: any) => e.id));
+            const newEvs = data.events.filter((e: any) => !prevIds.has(e.id));
+            return newEvs.length ? [...prev, ...newEvs] : prev;
+          });
+          if (data.events.some((e: any) => e.event_type === 'ticket_result_sent')) {
+            clearInterval(poll);
+          }
+        }
+      } catch { /* ignore */ }
+    }, 10000);
+
+    return () => clearInterval(poll);
+  }, [selected?.id, selected?.route_type]);
 
   const fmtTime = (ts: any) => ts ? new Date(Number(ts)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
   const fmtTimeShort = (ts: any) => ts ? new Date(Number(ts)).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
