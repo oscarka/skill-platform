@@ -311,6 +311,39 @@ async function getSetting(key: string): Promise<string> {
   return row?.value || '';
 }
 
+// Gemini OpenAI-compatible endpoint
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
+async function getGeminiKey(): Promise<string> {
+  return (await getSetting('gemini_api_key')) || process.env.GEMINI_API_KEY || '';
+}
+
+/** 根据模型名称选择正确的 API key + base URL
+ *  - gemini-* → Gemini key + generativelanguage endpoint
+ *  - 其他     → Doubao/DeepSeek key + base
+ */
+async function resolveApiCreds(effectiveModel: string): Promise<{
+  aiKey: string; aiBase: string; fallbackKey: string; fallbackBase: string;
+}> {
+  const isGemini = effectiveModel.toLowerCase().startsWith('gemini');
+  if (isGemini) {
+    const geminiKey = await getGeminiKey();
+    const [fallbackKey, fallbackBase] = await Promise.all([
+      getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+      getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+    ]);
+    return { aiKey: geminiKey, aiBase: GEMINI_BASE_URL, fallbackKey, fallbackBase };
+  } else {
+    const [aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
+      getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
+      getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
+      getSetting('doubao_api_key').then(k => k ? getSetting('deepseek_api_key') : getSetting('doubao_api_key')),
+      getSetting('doubao_base_url').then(u => u ? getSetting('deepseek_base_url') : getSetting('doubao_base_url')),
+    ]);
+    return { aiKey, aiBase, fallbackKey, fallbackBase };
+  }
+}
+
 // ─── Submit approved-skill ticket to Persistent Sandbox Service ───────────────
 // 审核通过的 skill 走这条路径，调用常驻热实例 Service，消灭冷启动
 async function submitTicketToSandboxService(
@@ -388,8 +421,10 @@ async function submitTicketToSandboxService(
   const callbackUrl = svcUrl ? `${svcUrl}/api/tickets/${ticketId}/agent-callback` : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  const effectiveModel = overrideModel || skill.preferred_model || model || 'doubao-1-5-pro-32k-250115';
-  console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} setting=${model} → effective=${effectiveModel}`);
+  // model: overrideModel > skill.preferred_model > 默认 gemini-3.6-flash（与渠道保持一致）
+  const effectiveModel = overrideModel || skill.preferred_model || 'gemini-3.6-flash';
+  const { aiKey, aiBase, fallbackKey, fallbackBase } = await resolveApiCreds(effectiveModel);
+  console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'}`);
 
   const { jobId } = await submitToSandboxService(serviceUrl, {
     skillId,
@@ -498,14 +533,13 @@ async function submitTicketAgentJob(
     : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  // skillMdB64 已废弃：runner.py 改从 DB 按 SKILL_ID 读取 prompt_template
-
-  const effectiveModel = overrideModel || skill.preferred_model || model || 'doubao-1-5-pro-32k-250115';
-  console.log(`[TicketAgent] model resolution: override=${overrideModel} preferred=${skill.preferred_model} setting=${model} → effective=${effectiveModel}`);
+  // model: overrideModel > skill.preferred_model > 默认 gemini-3.6-flash（与渠道保持一致）
+  const effectiveModel = overrideModel || skill.preferred_model || 'gemini-3.6-flash';
+  const { aiKey, aiBase, fallbackKey, fallbackBase } = await resolveApiCreds(effectiveModel);
+  console.log(`[TicketAgent] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'}`);
 
   const { executionId } = await submitSandboxJob({
     skillId,
-    // skillMd 已废弃，runner.py 从 DB 读
     userInputs:       testInputs,
     model:            effectiveModel,
     aiKey,
@@ -517,7 +551,7 @@ async function submitTicketAgentJob(
     mcpConfigs:       mcpConfigsJson,
     oauthTokens,
     caseCount:        1,
-    ticketMode:       true,   // 工单模式：runner.py 跳过 Evaluator，返回 Executor 实际输出
+    ticketMode:       true,
   });
 
   console.log(`[TicketAgent] Cloud Run Job submitted for ticket ${ticketId}: ${executionId}`);
