@@ -568,8 +568,8 @@ export default function TicketDetail() {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: '.85rem', color: 'var(--gray-600)' }}>
           <div><span style={{ color: 'var(--gray-400)' }}>Token：</span><span className="font-mono" style={{ fontSize: '.75rem' }}>{ticket.token?.slice(0, 16)}…</span></div>
           <div><span style={{ color: 'var(--gray-400)' }}>备注：</span>{ticket.notes || '—'}</div>
-          <div><span style={{ color: 'var(--gray-400)' }}>创建时间：</span>{fmtDate(ticket.created_at)}</div>
-          <div><span style={{ color: 'var(--gray-400)' }}>更新时间：</span>{fmtDate(ticket.updated_at)}</div>
+          <div><span style={{ color: 'var(--gray-400)' }}>创建时间：</span>{formatDate(ticket.created_at)}</div>
+          <div><span style={{ color: 'var(--gray-400)' }}>更新时间：</span>{formatDate(ticket.updated_at)}</div>
         </div>
       </div>
     </div>
