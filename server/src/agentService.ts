@@ -1321,20 +1321,23 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         const durationMs = Date.now() - t0;
         // strip markdown code block wrappers (```json ... ```)，再用 [\s\S]*? 匹配多行 JSON
         const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-        const jsonMatch = cleanRaw.match(/\{[\s\S]*?\}/);
+        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);  // 贪婪匹配，取最完整的JSON对象
         const parsed = JSON.parse(jsonMatch?.[0] || '{}');
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
         };
-        console.log(`[SkillGuard] 🤔 判断结果 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw=${raw.trim().slice(0,100)}`);
+        console.log(`[SkillGuard] 🤔 判断结果 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms)`);
+        console.log(`[SkillGuard] raw全文: ${raw.trim()}`);
         void appendTaskEvent(requestId, 'skill_guard_judgment', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
           interest: guardResult.interest,
           confirm: guardResult.confirm,
           durationMs,
-          rawResult: raw.trim().slice(0, 200),
+          rawResult: raw.trim().slice(0, 500),
+          cleanRaw: cleanRaw.slice(0, 300),
+          jsonMatch: jsonMatch?.[0]?.slice(0, 200) || 'null',
         });
       } catch (e: any) {
         console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
