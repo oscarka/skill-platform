@@ -1283,35 +1283,25 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
         .join('\n');
 
-      const guardSystemPrompt = `你是一个对话状态判断器，不做其他任何事。
+      // 守卫 AI 判断：系统 prompt 最简，上下文全部放到 user message，避免长 prompt 导致模型不输出 JSON
+      const guardSystemPrompt = `你是一个 JSON 判断器。根据对话上下文，判断用户意图并输出 JSON。不要输出任何其他内容。`;
 
-背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务，原话是：
-「${(activeGuard.suggest_msg || '').slice(0, 200)}」
+      const guardUserMsg = `输出纯 JSON，格式: {"interest":"yes或no","confirm":"yes或no或unclear"}
 
-从推荐到现在的对话记录：
-${historyAfterSuggest || '（推荐后暂无其他对话）'}
+问: AI推荐了「${activeGuard.skill_name}」服务。用户说「${req.content}」。
 
-用户最新消息：「${req.content}」
+interest判断:
+- yes = 未明确拒绝
+- no = 明确拒绝(「不用了」「算了」)
 
-请判断以下两个维度：
-1. interest（感兴趣程度）：用户是否仍然对「${activeGuard.skill_name}」感兴趣？
-   - yes：用户没有明确拒绝，还在了解或考虑
-   - no：用户明确表示不需要/算了/不用了/或已完全转移到无关话题
+confirm判断:
+- yes = 有明确启动意图,如「帮我分析」「帮我做」「帮我开始」「开始吧」「确认」「我要用」,或「好/行/可以+动词」
+- no = 明确不用(「不用了」「不需要」)
+- unclear = 仅单独「好的」「嗯」「行」等模糊语,或正在提问
 
-2. confirm（明确确认）：用户是否明确表达了要开始使用「${activeGuard.skill_name}」服务？
-   - yes：用户有启动意图，包括：
-     · 带动作词：「帮我分析」「开始吧」「帮我做」「帮我看看」「可以做」「帮我开始」
-     · 带肯定词+动作：「好的，帮我...」「行，开始...」「可以，帮我...」
-     · 直接确认：「确认」「确认使用」「我要用」「用这个」「就用这个」
-   - no：用户明确表示不用（「不用了」「算了」「不需要」）
-   - unclear：仅以下情况才判 unclear：
-     · 单独的模糊词：「好的」「嗯」「行」「知道了」「收到」（没有后续动作词）
-     · 正在提问服务详情（含问号或疑问句）
+重要: 「好的，帮我...」=yes、「开始吧」=yes、「帮我开始分析吧」=yes
 
-重要：「好的，帮我...」「行，帮我...」「可以，开始...」一律判 confirm=yes，不要判 unclear！
-只返回 JSON，不要有任何其他内容`;
-
-      const guardUserMsg = `请基于以上背景，只返回 JSON：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
+仅输出 JSON:`;
 
       let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
 
