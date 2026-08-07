@@ -186,7 +186,7 @@ function AgentTasksPanel() {
   // Auto-refresh selected task when executing
   useEffect(() => {
     if (!selected) return;
-    if (selected.status === 'executing' || selected.status === 'routing') {
+    if (selected.status === 'executing' || selected.status === 'routing' || selected.status === 'pending' || !selected.status) {
       const t = setInterval(() => loadTaskDetail(selected.id), 3000);
       setPolling(t);
       return () => clearInterval(t);
