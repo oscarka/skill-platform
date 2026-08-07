@@ -1283,64 +1283,46 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
         .join('\n');
 
-      // 守卫 AI 判断：系统 prompt 最简，上下文全部放到 user message，避免长 prompt 导致模型不输出 JSON
-      const guardSystemPrompt = `你是一个 JSON 判断器。根据对话上下文，判断用户意图并输出 JSON。不要输出任何其他内容。`;
+      // 守卫 AI 判断：用 callGeminiMessages（项目统一方式），historyAfterSuggest 放在 system prompt 提供完整上下文
+      const guardSystemPrompt = `你是一个对话状态判断器，只输出 JSON，不输出其他任何内容。
 
-      const guardUserMsg = `输出纯 JSON，格式: {"interest":"yes或no","confirm":"yes或no或unclear"}
+背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务。
 
-问: AI推荐了「${activeGuard.skill_name}」服务。用户说「${req.content}」。
+对话记录（供参考）：
+${historyAfterSuggest || '（推荐后暂无其他对话）'}
 
-interest判断:
-- yes = 未明确拒绝
-- no = 明确拒绝(「不用了」「算了」)
+用户最新消息：「${req.content}」
 
-confirm判断:
-- yes = 有明确启动意图,如「帮我分析」「帮我做」「帮我开始」「开始吧」「确认」「我要用」,或「好/行/可以+动词」
-- no = 明确不用(「不用了」「不需要」)
-- unclear = 仅单独「好的」「嗯」「行」等模糊语,或正在提问
+判断两个维度并输出 JSON：
+- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
+- confirm: "yes"（有启动意图，如「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以 + 动作词」）
+  "no"（明确拒绝），"unclear"（仅单独「好的」「嗯」等无动作词，或在提问）
 
-重要: 「好的，帮我...」=yes、「开始吧」=yes、「帮我开始分析吧」=yes
+只输出 JSON，格式为：{"interest":"yes","confirm":"yes"}`;
 
-仅输出 JSON:`;
+      const guardUserMsg = `{"interest": "`;
 
       let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
 
       try {
         const t0 = Date.now();
-        // 直接 fetch + response_format json_object，强制 Gemini 只输出 JSON，不走 callGeminiMessages 的 tool-call 循环
-        const guardRes = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'gemini-3.6-flash',
-            response_format: { type: 'json_object' },
-            max_tokens: 100,
-            messages: [
-              { role: 'system', content: guardSystemPrompt },
-              { role: 'user',   content: guardUserMsg },
-            ],
-          }),
-          signal: AbortSignal.timeout(15_000),
-        });
+        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 100);
         const durationMs = Date.now() - t0;
-        const guardData = await guardRes.json() as any;
-        if (!guardRes.ok) throw new Error(`Guard API ${guardRes.status}: ${JSON.stringify(guardData).slice(0,100)}`);
-        const raw: string = guardData.choices?.[0]?.message?.content || '';
-        // 兼容模型在 JSON 前加前缀文字（如 "Here is the JSON: {...}"）
+        // 支持模型输出 {"interest":...} 或前缀文字 + {"interest":...}
+        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
         let parsed: any = {};
-        if (raw) {
-          try {
-            parsed = JSON.parse(raw);
-          } catch {
-            const jsonMatch = raw.match(/\{[\s\S]*\}/);
-            if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-          }
+        // 方式1: 模型输出了完整 JSON（如 {"interest":"yes","confirm":"yes"}）
+        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* continue */ } }
+        // 方式2: 模型续写了 guardUserMsg 的 {"interest": " 前缀（如 yes","confirm":"yes"}）
+        if (!['yes','no'].includes(parsed.interest)) {
+          try { parsed = JSON.parse('{"interest": "' + cleanRaw); } catch { /* keep {} */ }
         }
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
         };
-        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw=${raw.slice(0,80)}`);
+        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0,100)}"`);
         void appendTaskEvent(requestId, 'skill_guard_judgment', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
