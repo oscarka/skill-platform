@@ -173,10 +173,13 @@ export function initDb(): void {
       suggest_ts   INTEGER NOT NULL,
       status       TEXT NOT NULL DEFAULT 'active',
       close_reason TEXT,
+      check_count  INTEGER NOT NULL DEFAULT 0,
       created_at   INTEGER NOT NULL,
       expires_at   INTEGER NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status)`,
+    // 为已有表添加 check_count列
+    `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

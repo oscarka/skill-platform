@@ -340,7 +340,8 @@ CREATE TABLE IF NOT EXISTS skill_confirm_guards (
   suggest_msg     TEXT,                   -- agent 当时发的推荐话术
   suggest_ts      BIGINT NOT NULL,        -- skill_suggest 发出时刻（用于截取后续对话）
   status          TEXT NOT NULL DEFAULT 'active',  -- active | closed
-  close_reason    TEXT,                   -- user_confirmed | user_declined | expired | switched_skill
+  close_reason    TEXT,                   -- user_confirmed | user_declined | expired | switched_skill | round_limit
+  check_count     INTEGER NOT NULL DEFAULT 0,      -- 已检查轮数
   created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   expires_at      BIGINT NOT NULL         -- created_at + 30分钟
 );

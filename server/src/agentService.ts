@@ -775,14 +775,90 @@ async function handleHealthSkill(
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
   const fromName = meta.from_name || '您';
 
+  // ── 检查 skill 类型：external → 工单流程，internal → 直接 sandbox ──────────
+  const skillRow = await db.getAsync<any>('SELECT * FROM skills WHERE id=?', [skillId]);
+  const isExternal = skillRow?.type === 'external';
+
+  if (isExternal) {
+    // ── External Skill：创建工单，预填写信息，发 h5 链接给用户 ────────────────
+    console.log(`[AgentService] 📋 External skill「${skillName}」→ 创建工单`);
+
+    // 构建预填充信息（从 wiki/profile 提取）
+    const patientName = meta.from_name || null;
+    const prefilledNotes = [
+      notes ? `【备注】${notes}` : '',
+      wikiCtx?.user_profile ? `【用户画像】${wikiCtx.user_profile.slice(0, 300)}` : '',
+      content ? `【用户问题】${content}` : '',
+    ].filter(Boolean).join('\n\n').slice(0, 800) || null;
+
+    // 创建 ticket
+    const ticketId = require('crypto').randomUUID();
+    const token = require('crypto').randomUUID().replace(/-/g, '');
+    const now = Date.now();
+    const expiresAt = now + 3 * 24 * 60 * 60 * 1000; // 3天有效
+
+    await db.runAsync(
+      `INSERT INTO tickets
+        (id, skill_id, token, title, patient_name, notes,
+         created_by, status, return_count, expires_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [ticketId, skillId, token,
+       `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
+       patientName, prefilledNotes,
+       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now],
+    );
+
+    // 获取 h5 链接
+    const h5BaseRow = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
+    const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
+    const ticketUrl = `${h5Base}?token=${token}`;
+
+    const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
+
+    void appendTaskEvent(requestId, 'ticket_created', {
+      ticketId,
+      skillId,
+      skillName,
+      token: token.slice(0, 8) + '...',
+      ticketUrl,
+      prefilledNotes: prefilledNotes?.slice(0, 200) || '',
+    });
+    void appendTaskEvent(requestId, 'reply_sent', {
+      replyLen: replyToUser.length,
+      reply: replyToUser.slice(0, 300),
+      channel: delivery.app,
+      recipient: delivery.recipient,
+      note: 'ticket_link',
+    });
+    const endMs = Date.now();
+    void updateAgentTask(requestId, {
+      status: 'done',
+      routeType: 'ticket_created',
+      skillId,
+      replyContent: replyToUser,
+      endedAt: endMs,
+      durationMs: endMs - (req as any)._taskStartMs || 0,
+    });
+
+    return {
+      request_id: requestId,
+      status:     'done',
+      reply:      replyToUser,
+      delivery,
+      reasoning:  `External skill「${skillName}」→ 工单已创建，等待用户填写提交`,
+      route_type: 'ticket_created',
+    } as any;
+  }
+
+  // ── Internal Skill：直接提交 sandbox（原有流程）────────────────────────────
   pendingRequests.set(requestId, {
     callbackUrl:  req.callback_url || '',
     sessionId:    session_id,
     delivery,
     userId:       meta.user_id || '',
     userContent:  content,
-    skillName:    skillName || '',          // Task 5: 发链接时显示
-    fromName:     meta.from_name || '',     // Task 5: 称呼
+    skillName:    skillName || '',
+    fromName:     meta.from_name || '',
   });
 
   const recentHistory = history.slice(-20)
@@ -798,9 +874,8 @@ async function handleHealthSkill(
     `\n请以亲切专业的口吻回复，不要使用 Markdown 格式，称呼客户为"${fromName}"。`,
   ].filter(Boolean).join('\n\n');
 
-  // 记录发给 Skill 的完整上下文（含 profile/wiki 注入情况）
   void appendTaskEvent(requestId, 'skill_input', {
-    message_preview: sandboxUserMessage, // 完整存储，不截断
+    message_preview: sandboxUserMessage,
     message_chars: sandboxUserMessage.length,
     has_wiki: !!(wikiCtx?.health_wiki),
     has_profile: !!(wikiCtx?.user_profile),
@@ -813,17 +888,12 @@ async function handleHealthSkill(
     ? `${serviceUrl}/api/v1/agent/job-callback/${requestId}`
     : '';
 
-  // ── 路由策略（和工单系统一致）──────────────────────────────────────────────────
-  // approved skill + SANDBOX_SERVICE_URL 已配置 → Sandbox Service（热实例，冷启动 <100ms）
-  // 其他 → Cloud Run Job（冷启动 8-15s）
   const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
-  const skillRow = await db.getAsync<any>('SELECT status, preferred_model, mcp_names FROM skills WHERE id=?', [skillId]);
-  const isApproved = skillRow?.status === 'approved' || skillRow?.status === 'published';
   const effectiveModel = skillRow?.preferred_model || 'gemini-3.6-flash';
+  const isApproved = skillRow?.status === 'approved' || skillRow?.status === 'published';
 
   try {
     if (isApproved && sandboxServiceUrl) {
-      // ── Sandbox Service（持久热实例）────────────────────────────────────
       console.log(`[AgentService] Sandbox Service submitted: skill=${skillName}(${skillId}), requestId=${requestId}`);
       await submitToSandboxService(sandboxServiceUrl, {
         skillId,
@@ -837,8 +907,7 @@ async function handleHealthSkill(
         ticketMode:     true,
       });
     } else {
-      // ── Cloud Run Job（按需冷启动）──────────────────────────────────────
-      console.log(`[AgentService] Cloud Run Job submitted: skill=${skillName}(${skillId}), requestId=${requestId} (status=${skillRow?.status}, serviceUrl=${sandboxServiceUrl ? 'set' : 'unset'})`);
+      console.log(`[AgentService] Cloud Run Job submitted: skill=${skillName}(${skillId}), requestId=${requestId}`);
       await submitSandboxJob({
         skillId,
         userInputs:    { ticket: sandboxUserMessage },
@@ -856,7 +925,6 @@ async function handleHealthSkill(
     throw err;
   }
 
-  // 安抚消息
   const reassuranceMsg = await buildReassuranceMessage(fromName, content, skillName, profile, apiKey);
 
   return {
@@ -870,6 +938,7 @@ async function handleHealthSkill(
 }
 
 // ─── Cloud Run Job 完成回调处理 ───────────────────────────────────────────────
+
 
 export async function handleJobCallback(requestId: string, jobResult: any): Promise<void> {
   const pending = pendingRequests.get(requestId);
@@ -1173,15 +1242,41 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       [sessionId, nowMs],
     );
     if (activeGuard) {
-      console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name}`);
+      const MAX_GUARD_ROUNDS = 10;  // 超过 10 轮未确认则自动关闭守卫
+
+      // 每次检查都递增 check_count
+      const newCheckCount = (activeGuard.check_count || 0) + 1;
+      await db.runAsync(
+        `UPDATE skill_confirm_guards SET check_count=? WHERE id=?`,
+        [newCheckCount, activeGuard.id],
+      );
+
+      console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name} round=${newCheckCount}/${MAX_GUARD_ROUNDS}`);
       void appendTaskEvent(requestId, 'skill_guard_check', {
         guardId: activeGuard.id,
         skillId: activeGuard.skill_id,
         skillName: activeGuard.skill_name,
         suggestTs: activeGuard.suggest_ts,
+        checkCount: newCheckCount,
+        maxRounds: MAX_GUARD_ROUNDS,
         userMsg: req.content.slice(0, 200),
       });
 
+      // 超过轮数限制→自动关闭，往下游传 hint
+      if (newCheckCount > MAX_GUARD_ROUNDS) {
+        await db.runAsync(
+          `UPDATE skill_confirm_guards SET status='closed', close_reason='round_limit' WHERE id=?`,
+          [activeGuard.id],
+        );
+        console.log(`[SkillGuard] ⏱️ 超过 ${MAX_GUARD_ROUNDS} 轮限制，守卫已关闭`);
+        void appendTaskEvent(requestId, 'skill_guard_closed', {
+          guardId: activeGuard.id,
+          skillName: activeGuard.skill_name,
+          reason: 'round_limit',
+          checkCount: newCheckCount,
+        });
+        guardHint = `[守卫提示：用户连续${MAX_GUARD_ROUNDS}轮没有确认「${activeGuard.skill_name}」服务，守卫已自动关闭，请正常回答]`;
+      } else {
       // 截取 suggest_ts 之后的对话（让 AI 看到完整上下文，而非只看最后一条）
       const historyAfterSuggest = (req.history || [])
         .filter((h: any) => !h.ts || h.ts >= activeGuard.suggest_ts)
@@ -1333,6 +1428,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         await closeGuard('user_declined_explicit');
         guardHint = `[守卫提示：用户明确不使用「${activeGuard.skill_name}」服务，请正常回答]`;
       }
+      }  // end: else(未超轮数)
     }
   }
 

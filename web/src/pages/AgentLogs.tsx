@@ -511,6 +511,7 @@ function AgentTasksPanel() {
                   skill_guard_judgment:  { icon: '🤔', label: '守卫判断', dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
                   skill_guard_clarify:   { icon: '❓', label: '守卫追问', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#9a3412' },
                   skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
+                  ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
