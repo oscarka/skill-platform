@@ -1467,7 +1467,6 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     const newerTask = await db.getAsync<any>(
       `SELECT id FROM agent_tasks
        WHERE session_id = ? AND id != ? AND started_at > ?
-         AND status IN ('pending','routing','executing')
        ORDER BY started_at DESC LIMIT 1`,
       [req.session_id, requestId, taskStartMs]
     ).catch(() => null);
