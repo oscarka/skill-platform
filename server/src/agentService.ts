@@ -1314,11 +1314,15 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       const guardUserMsg = `请基于以上背景，只返回 JSON：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
 
       let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
+
       try {
         const t0 = Date.now();
         const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 256);
         const durationMs = Date.now() - t0;
-        const parsed = JSON.parse(raw.match(/\{[^}]+\}/)?.[0] || '{}');
+        // strip markdown code block wrappers (```json ... ```)，再用 [\s\S]*? 匹配多行 JSON
+        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
+        const jsonMatch = cleanRaw.match(/\{[\s\S]*?\}/);
+        const parsed = JSON.parse(jsonMatch?.[0] || '{}');
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
