@@ -193,6 +193,30 @@ ticketRouter.put('/:id/return', async (req, res) => {
   }
 });
 
+// ─── PUT /api/tickets/:id/status — Admin: override status directly ─────────────
+const VALID_STATUSES = ['created','waiting_input','submitted','processing','done','returned','error'];
+ticketRouter.put('/:id/status', async (req, res) => {
+  try {
+    const { status, return_reason } = req.body;
+    if (!status || !VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+    }
+    const ticket = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    const now = Date.now();
+    await db.runAsync(
+      `UPDATE tickets SET status=?, return_reason=COALESCE(?,return_reason), updated_at=? WHERE id=?`,
+      [status, return_reason ?? null, now, ticket.id]
+    );
+    const updated = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [ticket.id]);
+    res.json({ ticket: await ticketToResponse(updated!) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ─── GET /api/tickets/:id/status — Poll status ────────────────────────────────
 ticketRouter.get('/:id/status', async (req, res) => {
   try {
