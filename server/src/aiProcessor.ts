@@ -175,6 +175,47 @@ async function runCodeSkill(
   }
 }
 
+// ─── Notify user via CUA when ticket AI is done ───────────────────────────────
+async function notifyUserTicketDone(ticketId: string): Promise<void> {
+  const ticket = await db.getAsync<any>('SELECT delivery_info, patient_name, skill_id FROM tickets WHERE id=?', [ticketId]);
+  if (!ticket?.delivery_info) {
+    console.log(`[TicketNotify] 工单 ${ticketId} 无 delivery_info，跳过通知`);
+    return;
+  }
+
+  let info: any;
+  try { info = JSON.parse(ticket.delivery_info); } catch { return; }
+
+  const callbackUrl = info.callback_url;
+  if (!callbackUrl) {
+    console.log(`[TicketNotify] 工单 ${ticketId} 无 callback_url，跳过`);
+    return;
+  }
+
+  const skill   = await db.getAsync<any>('SELECT name FROM skills WHERE id=?', [ticket.skill_id]);
+  const h5Base  = await db.getAsync<any>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
+  const baseUrl = (h5Base?.value || '').replace('/h5', '');
+  const reportUrl = `${baseUrl}/api/results/${ticketId}/report`;
+
+  const fromName  = ticket.patient_name || '您';
+  const skillName = skill?.name || '分析';
+  const replyText = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看完整报告：\n${reportUrl}`;
+
+  console.log(`[TicketNotify] 通知 ${info.recipient} via ${callbackUrl}`);
+  await fetch(callbackUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reply:     replyText,
+      app:       info.app,
+      recipient: info.recipient,
+      action:    info.action || 'send',
+      ticket_id: ticketId,
+    }),
+  });
+  console.log(`[TicketNotify] ✅ 通知已发出 ticketId=${ticketId}`);
+}
+
 // ─── Main processor ───────────────────────────────────────────────────────────
 export async function processTicket(ticketId: string, opts?: { overrideModel?: string }): Promise<void> {
   const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
@@ -253,6 +294,12 @@ export async function processTicket(ticketId: string, opts?: { overrideModel?: s
       `UPDATE tickets SET status='done', ai_completed_at=?, updated_at=? WHERE id=?`,
       [Date.now(), Date.now(), ticketId]
     );
+
+    // ── 通知用户：AI 已处理完毕 ──────────────────────────────────────────────
+    void notifyUserTicketDone(ticketId).catch(e =>
+      console.error(`[TicketNotify] 通知失败 ticketId=${ticketId}:`, e.message)
+    );
+
   } catch (err: any) {
     // Mark error
     await db.runAsync(`UPDATE tickets SET status='error', updated_at=? WHERE id=?`, [Date.now(), ticketId]);

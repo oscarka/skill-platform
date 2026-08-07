@@ -75,6 +75,7 @@ export function initDb(): void {
       expires_at      INTEGER NOT NULL,
       created_at      INTEGER NOT NULL,
       updated_at      INTEGER NOT NULL,
+      delivery_info   TEXT,
       FOREIGN KEY (skill_id) REFERENCES skills(id)
     );
 
@@ -180,6 +181,8 @@ export function initDb(): void {
     `CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status)`,
     // 为已有表添加 check_count列
     `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
+    // 为已有 tickets 表添加 delivery_info 列（存储 callback_url + delivery 供 AI 处理完后通知用户）
+    `ALTER TABLE tickets ADD COLUMN delivery_info TEXT`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

@@ -797,15 +797,22 @@ async function handleHealthSkill(
     const now = Date.now();
     const expiresAt = now + 3 * 24 * 60 * 60 * 1000; // 3天有效
 
+    const deliveryInfo = JSON.stringify({
+      callback_url: req.callback_url || '',
+      app:          delivery.app,
+      recipient:    delivery.recipient,
+      action:       delivery.action,
+    });
+
     await db.runAsync(
       `INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [ticketId, skillId, token,
        `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
        patientName, prefilledNotes,
-       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now],
+       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo],
     );
 
     // 获取 h5 链接
