@@ -703,7 +703,7 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed'].includes(evType) && (
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
