@@ -1299,14 +1299,17 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
    - no：用户明确表示不需要/算了/不用了/或已完全转移到无关话题
 
 2. confirm（明确确认）：用户是否明确表达了要开始使用「${activeGuard.skill_name}」服务？
-   - yes：用户有清晰的启动意图（如「帮我分析」「开始吧」「好，我要用」「可以开始了」「确认使用」）
-   - no：用户明确表示不用
-   - unclear：用户说了模糊词（如单独的「好的」「嗯」「行」「知道了」），或正在提问而非确认
+   - yes：用户有启动意图，包括：
+     · 带动作词：「帮我分析」「开始吧」「帮我做」「帮我看看」「可以做」「帮我开始」
+     · 带肯定词+动作：「好的，帮我...」「行，开始...」「可以，帮我...」
+     · 直接确认：「确认」「确认使用」「我要用」「用这个」「就用这个」
+   - no：用户明确表示不用（「不用了」「算了」「不需要」）
+   - unclear：仅以下情况才判 unclear：
+     · 单独的模糊词：「好的」「嗯」「行」「知道了」「收到」（没有后续动作词）
+     · 正在提问服务详情（含问号或疑问句）
 
-重要原则：
-- 只有当用户的意图非常明确时才判断 confirm=yes，模糊一律为 unclear
-- 提问行为（问服务详情、问价格、问流程）= interest=yes，confirm=unclear
-- 只返回 JSON，不要有任何其他内容`;
+重要：「好的，帮我...」「行，帮我...」「可以，开始...」一律判 confirm=yes，不要判 unclear！
+只返回 JSON，不要有任何其他内容`;
 
       const guardUserMsg = `请基于以上背景，只返回 JSON：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
 
@@ -1369,7 +1372,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         // ─ 模糊确认 → 检查是否已经追问过 ─
         // 如果用户在提问（消息较长/含问号），让正常路由回答，守卫继续等
         // 只有用户发了短暂模糊回复（如「好的」「嗯」）且本次 guard 还没追问过，才触发追问
-        const isUserAsking = req.content.includes('？') || req.content.includes('?') || req.content.length > 15;
+        const isUserAsking = req.content.includes('？') || req.content.includes('?');
 
         // 查是否已对此 guard 追问过
         const prevClarifyCount = await db.getAsync<any>(
