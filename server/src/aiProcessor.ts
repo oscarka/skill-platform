@@ -354,15 +354,6 @@ async function submitTicketToSandboxService(
   serviceUrl: string,
   overrideModel?: string
 ): Promise<void> {
-  // 复用 submitTicketAgentJob 的 key/config 加载逻辑
-  const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
-    getSetting('ai_model'),
-    getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
-    getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
-    getSetting('doubao_api_key').then(k => k ? getSetting('deepseek_api_key') : getSetting('doubao_api_key')),
-    getSetting('doubao_base_url').then(u => u ? getSetting('deepseek_base_url') : getSetting('doubao_base_url')),
-  ]);
-
   // 按 skill 的 mcp_names 过滤：只加载该 skill 声明需要的 MCP
   // 空数组 [] 或 null = 不加载任何 MCP（runner.py 跳过 discover，省 60s 超时）
   let mcpConfigsJson = '[]';
@@ -455,19 +446,6 @@ async function submitTicketAgentJob(
   inputs: TicketInput[],
   overrideModel?: string
 ): Promise<void> {
-  // Load AI keys from settings (same as sandboxService)
-  const [model, aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
-    getSetting('ai_model'),
-    getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
-    getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
-    getSetting('doubao_api_key').then(k => k
-      ? getSetting('deepseek_api_key')
-      : getSetting('doubao_api_key')),
-    getSetting('doubao_base_url').then(u => u
-      ? getSetting('deepseek_base_url')
-      : getSetting('doubao_base_url')),
-  ]);
-
   // 按 skill 的 mcp_names 过滤：只加载该 skill 声明需要的 MCP
   let mcpConfigsJson = '[]';
   try {
