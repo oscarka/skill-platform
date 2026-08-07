@@ -544,6 +544,7 @@ async function routeMessage(content: string, notes: string, history: { role: str
 注意：
 - "可以问家人问题吗""你们能帮我看xx吗"等询问服务能力的句子属于"chat"，不是"health"。
 - 如果当前消息较短（如纠正错别字、补充说明），请结合近期对话历史判断真实意图。
+- 当客户明确要求使用某个服务或分析功能时（如"帮我做营养分析""帮我做AI营养师""解读报告""做营养评估"），属于"health"。客户在请求执行一项具体服务，不是在问能不能做。
 只返回 JSON，不要有其他任何内容：{"type":"chat"} 或 {"type":"health"}`;
 
   const recentHistory = history.slice(-20).map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`).join('\n');
@@ -689,7 +690,8 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 - 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
 - 直接称呼客户为"${fromName}"
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
-- 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答`;
+- 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
+- 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理`;
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
