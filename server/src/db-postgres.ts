@@ -367,6 +367,11 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS context_snapshot TEXT`,
       `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS cua_events TEXT`,
       // skill_confirm_guards 表已在 SCHEMA_SQL 中创建，IF NOT EXISTS 自动安全
+      // check_count 是新加字段，需要对已有表做迁移
+      `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS check_count INTEGER NOT NULL DEFAULT 0`,
+      // tickets wiki 确认字段
+      `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_confirmed_at BIGINT DEFAULT NULL`,
+      `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_declined INTEGER NOT NULL DEFAULT 0`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
