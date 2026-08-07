@@ -313,34 +313,48 @@ agentRouter.post('/skill-result/:requestId/wiki-confirm', async (req, res) => {
       `SELECT id, session_id, reply_content, status FROM agent_tasks WHERE id=?`,
       [requestId]
     );
-    if (!task) return res.status(404).json({ error: 'not found' });
-    if (task.status !== 'done') return res.status(400).json({ error: '任务未完成' });
+    if (!task) {
+      console.log(`[WikiConfirm] ❌ requestId=${requestId} 不存在`);
+      return res.status(404).json({ error: 'not found' });
+    }
+    if (task.status !== 'done') {
+      console.log(`[WikiConfirm] ⚠️ requestId=${requestId} 状态=${task.status}，尚未完成，拒绝确认`);
+      return res.status(400).json({ error: '任务未完成' });
+    }
+
+    const userId = task.session_id?.replace(/^wechat_/, '') || '';
 
     if (action === 'confirm') {
-      // 触发 wiki sync
+      console.log(`[WikiConfirm] ✅ 用户确认: requestId=${requestId} userId=${userId} → 触发 wiki sync`);
       void appendTaskEvent(requestId, 'wiki_confirmed', {
         confirmed_at: Date.now(),
+        userId,
         note: '用户点击「认可并执行」，触发 wiki 同步',
       });
 
-      // 从 session_id 拿 userId（session_id 格式: wechat_{userId} 或直接是 userId）
-      const userId = task.session_id?.replace(/^wechat_/, '') || '';
       if (userId) {
         const { triggerWikiSyncPublic } = await import('../agentService');
         triggerWikiSyncPublic(userId, `user_confirmed:${requestId}`);
+        console.log(`[WikiConfirm] 📤 wiki sync 已下发: userId=${userId} reason=user_confirmed:${requestId}`);
+      } else {
+        console.warn(`[WikiConfirm] ⚠️ session_id=${task.session_id} 无法解析 userId，wiki sync 跳过`);
       }
 
       res.json({ success: true, message: 'wiki 同步已触发' });
     } else if (action === 'decline') {
+      console.log(`[WikiConfirm] ❌ 用户取消: requestId=${requestId} userId=${userId} → 不写入 wiki`);
       void appendTaskEvent(requestId, 'wiki_declined', {
         declined_at: Date.now(),
-        note: '用户点击「取消」，不写入 wiki',
+        userId,
+        note: '用户点击「暂不采纳」，不写入 wiki',
       });
       res.json({ success: true, message: '已记录，不写入 wiki' });
     } else {
+      console.log(`[WikiConfirm] ⚠️ 未知 action="${action}" requestId=${requestId}`);
       res.status(400).json({ error: 'action must be confirm or decline' });
     }
   } catch (e: any) {
+    console.error(`[WikiConfirm] 💥 异常:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });

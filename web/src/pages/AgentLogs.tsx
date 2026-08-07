@@ -497,9 +497,14 @@ function AgentTasksPanel() {
                   reassurance_sent: { icon: '💬', label: '安抚消息', dotBg: '#059669', cardBg: '#ecfdf5', cardBorder: '#a7f3d0', textColor: '#065f46' },
                   skill_done:       { icon: '✅', label: 'Skill 完成', dotBg: '#16a34a', cardBg: '#f0fdf4', cardBorder: '#86efac', textColor: '#15803d' },
                   reply_sent:       { icon: '✉️', label: '发送给用户', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
-                  task_failed:      { icon: '❌', label: '任务失败', dotBg: '#dc2626', cardBg: '#fef2f2', cardBorder: '#fca5a5', textColor: '#dc2626' },
-                  cua_step:         { icon: '🖱️', label: 'CUA 步骤', dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#155e75' },
-                  skill_suggest:    { icon: '💡', label: 'Skill 推荐', dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
+                  task_failed:       { icon: '❌', label: '任务失败',    dotBg: '#dc2626', cardBg: '#fef2f2', cardBorder: '#fca5a5', textColor: '#dc2626' },
+                  cua_step:          { icon: '🖱️', label: 'CUA 步骤',   dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#155e75' },
+                  skill_suggest:     { icon: '💡', label: 'Skill 推荐',  dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
+                  reply_preempted:   { icon: '✂️', label: '回复被抢占',  dotBg: '#dc2626', cardBg: '#fff1f2', cardBorder: '#fda4af', textColor: '#be123c' },
+                  result_link_built: { icon: '🔗', label: '结果链接生成', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#93c5fd', textColor: '#1e40af' },
+                  wiki_sync_pending: { icon: '⏸️', label: 'Wiki 等待确认', dotBg: '#6d28d9', cardBg: '#f5f3ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
+                  wiki_confirmed:    { icon: '✅', label: 'Wiki 用户确认', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#6ee7b7', textColor: '#065f46' },
+                  wiki_declined:     { icon: '🚫', label: 'Wiki 用户取消', dotBg: '#9ca3af', cardBg: '#f9fafb', cardBorder: '#d1d5db', textColor: '#6b7280' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -691,7 +696,7 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest'].includes(evType) && (
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>

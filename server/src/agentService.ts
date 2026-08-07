@@ -882,13 +882,22 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
   const { callbackUrl, sessionId, delivery, userId, userContent, skillName: pendingSkillName, fromName: pendingFromName } = pending;
   const agentOutput: string = (jobResult?.output || '（Agent 未返回内容）').trim();
 
-  // ── Task 5: 存完整结果到 agent_tasks，生成查看链接 ──
+  // ── Task 5: 生成结果查看链接日志 ──
   const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || '';
   const resultViewUrl = PUBLIC_BASE ? `${PUBLIC_BASE}/skill-result/${requestId}` : '';
-  // 构建用户收到的消息：简短说明 + 链接（无 PUBLIC_BASE 时降级为前200字摘要）
   const replyToUser = resultViewUrl
     ? `${pendingFromName || '您'}好，您的${pendingSkillName ? `「${pendingSkillName}」` : ''}分析已完成 🎉\n\n请点击查看完整结果（可在页面确认是否将建议纳入健康档案）：\n${resultViewUrl}`
     : agentOutput.slice(0, 200) + (agentOutput.length > 200 ? '\n\n（如需查看完整报告，请联系顾问）' : '');
+
+  console.log(`[AgentService] 🔗 结果链接: requestId=${requestId} mode=${resultViewUrl ? '链接' : '摄要降级'} url=${resultViewUrl || '(没有PUBLIC_BASE_URL，发摘要)'} outputLen=${agentOutput.length}`);
+  void appendTaskEvent(requestId, 'result_link_built', {
+    hasPublicBase:  !!PUBLIC_BASE,
+    resultViewUrl:  resultViewUrl || '',
+    mode:           resultViewUrl ? '链接模式' : '摘要降级模式',
+    outputLen:      agentOutput.length,
+    replyLen:       replyToUser.length,
+    replyPreview:   replyToUser.slice(0, 100),
+  });
 
   const callbackBody = {
     request_id: requestId,
@@ -908,26 +917,30 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
     output_preview: agentOutput.slice(0, 400),
   });
   void appendTaskEvent(requestId, 'reply_sent', {
-    reply: replyToUser.slice(0, 600),
-    replyLen: replyToUser.length,
-    channel: delivery.app,
-    recipient: delivery.recipient,
+    reply:           replyToUser.slice(0, 600),
+    replyLen:        replyToUser.length,
+    channel:         delivery.app,
+    recipient:       delivery.recipient,
     delivery_action: delivery.action,
-    cua_url: process.env.CUA_SEND_URL || '',
+    cua_url:         process.env.CUA_SEND_URL || '',
+    mode:            resultViewUrl ? '链接模式' : '摘要降级',
+    result_url:      resultViewUrl || '(无)',
   });
 
   // ── Task 6: Skill 完成后不立即 wiki sync，等用户点确认 ──
-  // 写日志（保留），但不触发 sync
+  console.log(`[AgentService] ⏸️ wiki sync 暂求（等用户在结果页点「认可并执行」）: userId=${userId} requestId=${requestId}`);
+  void appendTaskEvent(requestId, 'wiki_sync_pending', {
+    reason: 'Skill 完成，暂不写入 wiki，等待用户在结果页点「认可并执行」',
+    result_url: resultViewUrl || '',
+    userId,
+  });
   backgroundPostLog(userId, userContent, agentOutput);
-  // triggerWikiSync 移到用户点「认可并执行」后才调用
-  // 把 output + userId 存入 agent_tasks 供公开结果页使用
   void updateAgentTask(requestId, {
     status: 'done',
-    replyContent: agentOutput,   // 存完整 output（无截断）供结果页展示
+    replyContent: agentOutput,
     endedAt: Date.now(),
     ...(transcriptJson ? { jobTranscript: transcriptJson } : {}),
   });
-  // 重置计数器（Skill 触发后重置，wiki sync 待用户确认）
   syncCounters.set(userId, 0);
 
   if (!callbackUrl) {
@@ -1168,7 +1181,6 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
 
     // ── 任务4: 抢占检查 — 发送前看是否有更新的用户任务 ──────────────────────
-    const userId = req.meta.user_id;
     const newerTask = await db.getAsync<any>(
       `SELECT id FROM agent_tasks
        WHERE session_id = ? AND id != ? AND started_at > ?
@@ -1179,15 +1191,18 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
     if (newerTask) {
       // 有更新的消息正在处理，放弃发送此次回复
-      console.log(`[AgentService] Preempted by newer task ${newerTask.id}, skipping reply for ${requestId}`);
+      console.log(`[AgentService] ✂️ 抢占检查触发: requestId=${requestId} 被 ${newerTask.id} 抢占，发送被放弃`);
       void appendTaskEvent(requestId, 'reply_preempted', {
-        reason: '用户有更新的消息正在处理，跳过本次回复',
+        reason: '用户有更新的消息正在处理，跳过本次回复（防止乱序发送）',
         newer_task_id: newerTask.id,
+        skipped_reply_len: chatResult.reply?.length || 0,
+        skipped_reply_preview: chatResult.reply?.slice(0, 60) || '',
       });
       void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: '[已抢占，未发送]', endedAt: Date.now(), durationMs: Date.now() - taskStartMs });
       return { ...chatResult, reply: '' };  // 空回复，不发送
     }
 
+    console.log(`[AgentService] ✅ 抢占检查通过: requestId=${requestId} 无更新任务，正常发送`);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: chatResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length, reply: chatResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
@@ -1222,7 +1237,9 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     routeReason = route.reason;
 
     // ── Step 4.5: skill_suggest — 高置信度匹配时先介绍 skill，询问用户是否确认 ──
+    console.log(`[AgentService] 📊 skill route: id=${route.skillId} confidence=${route.confidence} reason=${route.reason}`);
     if (route.skillId && route.skillName && route.confidence === 'high') {
+      console.log(`[AgentService] 💡 skill_suggest 蹄: skill=${route.skillName}(${route.skillId}) 高置信度匹配，向用户介绍并询问确认`);
       const skill = availableSkills.find(s => s.id === route.skillId);
       const skillDesc = skill?.description || '';
       const fromName = req.meta.from_name || '您';
