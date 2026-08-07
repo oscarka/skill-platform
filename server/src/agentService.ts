@@ -1283,41 +1283,37 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
         .join('\n');
 
-      // 守卫 AI 判断：用 callGeminiMessages（项目统一方式），historyAfterSuggest 放在 system prompt 提供完整上下文
-      const guardSystemPrompt = `你是一个对话状态判断器，只输出 JSON，不输出其他任何内容。
+      // 守卫 AI 判断：用 callGeminiMessages，明确禁止推理过程，max_tokens 足够大确保 JSON 不被截断
+      const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
 
 背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务。
 
-对话记录（供参考）：
+对话记录：
 ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 
 用户最新消息：「${req.content}」
 
-判断两个维度并输出 JSON：
+请判断：
 - interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
-- confirm: "yes"（有启动意图，如「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以 + 动作词」）
-  "no"（明确拒绝），"unclear"（仅单独「好的」「嗯」等无动作词，或在提问）
+- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
+  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
 
-只输出 JSON，格式为：{"interest":"yes","confirm":"yes"}`;
+直接输出 JSON，不要任何其他内容：`;
 
-      const guardUserMsg = `{"interest": "`;
+      const guardUserMsg = `请只返回 JSON，格式：{"interest": "yes/no", "confirm": "yes/no/unclear"}`;
 
       let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
 
       try {
         const t0 = Date.now();
-        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 100);
+        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
         const durationMs = Date.now() - t0;
         // 支持模型输出 {"interest":...} 或前缀文字 + {"interest":...}
+        // 去除 markdown 代码块后提取 JSON（支持模型在 JSON 前后有额外文字）
         const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-        let parsed: any = {};
-        // 方式1: 模型输出了完整 JSON（如 {"interest":"yes","confirm":"yes"}）
         const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* continue */ } }
-        // 方式2: 模型续写了 guardUserMsg 的 {"interest": " 前缀（如 yes","confirm":"yes"}）
-        if (!['yes','no'].includes(parsed.interest)) {
-          try { parsed = JSON.parse('{"interest": "' + cleanRaw); } catch { /* keep {} */ }
-        }
+        let parsed: any = {};
+        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* keep {} */ } }
         guardResult = {
           interest: parsed.interest === 'no' ? 'no' : 'yes',
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
