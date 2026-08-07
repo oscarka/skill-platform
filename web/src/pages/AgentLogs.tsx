@@ -257,9 +257,19 @@ function AgentTasksPanel() {
       timeline.push({ _kind: 'context', ts: selected.started_at, ctx });
     }
 
-    // Agent-level events
+    // Agent-level events: group cua_step events into a single collapsible item
+    const cuaSteps: any[] = [];
     for (const ev of (events || [])) {
-      timeline.push({ _kind: 'agent_event', ts: Number(ev.ts), ev });
+      if (ev.event_type === 'cua_step') {
+        cuaSteps.push(ev);
+      } else {
+        timeline.push({ _kind: 'agent_event', ts: Number(ev.ts), ev });
+      }
+    }
+    // Insert grouped CUA steps as a single timeline item (after the first step's timestamp)
+    if (cuaSteps.length > 0) {
+      const firstTs = Math.min(...cuaSteps.map((s: any) => Number(s.ts)));
+      timeline.push({ _kind: 'cua_steps_group', ts: firstTs, steps: cuaSteps });
     }
 
     // Transcript steps (from Cloud Run Job)
@@ -793,6 +803,69 @@ function AgentTasksPanel() {
                             <pre style={{ fontSize: '11px', color: '#78350f', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 240, overflow: 'auto' }}>{typeof t.content === 'string' ? t.content : JSON.stringify(t.content, null, 2)}</pre>
                           </details>
                         )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              /* ── CUA real-time steps group (collapsed, SSE-streamed) ──────── */
+              if (item._kind === 'cua_steps_group') {
+                const steps = item.steps || [];
+                const actionSteps = steps.filter((s: any) => {
+                  const p = s.payload || {};
+                  return p.detail && p.event_type !== 'phase';
+                });
+                const lastStep = steps[steps.length - 1];
+                const isDone = selected?.status === 'done' || selected?.status === 'failed';
+                const prevTs = idx > 0 ? timeline[idx - 1].ts : item.ts;
+                const stepMs = item.ts - prevTs;
+
+                return (
+                  <div key={`cua-steps-${idx}`} style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#0891b2', border: '2px solid rgba(255,255,255,.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }}>🖱️</div>
+                      {idx < timeline.length - 1 && <div style={{ width: 1, flex: 1, background: '#e2e8f0', marginTop: 4 }} />}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <span style={{ fontSize: '.72rem', fontWeight: 700, letterSpacing: '.05em', background: isDone ? '#d1fae5' : '#e0f2fe', color: isDone ? '#065f46' : '#0369a1', padding: '2px 8px', borderRadius: 5 }}>CUA 执行</span>
+                          <span style={{ fontSize: '.72rem', color: '#6b7280' }}>+{stepMs > 0 ? stepMs < 1000 ? `${stepMs}ms` : `${(stepMs / 1000).toFixed(1)}s` : ''}</span>
+                        </div>
+                        <span style={{ fontSize: '.72rem', color: '#9ca3af' }}>{new Date(item.ts).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                      </div>
+                      <div style={{ background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: 8, padding: '10px 14px' }}>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                          <span style={{ fontSize: '.82rem', fontWeight: 600, color: '#155e75' }}>
+                            {isDone ? `✅ 已完成` : `⏳ 执行中...`}
+                          </span>
+                          <span style={{ fontSize: '.72rem', background: '#0891b2', color: '#fff', padding: '1px 8px', borderRadius: 10, fontFamily: 'monospace' }}>{steps.length} 步</span>
+                          {actionSteps.length > 0 && <span style={{ fontSize: '.72rem', color: '#6b7280' }}>{actionSteps.length} 个工具调用</span>}
+                        </div>
+                        {/* Latest step preview */}
+                        {lastStep?.payload?.detail && (
+                          <div style={{ fontSize: '.75rem', color: '#475569', marginBottom: 6, padding: '4px 8px', background: '#f0fdfa', borderRadius: 4, lineHeight: 1.4 }}>
+                            最新: {String(lastStep.payload.detail).slice(0, 120)}{String(lastStep.payload.detail).length > 120 ? '…' : ''}
+                          </div>
+                        )}
+                        {/* Expandable details */}
+                        <details>
+                          <summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 CUA 执行步骤（{steps.length} 步）</summary>
+                          <div style={{ marginTop: 6, maxHeight: 300, overflowY: 'auto' }}>
+                            {steps.map((s: any, si: number) => {
+                              const sp = s.payload || {};
+                              if (!sp.detail) return null;
+                              return (
+                                <div key={si} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', padding: '3px 0', borderBottom: '1px solid #e0f2fe', fontSize: '.72rem' }}>
+                                  <span style={{ flexShrink: 0, background: '#0891b2', color: '#fff', padding: '0 5px', borderRadius: 3, fontFamily: 'monospace', fontSize: '.65rem' }}>#{sp.step_index}</span>
+                                  {sp.tool_name && <span style={{ flexShrink: 0, background: '#e0f2fe', color: '#0369a1', padding: '0 5px', borderRadius: 3, fontSize: '.65rem' }}>{sp.tool_name}</span>}
+                                  <span style={{ color: '#374151', lineHeight: 1.3 }}>{String(sp.detail).slice(0, 150)}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </details>
                       </div>
                     </div>
                   </div>
