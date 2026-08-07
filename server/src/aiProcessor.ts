@@ -177,7 +177,7 @@ async function runCodeSkill(
 
 // ─── Notify user via CUA when ticket AI is done ───────────────────────────────
 export async function notifyUserTicketDone(ticketId: string): Promise<void> {
-  const ticket = await db.getAsync<any>('SELECT delivery_info, patient_name, skill_id FROM tickets WHERE id=?', [ticketId]);
+  const ticket = await db.getAsync<any>('SELECT delivery_info, patient_name, skill_id, request_id FROM tickets WHERE id=?', [ticketId]);
   if (!ticket?.delivery_info) {
     console.log(`[TicketNotify] 工单 ${ticketId} 无 delivery_info，跳过通知`);
     return;
@@ -214,6 +214,24 @@ export async function notifyUserTicketDone(ticketId: string): Promise<void> {
     }),
   });
   console.log(`[TicketNotify] ✅ 通知已发出 ticketId=${ticketId}`);
+
+  // 回写渠道消息日志：将结果发送事件 append 到原始 agent 任务
+  if (ticket.request_id) {
+    try {
+      const { appendTaskEvent } = await import('./agentService');
+      void appendTaskEvent(ticket.request_id, 'ticket_result_sent', {
+        ticketId,
+        skillName,
+        recipient: info.recipient,
+        app: info.app,
+        reportUrl,
+        reply: replyText.slice(0, 300),
+      });
+      console.log(`[TicketNotify] ✨ 回写渠道日志 requestId=${ticket.request_id}`);
+    } catch (e: any) {
+      console.warn(`[TicketNotify] 回写日志失败:`, e.message);
+    }
+  }
 }
 
 // ─── Main processor ───────────────────────────────────────────────────────────

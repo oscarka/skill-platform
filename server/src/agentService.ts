@@ -897,12 +897,12 @@ async function handleHealthSkill(
     await db.runAsync(
       `INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [ticketId, skillId, token,
        `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
        patientName, prefilledNotes,
-       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo],
+       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId],
     );
 
     const ticketUrl  = `${h5Base}?token=${token}`;

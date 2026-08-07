@@ -512,6 +512,7 @@ function AgentTasksPanel() {
                   skill_guard_clarify:   { icon: '❓', label: '守卫追问', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#9a3412' },
                   skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
                   ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
+                  ticket_result_sent:    { icon: '📊', label: '报告已发送', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -703,7 +704,77 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created'].includes(evType) && (
+                        {/* ── Skill Guard events ─────────────────────────────── */}
+                        {evType === 'skill_guard_check' && (
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                              <span style={{ fontWeight: 600, color: '#0e7490' }}>🔍 检查技能意向</span>
+                              <span style={{ background: '#cffafe', color: '#0369a1', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                              <span style={{ fontSize: '.72rem', color: '#64748b' }}>第 {p.checkCount}/{p.maxRounds} 轮</span>
+                            </div>
+                            {p.userMsg && <div style={{ fontSize: '.78rem', color: '#374151', borderLeft: '3px solid #06b6d4', paddingLeft: 8, lineHeight: 1.5 }}>用户：{p.userMsg}</div>}
+                          </div>
+                        )}
+                        {(evType === 'skill_guard_judgment' || evType === 'skill_guard_clarify') && (
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: p.rawResult ? 6 : 0 }}>
+                              <span style={{ fontWeight: 600, color: '#92400e' }}>
+                                {evType === 'skill_guard_clarify' ? '❓ 守卫追问' : '🤔 意向判断'}
+                              </span>
+                              {p.interest && <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: '.72rem', background: p.interest === 'yes' ? '#d1fae5' : '#fee2e2', color: p.interest === 'yes' ? '#065f46' : '#991b1b' }}>
+                                意向: {p.interest === 'yes' ? '✅ 有意向' : '❌ 无意向'}
+                              </span>}
+                              {p.confirm && <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: '.72rem', background: p.confirm === 'yes' ? '#d1fae5' : p.confirm === 'no' ? '#fee2e2' : '#fef9c3', color: p.confirm === 'yes' ? '#065f46' : p.confirm === 'no' ? '#991b1b' : '#713f12' }}>
+                                确认: {p.confirm === 'yes' ? '✅ 已确认' : p.confirm === 'no' ? '❌ 拒绝' : '❓ 未明确'}
+                              </span>}
+                              {p.durationMs && <span style={{ fontSize: '.72rem', color: '#9ca3af' }}>{p.durationMs}ms</span>}
+                              {p.error && <span style={{ color: '#dc2626', fontSize: '.72rem' }}>⚠️ {p.error}</span>}
+                            </div>
+                            {p.rawResult && <details><summary style={{ fontSize: '.72rem', color: '#92400e', cursor: 'pointer' }}>▶ 原始判断结果</summary><pre style={{ fontSize: '.72rem', marginTop: 4, color: '#78350f', whiteSpace: 'pre-wrap' }}>{p.rawResult}</pre></details>}
+                          </div>
+                        )}
+                        {evType === 'skill_guard_closed' && (
+                          <div style={{ fontSize: '.82rem', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: 600, color: '#374151' }}>🔒 守卫已关闭</span>
+                            <span style={{ background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                            <span style={{ fontSize: '.72rem', color: p.reason === 'user_confirmed' ? '#059669' : p.reason === 'user_declined' ? '#dc2626' : '#6b7280' }}>
+                              {p.reason === 'user_confirmed' ? '✅ 用户确认' : p.reason === 'user_declined' ? '❌ 用户拒绝' : p.reason === 'round_limit' ? '⏱ 超轮限制' : p.reason}
+                            </span>
+                          </div>
+                        )}
+                        {evType === 'skill_guard_activated' && (
+                          <div style={{ fontSize: '.82rem', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: 600, color: '#5b21b6' }}>🛡️ 守卫已激活</span>
+                            <span style={{ background: '#ede9fe', color: '#5b21b6', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                            {p.suggestReply && <div style={{ marginTop: 4, fontSize: '.78rem', color: '#6d28d9', borderLeft: '3px solid #8b5cf6', paddingLeft: 8, lineHeight: 1.5, width: '100%' }}>{p.suggestReply}</div>}
+                          </div>
+                        )}
+
+                        {/* ── Ticket events ────────────────────────────────── */}
+                        {evType === 'ticket_created' && (
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                              <span style={{ fontWeight: 600, color: '#0f766e' }}>📋 工单已创建</span>
+                              <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                            </div>
+                            {p.ticketUrl && <div style={{ fontSize: '.78rem', color: '#0d9488', fontFamily: 'monospace', wordBreak: 'break-all', borderLeft: '3px solid #2dd4bf', paddingLeft: 8 }}>{p.ticketUrl}</div>}
+                            {p.prefilledNotes && <div style={{ marginTop: 4, fontSize: '.75rem', color: '#374151', background: '#f0fdfa', padding: '4px 8px', borderRadius: 4 }}>预填: {p.prefilledNotes}</div>}
+                          </div>
+                        )}
+                        {evType === 'ticket_result_sent' && (
+                          <div style={{ fontSize: '.82rem' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                              <span style={{ fontWeight: 600, color: '#0f766e' }}>📊 报告已发送</span>
+                              <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                              {p.app && <span style={{ background: '#f1f5f9', color: '#475569', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.app}</span>}
+                              {p.recipient && <span style={{ color: '#64748b', fontSize: '.72rem' }}>→ {p.recipient}</span>}
+                            </div>
+                            {p.reportUrl && <div style={{ fontSize: '.75rem', color: '#0d9488', fontFamily: 'monospace', wordBreak: 'break-all', borderLeft: '3px solid #2dd4bf', paddingLeft: 8, marginBottom: 4 }}>{p.reportUrl}</div>}
+                            {p.reply && <div style={{ fontSize: '.78rem', color: '#374151', borderLeft: '3px solid #34d399', paddingLeft: 8, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{p.reply}</div>}
+                          </div>
+                        )}
+
+                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>

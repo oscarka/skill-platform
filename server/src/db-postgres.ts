@@ -375,6 +375,8 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_declined INTEGER NOT NULL DEFAULT 0`,
       // delivery_info: 存储 callback_url + delivery，AI 处理完后通知用户
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
+      // request_id: 存储创建工单的原始 agent 任务 ID，用于通知时回写渠道消息日志
+      `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS request_id TEXT`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
