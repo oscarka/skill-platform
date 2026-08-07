@@ -1271,38 +1271,62 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         (req as any).skill_id = activeGuard.skill_id;
 
       } else if (guardResult.confirm === 'unclear') {
-        // ─ 模糊确认 → 守卫保持激活，agent 追问一次 ─
-        console.log(`[SkillGuard] ❓ 模糊确认，追问用户`);
-        const clarifyMsg = `您是想现在开始「${activeGuard.skill_name}」分析吗？如果是，请直接告诉我「开始」或「好，帮我分析」～`;
+        // ─ 模糊确认 → 检查是否已经追问过 ─
+        // 如果用户在提问（消息较长/含问号），让正常路由回答，守卫继续等
+        // 只有用户发了短暂模糊回复（如「好的」「嗯」）且本次 guard 还没追问过，才触发追问
+        const isUserAsking = req.content.includes('？') || req.content.includes('?') || req.content.length > 15;
 
-        void appendTaskEvent(requestId, 'skill_guard_clarify', {
-          guardId: activeGuard.id,
-          skillName: activeGuard.skill_name,
-          clarifyMsg,
-        });
-        void appendTaskEvent(requestId, 'reply_sent', {
-          replyLen: clarifyMsg.length,
-          reply: clarifyMsg,
-          channel: delivery.app,
-          recipient: delivery.recipient,
-          note: 'guard_clarify',
-        });
-        const endMs = Date.now();
-        void updateAgentTask(requestId, {
-          status: 'done',
-          routeType: 'skill_guard_clarify',
-          replyContent: clarifyMsg,
-          endedAt: endMs,
-          durationMs: endMs - taskStartMs,
-        });
-        return {
-          request_id: requestId,
-          status:     'done',
-          reply:      clarifyMsg,
-          delivery,
-          reasoning:  `SkillGuard: 用户模糊，追问确认`,
-          route_type: 'skill_guard_clarify',
-        } as any;
+        // 查是否已对此 guard 追问过
+        const prevClarifyCount = await db.getAsync<any>(
+          `SELECT COUNT(*) as cnt FROM agent_task_events
+           WHERE event_type='skill_guard_clarify'
+             AND JSON_EXTRACT(payload,'$.guardId')=?`,
+          [activeGuard.id],
+        ).then((r: any) => r?.cnt || 0).catch(() => 0);
+
+        if (isUserAsking || prevClarifyCount > 0) {
+          // 用户在提问，或已追问过 → 走正常路由，守卫保持
+          console.log(`[SkillGuard] ❓ unclear 但用户在提问或已追问过(${prevClarifyCount}次)，走正常路由`);
+          void appendTaskEvent(requestId, 'skill_guard_judgment', {
+            guardId: activeGuard.id,
+            note: `unclear→正常路由 isUserAsking=${isUserAsking} prevClarify=${prevClarifyCount}`,
+          });
+          // guardHint 不设置，直接 fall through 到正常路由
+        } else {
+          // 用户发了短暂模糊词 且 尚未追问过 → 追问一次
+          console.log(`[SkillGuard] ❓ 首次模糊确认，追问用户`);
+          const clarifyMsg = `您是想现在开始「${activeGuard.skill_name}」分析吗？如果是，请直接告诉我「开始」或「好，帮我分析」～`;
+
+          void appendTaskEvent(requestId, 'skill_guard_clarify', {
+            guardId: activeGuard.id,
+            skillName: activeGuard.skill_name,
+            clarifyMsg,
+          });
+          void appendTaskEvent(requestId, 'reply_sent', {
+            replyLen: clarifyMsg.length,
+            reply: clarifyMsg,
+            channel: delivery.app,
+            recipient: delivery.recipient,
+            note: 'guard_clarify',
+          });
+          const endMs = Date.now();
+          void updateAgentTask(requestId, {
+            status: 'done',
+            routeType: 'skill_guard_clarify',
+            replyContent: clarifyMsg,
+            endedAt: endMs,
+            durationMs: endMs - taskStartMs,
+          });
+          return {
+            request_id: requestId,
+            status:     'done',
+            reply:      clarifyMsg,
+            delivery,
+            reasoning:  `SkillGuard: 用户首次模糊，追问确认`,
+            route_type: 'skill_guard_clarify',
+          } as any;
+        }
+
 
       } else {
         // ─ confirm=no（明确不用）→ 关闭守卫，走正常路由 ─
