@@ -176,7 +176,7 @@ async function runCodeSkill(
 }
 
 // ─── Notify user via CUA when ticket AI is done ───────────────────────────────
-async function notifyUserTicketDone(ticketId: string): Promise<void> {
+export async function notifyUserTicketDone(ticketId: string): Promise<void> {
   const ticket = await db.getAsync<any>('SELECT delivery_info, patient_name, skill_id FROM tickets WHERE id=?', [ticketId]);
   if (!ticket?.delivery_info) {
     console.log(`[TicketNotify] 工单 ${ticketId} 无 delivery_info，跳过通知`);

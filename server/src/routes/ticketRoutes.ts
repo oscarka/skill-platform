@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
 import * as db from '../db';
+import { notifyUserTicketDone } from '../aiProcessor';
 
 // Multer for ticket input file replacement
 const UPLOADS_DIR = path.resolve(__dirname, '..', '..', '..', 'uploads', 'inputs');
@@ -297,6 +298,13 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
 
     console.log(`[TicketAgent] Callback for ticket ${ticketId}: passed=${passed}, preview=${rawResult.slice(0, 80)}`);
     res.json({ ok: true });
+
+    // ── 通知用户：AI 处理完成 ──────────────────────────────────────────────────
+    if (passed) {
+      void notifyUserTicketDone(ticketId).catch(e =>
+        console.error(`[TicketNotify] 通知失败 ticketId=${ticketId}:`, e.message)
+      );
+    }
   } catch (err: any) {
     console.error('[TicketAgent] Callback error:', err.message);
     res.status(500).json({ error: err.message });
