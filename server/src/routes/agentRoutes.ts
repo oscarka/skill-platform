@@ -56,7 +56,9 @@ agentRouter.post('/ingest', async (req, res) => {
     }
 
     const sessionId = conversation_id || from_user_id;
-    console.log(`[Orch/Ingest] channel=${channel} from=${from_name}(${from_user_id}) content="${content.slice(0, 80)}"`);
+    const history   = Array.isArray(req.body.history) ? req.body.history : [];
+    const notes     = req.body.notes || '';
+    console.log(`[Orch/Ingest] channel=${channel} from=${from_name}(${from_user_id}) content="${content.slice(0, 80)}" history=${history.length}`);
 
     // 构造 AgentChatRequest
     const agentReq = {
@@ -72,7 +74,8 @@ agentRouter.post('/ingest', async (req, res) => {
         available_apps: ['企业微信'],
         current_recipient: from_name || from_user_id,
       },
-      history: [],
+      history,
+      notes,
       // callback_url：skill 执行完成后通知 Mac mini CUA 发消息
       callback_url: CUA_SEND_URL ? `${CUA_SEND_URL}/api/agent-callback` : '',
     };
