@@ -259,6 +259,10 @@ const pendingRequests = new Map<string, {
   fromName:     string;   // Task 5: 用户称呼
 }>();
 
+// ─── 工单创建防抖锁（防止短时间内并发请求重复建单）──────────────────────────
+// key = "${userId}:${skillId}"，8秒内同一组合只允许创建一次
+const _ticketCreationLocks = new Set<string>();
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AgentChatRequest {
@@ -780,10 +784,66 @@ async function handleHealthSkill(
   const isExternal = skillRow?.type === 'external';
 
   if (isExternal) {
-    // ── External Skill：创建工单，预填写信息，发 h5 链接给用户 ────────────────
+    // ── 防抖：8秒内同一 user+skill 只允许一次工单创建 ──────────────────────
+    const lockKey = `${meta.user_id || 'anon'}:${skillId}`;
+    if (_ticketCreationLocks.has(lockKey)) {
+      console.log(`[AgentService] 🔒 工单防抖拦截 lockKey=${lockKey}`);
+      void updateAgentTask(requestId, { status: 'done', routeType: 'ticket_debounced', endedAt: Date.now() });
+      return {
+        request_id: requestId, status: 'done',
+        reply: `${fromName}，您的请求正在处理中，请稍候～`,
+        delivery, route_type: 'ticket_debounced',
+      } as any;
+    }
+    _ticketCreationLocks.add(lockKey);
+    setTimeout(() => _ticketCreationLocks.delete(lockKey), 8000);
+
+    // ── 1小时内：查是否有相同 user+skill 的活跃工单 ──────────────────────────
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    const h5BaseRow = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
+    const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
+
+    if (meta.user_id) {
+      const existing = await db.getAsync<any>(
+        `SELECT * FROM tickets WHERE created_by=? AND skill_id=? AND created_at > ?
+         ORDER BY created_at DESC LIMIT 1`,
+        [meta.user_id, skillId, oneHourAgo]
+      );
+
+      if (existing && existing.status !== 'error') {
+        const exUrl     = `${h5Base}?token=${existing.token}`;
+        const baseUrl   = h5Base.replace(/\/h5$/, '');
+        const reportUrl = `${baseUrl}/api/results/${existing.id}/report`;
+        let reply = '';
+
+        if (existing.status === 'waiting_input') {
+          reply = `${fromName}，您已有一个等待填写的「${skillName}」工单，请点击链接填写：\n\n${exUrl}`;
+        } else if (existing.status === 'submitted' || existing.status === 'processing') {
+          reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳`;
+        } else if (existing.status === 'done') {
+          reply = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看报告：\n${reportUrl}`;
+        } else if (existing.status === 'returned') {
+          const reason = existing.return_reason ? `\n原因：${existing.return_reason}\n\n` : '\n\n';
+          reply = `${fromName}，工作人员已审阅并打回您的「${skillName}」工单，请重新填写：${reason}${exUrl}`;
+        }
+
+        if (reply) {
+          void appendTaskEvent(requestId, 'ticket_reused', { ticketId: existing.id, status: existing.status });
+          const endMs = Date.now();
+          void updateAgentTask(requestId, {
+            status: 'done', routeType: 'ticket_reused', skillId,
+            replyContent: reply, endedAt: endMs,
+            durationMs: endMs - ((req as any)._taskStartMs || endMs),
+          });
+          return { request_id: requestId, status: 'done', reply, delivery, route_type: 'ticket_reused' } as any;
+        }
+        // status='error' → 不复用，继续新建
+      }
+    }
+
+    // ── 新建工单 ──────────────────────────────────────────────────────────────
     console.log(`[AgentService] 📋 External skill「${skillName}」→ 创建工单`);
 
-    // 构建预填充信息（从 wiki/profile 提取）
     const patientName = meta.from_name || null;
     const prefilledNotes = [
       notes ? `【备注】${notes}` : '',
@@ -791,11 +851,10 @@ async function handleHealthSkill(
       content ? `【用户问题】${content}` : '',
     ].filter(Boolean).join('\n\n').slice(0, 800) || null;
 
-    // 创建 ticket
     const ticketId = require('crypto').randomUUID();
-    const token = require('crypto').randomUUID().replace(/-/g, '');
-    const now = Date.now();
-    const expiresAt = now + 3 * 24 * 60 * 60 * 1000; // 3天有效
+    const token    = require('crypto').randomUUID().replace(/-/g, '');
+    const now      = Date.now();
+    const expiresAt = now + 60 * 60 * 1000; // 1小时有效（与复用窗口一致）
 
     const deliveryInfo = JSON.stringify({
       callback_url: req.callback_url || '',
@@ -815,43 +874,29 @@ async function handleHealthSkill(
        meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo],
     );
 
-    // 获取 h5 链接
-    const h5BaseRow = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
-    const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
-    const ticketUrl = `${h5Base}?token=${token}`;
-
+    const ticketUrl  = `${h5Base}?token=${token}`;
     const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
 
     void appendTaskEvent(requestId, 'ticket_created', {
-      ticketId,
-      skillId,
-      skillName,
+      ticketId, skillId, skillName,
       token: token.slice(0, 8) + '...',
       ticketUrl,
       prefilledNotes: prefilledNotes?.slice(0, 200) || '',
     });
     void appendTaskEvent(requestId, 'reply_sent', {
-      replyLen: replyToUser.length,
-      reply: replyToUser.slice(0, 300),
-      channel: delivery.app,
-      recipient: delivery.recipient,
-      note: 'ticket_link',
+      replyLen: replyToUser.length, reply: replyToUser.slice(0, 300),
+      channel: delivery.app, recipient: delivery.recipient, note: 'ticket_link',
     });
     const endMs = Date.now();
     void updateAgentTask(requestId, {
-      status: 'done',
-      routeType: 'ticket_created',
-      skillId,
-      replyContent: replyToUser,
-      endedAt: endMs,
-      durationMs: endMs - (req as any)._taskStartMs || 0,
+      status: 'done', routeType: 'ticket_created', skillId,
+      replyContent: replyToUser, endedAt: endMs,
+      durationMs: endMs - ((req as any)._taskStartMs || endMs),
     });
 
     return {
-      request_id: requestId,
-      status:     'done',
-      reply:      replyToUser,
-      delivery,
+      request_id: requestId, status: 'done',
+      reply:      replyToUser, delivery,
       reasoning:  `External skill「${skillName}」→ 工单已创建，等待用户填写提交`,
       route_type: 'ticket_created',
     } as any;
