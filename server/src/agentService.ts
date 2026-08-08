@@ -822,7 +822,136 @@ ${skillList}
   }
 }
 
+// ─── v2 架构：Step5 — Agent 上下文包 + directive 生成 ─────────────────────────
+
+export type GuardStatus = 'new_created' | 'confirmed_ticket' | 'declined' | 'pending_unclear' | 'none';
+
+export interface AgentContextPackage {
+  userMessage:     string;
+  history:         { role: string; content: string }[];
+  notes:           string;
+  // 路由结果
+  routeSkillId:    string | null;
+  routeSkillName:  string | null;
+  routeSkillDesc:  string | null;
+  routeConfidence: 'high' | 'low' | 'none';
+  // 守卫结果
+  guardStatus:     GuardStatus;
+  guardSkillName:  string | null;
+  ticketUrl:       string | null;
+  // 工单状态（来自 ctxSnapshot.recentTicket）
+  existingTicket: {
+    skillId:       string;
+    skillName:     string;
+    status:        string;
+    createdAt:     number;
+    reportContent: string | null;
+    reportUrl:     string | null;
+    h5Url:         string | null;
+  } | null;
+  // 代码生成的 directive
+  directive: string;
+}
+
+/**
+ * 根据路由结果 + 守卫状态 + 工单状态组装 Agent 上下文包。
+ * directive 由代码 if-else 生成，不依赖 AI。
+ */
+function assembleAgentContext(params: {
+  req:            any;
+  routeSkillId:   string | null;
+  routeSkillName: string | null;
+  routeSkillDesc: string | null;
+  routeConf:      'high' | 'low' | 'none';
+  guardStatus:    GuardStatus;
+  guardSkillName: string | null;
+  ticketUrl:      string | null;
+  recentTicket:   any | null;
+  serviceUrl:     string;
+}): AgentContextPackage {
+  const { req, routeSkillId, routeSkillName, routeSkillDesc, routeConf,
+          guardStatus, guardSkillName, ticketUrl, recentTicket, serviceUrl } = params;
+
+  // 组装 existingTicket
+  let existingTicket: AgentContextPackage['existingTicket'] = null;
+  if (recentTicket) {
+    const h5Url = recentTicket.status === 'waiting_input' && recentTicket.h5_token
+      ? `${serviceUrl}/h5?token=${recentTicket.h5_token}`
+      : null;
+    existingTicket = {
+      skillId:       recentTicket.skill_id || '',
+      skillName:     recentTicket.skill_name || recentTicket.skill_id || '未知服务',
+      status:        recentTicket.status || 'unknown',
+      createdAt:     Number(recentTicket.created_at || 0),
+      reportContent: recentTicket.raw_result || null,
+      reportUrl:     recentTicket.report_url || null,
+      h5Url,
+    };
+  }
+
+  // ── directive 生成（代码 if-else，不依赖 AI）─────────────────────────────────
+  let directive = '';
+
+  if (guardStatus === 'new_created' && routeSkillName) {
+    directive = `用户表达了对「${routeSkillName}」服务的意向，守卫已创建。`
+      + `请向用户介绍该服务，并自然地询问是否确认使用。`
+      + (routeSkillDesc ? `\n服务描述：${routeSkillDesc.slice(0, 200)}` : '');
+
+  } else if (guardStatus === 'confirmed_ticket' && ticketUrl) {
+    directive = `用户已确认使用「${guardSkillName || routeSkillName || ''}」，工单已建立。`
+      + `\n工单链接：${ticketUrl}`
+      + `\n请告知用户工单已创建，引导他点击链接填写问卷。直接使用以上链接，不要自己生成链接。`;
+
+  } else if (guardStatus === 'declined') {
+    directive = `用户明确拒绝了「${guardSkillName || ''}」服务，守卫已关闭。请正常回答用户的问题。`;
+
+  } else if (guardStatus === 'pending_unclear' && guardSkillName) {
+    if (routeSkillId && routeSkillId !== (params.recentTicket?.skill_id) && routeSkillName !== guardSkillName) {
+      // 不同 skill
+      directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
+        + `本次消息话题指向「${routeSkillName}」，无需重复推荐守卫中的服务。`
+        + `请先回答用户的问题。`;
+    } else {
+      // 同 skill 或无路由 skill
+      directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
+        + `请先回答用户的问题，如果对话场景合适，在回答末尾自然地引导用户确认是否使用该服务（不要强迫，感觉自然即可）。`;
+    }
+
+  } else if (guardStatus === 'none' && existingTicket) {
+    if (existingTicket.status === 'processing' || existingTicket.status === 'submitted') {
+      directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
+        + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
+    } else if (existingTicket.status === 'done' && existingTicket.reportContent) {
+      directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告（报告内容见下方）。`
+        + `如用户询问报告细节，请结合报告内容具体回答。`;
+    } else if (existingTicket.status === 'done') {
+      directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告。`
+        + (existingTicket.reportUrl ? `\n报告链接：${existingTicket.reportUrl}` : '');
+    } else if (existingTicket.status === 'waiting_input' && existingTicket.h5Url) {
+      directive = `用户有一个未填写的「${existingTicket.skillName}」工单。`
+        + `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`;
+    }
+  }
+  // guardStatus=none + 无工单 → directive 为空，Agent 正常回答
+
+  return {
+    userMessage:     req.content,
+    history:         req.history || [],
+    notes:           req.notes || '',
+    routeSkillId,
+    routeSkillName,
+    routeSkillDesc,
+    routeConfidence: routeConf,
+    guardStatus,
+    guardSkillName:  guardSkillName || null,
+    ticketUrl,
+    existingTicket,
+    directive,
+  };
+}
+
 // ─── 3. 安抚消息生成 ──────────────────────────────────────────────────────────
+
 
 
 async function buildReassuranceMessage(
@@ -1483,7 +1612,10 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   // 在 routeMessage 之前检查：当前 session 是否有激活的 skill_suggest 守卫？
   // 如果有，运行三值判断（感兴趣/确认），跳过或改写后续路由
   let guardHint = '';  // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
+  let currentGuardStatus: GuardStatus = 'none';          // Step 5 (v2): 追踪守卫状态
+  let currentGuardSkillName: string | null = null;       // Step 5 (v2): 守卫对应的 skill
   if (sessionId) {
+
     const nowMs = Date.now();
     const activeGuard = await db.getAsync<any>(
       `SELECT * FROM skill_confirm_guards
@@ -1618,11 +1750,15 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         // ─ 用户不感兴趣 → 关闭守卫，往下游传 hint，走正常路由 ─
         await closeGuard('user_declined');
         guardHint = `[守卫提示：用户之前对「${activeGuard.skill_name}」服务不感兴趣，本轮消息与此无关，请正常回答]`;
+        currentGuardStatus    = 'declined';                 // Step 5
+        currentGuardSkillName = activeGuard.skill_name;    // Step 5
 
       } else if (guardResult.confirm === 'yes') {
         // ─ 明确确认 → 关闭守卫，直接执行 skill（跳过 routeMessage）─
         await closeGuard('user_confirmed');
         console.log(`[SkillGuard] ✅ 用户确认，直接执行 skill ${activeGuard.skill_id}`);
+        currentGuardStatus    = 'confirmed_ticket';         // Step 5（工单将在 handleHealthSkill 创建）
+        currentGuardSkillName = activeGuard.skill_name;    // Step 5
 
         // 将 skill_id 注入 req，让后续代码当作「前端强制指定」处理
         (req as any).skill_id = activeGuard.skill_id;
@@ -1648,6 +1784,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
             guardId: activeGuard.id,
             note: `unclear→正常路由 isUserAsking=${isUserAsking} prevClarify=${prevClarifyCount}`,
           });
+          currentGuardStatus    = 'pending_unclear';          // Step 5
+          currentGuardSkillName = activeGuard.skill_name;   // Step 5
           // guardHint 不设置，直接 fall through 到正常路由
         } else {
           // 用户发了短暂模糊词 且 尚未追问过 → 追问一次
@@ -1689,6 +1827,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         // ─ confirm=no（明确不用）→ 关闭守卫，走正常路由 ─
         await closeGuard('user_declined_explicit');
         guardHint = `[守卫提示：用户明确不使用「${activeGuard.skill_name}」服务，请正常回答]`;
+        currentGuardStatus    = 'declined';                  // Step 5
+        currentGuardSkillName = activeGuard.skill_name;     // Step 5
       }
       }  // end: else(未超轮数)
     }
@@ -1788,6 +1928,9 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
   // ── Step 4 (v2): confidence=high → skill_suggest 推荐流程（v2 暂保留模板，Step8改为Agent）
   if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId) {
     console.log(`[AgentService] 💡 skill_suggest: skill=${selectedSkillName}(${selectedSkillId}) 高置信度，向用户介绍并询问确认`);
+    currentGuardStatus    = 'new_created';   // Step 5: 标记守卫状态
+    currentGuardSkillName = selectedSkillName;
+
 
     // ── Step 4 (v2): 跨skill守卫切换 ─────────────────────────────────────────
     // 若当前有活跃守卫且是【不同 skill】，先关闭旧守卫，再建新守卫
@@ -1931,6 +2074,35 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     void appendTaskEvent(requestId, 'reassurance_sent', { reply: skillResult.reply?.slice(0, 200) });
     return skillResult;
   } else {
+    // ── Step 5 (v2): 组装 Agent 上下文包 + directive（直接回复路径）──────────────
+    // guardStatus 说明：
+    //   none           = 无守卫，无工单
+    //   pending_unclear= 守卫存在但用户未确认（保留守卫，继续追问）
+    //   declined       = 用户拒绝了守卫，正常回答
+    //   new_created    = 守卫被新建（但此路径是已跳过 skill_suggest 的 fallthrough，很少见）
+    const agentCtxPkg = assembleAgentContext({
+      req,
+      routeSkillId:   selectedSkillId,
+      routeSkillName: selectedSkillName,
+      routeSkillDesc: selectedSkillDesc,
+      routeConf:      routeConfidence,
+      guardStatus:    currentGuardStatus,
+      guardSkillName: currentGuardSkillName,
+      ticketUrl:      null,                    // 无工单，直接回复路径
+      recentTicket:   ctxSnapshot.recentTicket || null,
+      serviceUrl,
+    });
+
+    void appendTaskEvent(requestId, 'agent_context_assembled', {
+      guardStatus:   agentCtxPkg.guardStatus,
+      routeSkill:    agentCtxPkg.routeSkillName,
+      confidence:    agentCtxPkg.routeConfidence,
+      hasTicket:     !!agentCtxPkg.existingTicket,
+      ticketStatus:  agentCtxPkg.existingTicket?.status || null,
+      directive:     agentCtxPkg.directive?.slice(0, 200) || '',
+    });
+    console.log(`[AgentService] 📦 agent_context_assembled: guardStatus=${agentCtxPkg.guardStatus} directive=${agentCtxPkg.directive?.slice(0,50)||'(none)'}`);
+
     const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
