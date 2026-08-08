@@ -377,6 +377,11 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
       // request_id: 存储创建工单的原始 agent 任务 ID，用于通知时回写渠道消息日志
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS request_id TEXT`,
+      // 架构改造 v2：守卫生命周期字段
+      // guard_mode: 守卫的创建模式（new_created=本消息新建 | existing=已有守卫 | closed_by_new_skill=被新skill关闭）
+      `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS guard_mode TEXT DEFAULT 'existing'`,
+      // closed_reason: 守卫关闭原因（user_declined | user_confirmed | closed_by_new_skill | max_rounds）
+      `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS closed_reason TEXT`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
