@@ -719,7 +719,111 @@ ${skillList}
   }
 }
 
+// ─── v2 架构：Step3 — 统一路由决策（替代 routeMessage + routeSkill）──────────
+
+export interface RouteDecisionResult {
+  skill_id:   string | null;
+  skill_name: string | null;
+  skill_desc: string | null;
+  confidence: 'high' | 'low' | 'none'; // high=需要推荐skill | low=健康问题直接回答 | none=普通聊天
+  reason:     string;
+  durationMs: number;
+  model:      string;
+  rawResult:  string;
+}
+
+/**
+ * 合并路由：一次 AI 调用同时完成"是否需要skill"和"哪个skill"的判断。
+ * 替代旧的 routeMessage() + routeSkill() 两次调用。
+ *
+ * 输出：
+ *   confidence=none  → 普通聊天，agent 直接回复
+ *   confidence=low   → 健康问题但无明确 skill 意图，agent 直接回复（带健康知识）
+ *   confidence=high  → 用户明确要用某个 skill，进入守卫流程
+ */
+async function routeDecision(
+  content: string,
+  history: { role: string; content: string }[],
+  notes: string,
+  availableSkills: { id: string; name: string; description: string }[],
+  apiKey: string,
+): Promise<RouteDecisionResult> {
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+  // 无可用 skill 时降级
+  if (!availableSkills.length) {
+    return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'low',
+             reason: '无可用skill，直接AI回复', durationMs: 0, model, rawResult: '' };
+  }
+
+  const skillList = availableSkills
+    .map((s, i) => `${i + 1}. ID="${s.id}" 名称="${s.name}" 描述="${s.description.slice(0, 100)}"`)
+    .join('\n');
+
+  const recentHistory = history.slice(-20)
+    .map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`)
+    .join('\n');
+
+  const systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+
+1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
+2. 判断置信度（confidence）：
+   - "high"：客户明确表达了要使用某个服务（如"帮我做营养分析""开始AI营养师"），可以主动向用户推荐该服务
+   - "low"：客户有健康相关问题，但没明确要求使用某个服务（如"我血糖高怎么办"），直接用AI知识回答即可，不推销服务
+   - "none"：普通聊天/问候/询问服务范围，直接回答，不涉及健康或服务
+
+注意：
+- 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
+- "能咨询血糖问题吗""你们能做什么"等询问服务能力属于 none，不是 low
+- 如没有合适的 skill，skill_id 返回 null
+
+可用专项服务列表：
+${skillList}
+
+只返回 JSON，不要有其他内容：
+{"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+
+  const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
+
+  const t0 = Date.now();
+  try {
+    const result = await callGeminiMessages(systemPrompt, [{ role: 'user', content: userMsg }], apiKey, 512);
+    const durationMs = Date.now() - t0;
+
+    const jsonStart = result.indexOf('{');
+    const jsonEnd   = result.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd <= jsonStart) throw new Error('no JSON in response');
+    const parsed = JSON.parse(result.slice(jsonStart, jsonEnd + 1));
+
+    const skill_id   = parsed.skill_id   || null;
+    const skill_name = parsed.skill_name || null;
+    const confidence = (['high','low','none'] as const).includes(parsed.confidence)
+      ? parsed.confidence as 'high'|'low'|'none' : 'none';
+
+    // 验证 skill_id 真实存在
+    const validSkill = skill_id ? availableSkills.find(s => s.id === skill_id) : null;
+    const finalSkillId   = validSkill ? skill_id   : null;
+    const finalSkillName = validSkill ? skill_name : null;
+    const finalSkillDesc = validSkill ? validSkill.description : null;
+
+    if (skill_id && !validSkill) {
+      console.warn(`[RouteDecision] 路由返回了未知 skill_id=${skill_id}，降级 null`);
+    }
+
+    console.log(`[RouteDecision] skill=${finalSkillName || 'none'} confidence=${confidence} reason=${parsed.reason} (${durationMs}ms)`);
+    return { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
+             confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim() };
+
+  } catch (err) {
+    const durationMs = Date.now() - t0;
+    console.warn('[RouteDecision] 路由失败，降级 confidence=none:', err);
+    return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'none',
+             reason: '路由失败，降级直接回复', durationMs, model, rawResult: '(error)' };
+  }
+}
+
 // ─── 3. 安抚消息生成 ──────────────────────────────────────────────────────────
+
 
 async function buildReassuranceMessage(
   fromName: string,
@@ -1583,157 +1687,142 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     }
   }
 
-  // ── Step 1: chat vs health 路由 ─────────────────────────────────────────────
+  // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
   void updateAgentTask(requestId, { status: 'routing' });
-  const routeResult = await routeMessage(
-    guardHint ? `${req.content}\n${guardHint}` : req.content,
-    req.notes || '',
-    req.history || [],
-    apiKey,
-  );
-  const routeType = (req as any).skill_id ? 'health' : routeResult.type;  // guard 确认后强制走 health
-  console.log(`[AgentService] → routed as: ${routeType} (${routeResult.durationMs}ms)`);
-  void appendTaskEvent(requestId, 'route_decided', {
-    routeType,
-    durationMs: routeResult.durationMs,
-    systemPrompt: routeResult.systemPrompt,
-    userMsg: routeResult.userMsg.slice(0, 800),
-    rawResult: routeResult.rawResult,
-    model: routeResult.model || process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-    guardHint: guardHint || null,
-  });
+  const profile = await loadAgentProfile();
+  console.log(`[AgentService] Profile: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+  const availableSkills = await getAvailableSkills(profile);
+  console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
 
-  // ── Step 2: 普通聊天不走 skill ──────────────────────────────────────────────
-  if (routeType !== 'health') {
+  // 检查是否前端/守卫强制指定了 skill_id（守卫确认 yes 时注入，优先级最高）
+  const forcedSkillId: string | null = (req as any).skill_id || null;
+  let forcedSkillName: string | null = null;
+  if (forcedSkillId) {
+    const found = availableSkills.find(s => s.id === forcedSkillId)
+      || await db.getAsync<any>('SELECT id, name FROM skills WHERE id=?', [forcedSkillId]);
+    forcedSkillName = (found as any)?.name || forcedSkillId;
+    console.log(`[AgentService] skill_id forced by guard/caller: ${forcedSkillId}`);
+  }
+
+  // ── Step 2 (v2): 统一路由决策（单次 AI 调用，替代 routeMessage + routeSkill）──
+  let selectedSkillId:   string | null = null;
+  let selectedSkillName: string | null = null;
+  let selectedSkillDesc: string | null = null;
+  let routeConfidence: 'high' | 'low' | 'none' = 'none';
+  let routeReason = '';
+
+  if (forcedSkillId) {
+    // 守卫已确认 / 前端强制 → 跳过路由，直接执行
+    selectedSkillId   = forcedSkillId;
+    selectedSkillName = forcedSkillName;
+    selectedSkillDesc = availableSkills.find(s => s.id === forcedSkillId)?.description || null;
+    routeConfidence   = 'high';
+    routeReason       = `守卫确认/前端强制 skill_id=${forcedSkillId}`;
+    void appendTaskEvent(requestId, 'route_decided', {
+      confidence: 'high', skill_id: selectedSkillId, skill_name: selectedSkillName,
+      reason: routeReason, forced: true, durationMs: 0, guardHint: guardHint || null,
+    });
+  } else {
+    // 正常路由：单次 AI 调用（v2）
+    const rdResult = await routeDecision(
+      guardHint ? `${req.content}\n${guardHint}` : req.content,
+      req.history || [],
+      req.notes || '',
+      availableSkills,
+      apiKey,
+    );
+    selectedSkillId   = rdResult.skill_id;
+    selectedSkillName = rdResult.skill_name;
+    selectedSkillDesc = rdResult.skill_desc;
+    routeConfidence   = rdResult.confidence;
+    routeReason       = rdResult.reason;
+
+    console.log(`[AgentService] → routeDecision: confidence=${rdResult.confidence} skill=${rdResult.skill_name || 'none'} (${rdResult.durationMs}ms)`);
+    void appendTaskEvent(requestId, 'route_decided', {
+      confidence: rdResult.confidence,
+      skill_id:   rdResult.skill_id,
+      skill_name: rdResult.skill_name,
+      reason:     rdResult.reason,
+      durationMs: rdResult.durationMs,
+      model:      rdResult.model,
+      rawResult:  rdResult.rawResult?.slice(0, 200),
+      guardHint:  guardHint || null,
+    });
+  }
+
+  // ── Step 3 (v2): confidence=none → 普通聊天，直接 Agent 回复 ─────────────────
+  if (routeConfidence === 'none') {
     void updateAgentTask(requestId, { status: 'executing', routeType: 'chat' });
-    const profile = await loadAgentProfile();
     const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
 
-    // ── 任务4: 抢占检查 — 发送前看是否有更新的用户任务 ──────────────────────
-    const newerTask = await db.getAsync<any>(
-      `SELECT id FROM agent_tasks
-       WHERE session_id = ? AND id != ? AND started_at > ?
-       ORDER BY started_at DESC LIMIT 1`,
+    // 抢占检查
+    const newerTaskChat = await db.getAsync<any>(
+      `SELECT id FROM agent_tasks WHERE session_id = ? AND id != ? AND started_at > ? ORDER BY started_at DESC LIMIT 1`,
       [req.session_id, requestId, taskStartMs]
     ).catch(() => null);
 
-    if (newerTask) {
-      // 有更新的消息正在处理，放弃发送此次回复
-      console.log(`[AgentService] ✂️ 抢占检查触发: requestId=${requestId} 被 ${newerTask.id} 抢占，发送被放弃`);
+    if (newerTaskChat) {
+      console.log(`[AgentService] ✂️ 抢占: requestId=${requestId} 被 ${newerTaskChat.id} 抢占`);
       void appendTaskEvent(requestId, 'reply_preempted', {
-        reason: '用户有更新的消息正在处理，跳过本次回复（防止乱序发送）',
-        newer_task_id: newerTask.id,
-        skipped_reply_len: chatResult.reply?.length || 0,
+        reason: '有更新消息正在处理，跳过本次回复',
+        newer_task_id: newerTaskChat.id,
         skipped_reply_preview: chatResult.reply?.slice(0, 60) || '',
       });
       void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: '[已抢占，未发送]', endedAt: Date.now(), durationMs: Date.now() - taskStartMs });
-      return { ...chatResult, reply: '' };  // 空回复，不发送
+      return { ...chatResult, reply: '' };
     }
 
-    console.log(`[AgentService] ✅ 抢占检查通过: requestId=${requestId} 无更新任务，正常发送`);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'chat', replyContent: chatResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length, reply: chatResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
     return chatResult;
   }
 
-  // ── Step 3: 健康问题 — 加载 Agent Profile + 可用 skill ─────────────────────
-  const profile = await loadAgentProfile();
-  console.log(`[AgentService] Profile: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+  // ── Step 4 (v2): confidence=high → skill_suggest 推荐流程（v2 暂保留模板，Step8改为Agent）
+  if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId) {
+    console.log(`[AgentService] 💡 skill_suggest: skill=${selectedSkillName}(${selectedSkillId}) 高置信度，向用户介绍并询问确认`);
+    const fromName = req.meta.from_name || '您';
+    const skillDescText = selectedSkillDesc || '';
+    const suggestMsg = `${fromName}，根据您的需求，我们有一项「${selectedSkillName}」服务可能适合您。\n\n${skillDescText ? `📋 ${skillDescText.slice(0, 100)}${skillDescText.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
 
-  const availableSkills = await getAvailableSkills(profile);
-  console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
+    void appendTaskEvent(requestId, 'skill_suggest', {
+      skillId: selectedSkillId, skillName: selectedSkillName, reason: routeReason, suggestMsg,
+    });
+    void appendTaskEvent(requestId, 'reply_sent', {
+      replyLen: suggestMsg.length, reply: suggestMsg.slice(0, 300),
+      channel: delivery.app, recipient: delivery.recipient, note: 'skill_suggest',
+    });
 
-  // ── Step 4: 决定使用哪个 skill ──────────────────────────────────────────────
-  let selectedSkillId: string | null = null;
-  let selectedSkillName: string | null = null;
-  let routeReason = '';
-  let routeConfidence: 'high' | 'low' = 'low';  // 默认 low，只有明确时才 high
+    const nowTs = Date.now();
+    void updateAgentTask(requestId, {
+      status: 'done', routeType: 'skill_suggest', skillId: selectedSkillId,
+      replyContent: suggestMsg.slice(0, 500), endedAt: nowTs, durationMs: nowTs - taskStartMs,
+    });
 
-  if (req.skill_id) {
-    // 前端强制指定（优先级最高）
-    const found = availableSkills.find(s => s.id === req.skill_id)
-      || await db.getAsync<any>('SELECT id, name FROM skills WHERE id=?', [req.skill_id]);
-    selectedSkillId   = req.skill_id;
-    selectedSkillName = (found as any)?.name || req.skill_id;
-    routeReason = `前端强制指定 skill_id=${req.skill_id}`;
-    routeConfidence = 'high';  // 前端强制 = 用户已确认
-    console.log(`[AgentService] skill_id forced by caller: ${selectedSkillId}`);
-  } else {
-    // Agent 自动路由
-    const route = await routeSkill(req.content, availableSkills, req.history || [], apiKey);
-    selectedSkillId   = route.skillId;
-    selectedSkillName = route.skillName;
-    routeReason = route.reason;
-    routeConfidence = route.confidence;
-
-    // ── Step 4.5: skill_suggest — 高置信度匹配时先介绍 skill，询问用户是否确认 ──
-    console.log(`[AgentService] 📊 skill route: id=${route.skillId} confidence=${route.confidence} reason=${route.reason}`);
-    if (route.skillId && route.skillName && route.confidence === 'high') {
-      console.log(`[AgentService] 💡 skill_suggest: skill=${route.skillName}(${route.skillId}) 高置信度匹配，向用户介绍并询问确认`);
-      const skill = availableSkills.find(s => s.id === route.skillId);
-      const skillDesc = skill?.description || '';
-      const fromName = req.meta.from_name || '您';
-
-      // 组建介绍消息（简洁，不推销）
-      const suggestMsg = `${fromName}，根据您的需求，我们有一项「${route.skillName}」服务可能适合您。\n\n${skillDesc ? `📋 ${skillDesc.slice(0, 100)}${skillDesc.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
-
-      void appendTaskEvent(requestId, 'skill_suggest', {
-        skillId: route.skillId,
-        skillName: route.skillName,
-        reason: route.reason,
-        suggestMsg,
+    // 激活守卫
+    const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+    try {
+      await db.runAsync(
+        `INSERT INTO skill_confirm_guards
+          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        [guardId, sessionId, userId, selectedSkillId, selectedSkillName,
+         suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000],
+      );
+      console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${selectedSkillName} session=${sessionId}`);
+      void appendTaskEvent(requestId, 'skill_guard_activated', {
+        guardId, skillId: selectedSkillId, skillName: selectedSkillName,
+        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
       });
-
-      void appendTaskEvent(requestId, 'reply_sent', {
-        replyLen: suggestMsg.length,
-        reply: suggestMsg.slice(0, 300),
-        channel: delivery.app,
-        recipient: delivery.recipient,
-        note: 'skill_suggest',
-      });
-
-      const nowTs = Date.now();
-      void updateAgentTask(requestId, {
-        status: 'done',
-        routeType: 'skill_suggest',
-        skillId: route.skillId,
-        replyContent: suggestMsg.slice(0, 500),
-        endedAt: nowTs,
-        durationMs: nowTs - taskStartMs,
-      });
-
-      // ── 激活守卫：在 DB 记录「当前 session 正在等待用户确认 skill」──
-      const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
-      try {
-        await db.runAsync(
-          `INSERT INTO skill_confirm_guards
-            (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-          [guardId, sessionId, userId, route.skillId, route.skillName,
-           suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000],
-        );
-        console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${route.skillName} session=${sessionId}`);
-        void appendTaskEvent(requestId, 'skill_guard_activated', {
-          guardId,
-          skillId: route.skillId,
-          skillName: route.skillName,
-          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
-        });
-      } catch (e: any) {
-        console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
-      }
-
-      // 返回 reply 给调用方（agentRoutes 负责 CUA 发送，与 chat 路径相同）
-      return {
-        request_id:  requestId,
-        status:      'done',
-        reply:       suggestMsg,
-        delivery,
-        reasoning:   `Skill「${route.skillName}」高置信度匹配，询问用户确认`,
-        route_type:  'skill_suggest',
-      } as any;
+    } catch (e: any) {
+      console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
     }
+
+    return {
+      request_id: requestId, status: 'done', reply: suggestMsg, delivery,
+      reasoning:  `Skill「${selectedSkillName}」高置信度匹配，询问用户确认`,
+      route_type: 'skill_suggest',
+    } as any;
   }
 
 
