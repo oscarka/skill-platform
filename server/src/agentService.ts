@@ -952,15 +952,18 @@ function assembleAgentContext(params: {
     directive = `用户明确拒绝了「${guardSkillName || ''}」服务，守卫已关闭。请正常回答用户的问题。`;
 
   } else if (guardStatus === 'pending_unclear' && guardSkillName) {
-    if (routeSkillId && routeSkillId !== (params.recentTicket?.skill_id) && routeSkillName !== guardSkillName) {
-      // 不同 skill
+    if (routeSkillId && routeSkillName !== guardSkillName) {
+      // 话题跳到不同 skill
       directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
-        + `本次消息话题指向「${routeSkillName}」，无需重复推荐守卫中的服务。`
-        + `请先回答用户的问题。`;
+        + `本次消息话题指向其他方向，请先回答用户的问题，不必重复推荐服务。`;
+    } else if ((params as any).isFirstClarify) {
+      // 首次模糊确认（守卫首轮unclear，用户没有在提问）→ Agent 必须主动引导确认
+      directive = `用户刚才的回复意向不明确，是否要使用「${guardSkillName}」服务尚未确认。`
+        + `\n请先简短回答用户的问题，然后**在回复末尾自然地询问**：「您是想现在使用「${guardSkillName}」服务吗？」（语气自然，不要强迫）。`;
     } else {
-      // 同 skill 或无路由 skill
-      directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
-        + `请先回答用户的问题，如果对话场景合适，在回答末尾自然地引导用户确认是否使用该服务（不要强迫，感觉自然即可）。`;
+      // 已追问过或用户在提问 → 先回答，顺带引导
+      directive = `用户对「${guardSkillName}」服务有意向但尚未明确确认。`
+        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾轻描淡写地引导用户确认是否使用该服务（不要强迫）。`;
     }
 
   } else if (guardStatus === 'none' && existingTicket) {
@@ -1682,6 +1685,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   let guardHint = '';  // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
   let currentGuardStatus: GuardStatus = 'none';          // Step 5 (v2): 追踪守卫状态
   let currentGuardSkillName: string | null = null;       // Step 5 (v2): 守卫对应的 skill
+  let isFirstClarify = false;                            // Step 7fix: 首次 unclear 需要 Agent 主动引导
   if (sessionId) {
 
     const nowMs = Date.now();
@@ -1856,38 +1860,18 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           currentGuardSkillName = activeGuard.skill_name;   // Step 5
           // guardHint 不设置，直接 fall through 到正常路由
         } else {
-          // 用户发了短暂模糊词 且 尚未追问过 → 追问一次
-          console.log(`[SkillGuard] ❓ 首次模糊确认，追问用户`);
-          const clarifyMsg = `您是想现在开始「${activeGuard.skill_name}」分析吗？如果是，请直接告诉我「开始」或「好，帮我分析」～`;
-
+          // 用户发了短暂模糊词 且 尚未追问过 → 不再直接发守卫消息，改走 Agent
+          // Agent 会通过 directive(pending_unclear) 自然地引导用户确认
+          console.log(`[SkillGuard] ❓ 首次模糊确认，交给 Agent 引导（不再守卫直接发消息）`);
           void appendTaskEvent(requestId, 'skill_guard_clarify', {
             guardId: activeGuard.id,
             skillName: activeGuard.skill_name,
-            clarifyMsg,
+            note: '首次unclear→交给Agent引导',
           });
-          void appendTaskEvent(requestId, 'reply_sent', {
-            replyLen: clarifyMsg.length,
-            reply: clarifyMsg,
-            channel: delivery.app,
-            recipient: delivery.recipient,
-            note: 'guard_clarify',
-          });
-          const endMs = Date.now();
-          void updateAgentTask(requestId, {
-            status: 'done',
-            routeType: 'skill_guard_clarify',
-            replyContent: clarifyMsg,
-            endedAt: endMs,
-            durationMs: endMs - taskStartMs,
-          });
-          return {
-            request_id: requestId,
-            status:     'done',
-            reply:      clarifyMsg,
-            delivery,
-            reasoning:  `SkillGuard: 用户首次模糊，追问确认`,
-            route_type: 'skill_guard_clarify',
-          } as any;
+          currentGuardStatus    = 'pending_unclear';        // Step 5: Agent 将收到 pending_unclear directive
+          currentGuardSkillName = activeGuard.skill_name;
+          isFirstClarify        = true;                      // 首次 unclear → Agent 需要主动引导
+          // fall through → Agent 根据 directive 生成自然的引导回复
         }
 
 
@@ -2156,10 +2140,11 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       routeConf:      routeConfidence,
       guardStatus:    currentGuardStatus,
       guardSkillName: currentGuardSkillName,
-      ticketUrl:      null,                    // 无工单，直接回复路径
+      ticketUrl:      null,
       recentTicket:   ctxSnapshot.recentTicket || null,
       serviceUrl,
-    });
+      isFirstClarify,                          // Step 7fix: 首次 unclear 需要 Agent 主动引导
+    } as any);
 
     void appendTaskEvent(requestId, 'agent_context_assembled', {
       guardStatus:   agentCtxPkg.guardStatus,
