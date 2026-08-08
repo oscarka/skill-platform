@@ -567,29 +567,33 @@ async function callGeminiMessages(
         result = await fetchWikiPage(userId, 'medication_plan.md');
         console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
       } else if (fnName === 'query_ticket') {
-        // Step 6 (v2): 查询工单/报告内容
+        // Step 6 (v2): 查询工单/报告内容（JOIN ticket_results 获取报告正文）
         const ticket = await db.getAsync<any>(
-          `SELECT id, skill_id, skill_name, status, raw_result, report_url, created_at
-           FROM tickets
-           WHERE created_by=? AND status IN ('done','processing','submitted','waiting_input')
-           ORDER BY created_at DESC LIMIT 1`,
+          `SELECT t.id, t.skill_id, t.skill_name, t.status, t.created_at,
+                  tr.raw_result, tr.report_url
+           FROM tickets t
+           LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+           WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+           ORDER BY t.created_at DESC LIMIT 1`,
           [userId || ''],
         ).catch(() => null);
         if (ticket) {
+          const reportContent = ticket.raw_result || null;
           result = JSON.stringify({
             ticket_id:    ticket.id,
             skill_name:   ticket.skill_name || ticket.skill_id,
             status:       ticket.status,
-            report:       ticket.raw_result || '（报告尚未生成）',
+            report:       reportContent || '（报告尚未生成）',
             report_url:   ticket.report_url || null,
             created_at:   ticket.created_at,
           });
-          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${ticket.raw_result?.length || 0}`);
+          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${reportContent?.length || 0}`);
         } else {
           result = JSON.stringify({ found: false, message: '未找到近期工单' });
           console.log(`[Gemini] 📋 query_ticket → 无工单 userId=${userId}`);
         }
         options?.onToolCall?.(fnName, { user_id: userId }, result);
+
       } else {
         result = `未知工具: ${fnName}`;
       }

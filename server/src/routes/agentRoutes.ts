@@ -549,3 +549,21 @@ agentRouter.get('/skills/available', async (_req, res) => {
     res.status(500).json({ error: 'db_error', message: err.message });
   }
 });
+
+// ─── Debug: 关闭用户所有活跃守卫（测试用）──────────────────────────────────────
+agentRouter.delete('/debug/guards', async (req, res) => {
+  const userId = req.query.user_id as string;
+  if (!userId) return res.status(400).json({ error: 'user_id required' });
+  try {
+    const now = Date.now();
+    const result = await db.runAsync(
+      `UPDATE skill_confirm_guards SET status='closed', updated_at=? WHERE user_id=? AND status='active'`,
+      [now, userId],
+    );
+    const closed = (result as any)?.changes || 0;
+    console.log(`[Debug] 关闭 ${userId} 的 ${closed} 个活跃守卫`);
+    res.json({ ok: true, closed });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
