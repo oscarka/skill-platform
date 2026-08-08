@@ -1511,7 +1511,14 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         maxRounds: MAX_GUARD_ROUNDS,
         userMsg: req.content.slice(0, 200),
       });
-
+      // ── Step 4 (v2): guard_lifecycle=existing 事件 ─────────────────────────
+      void appendTaskEvent(requestId, 'guard_lifecycle', {
+        action: 'existing',
+        guardId: activeGuard.id,
+        skillId: activeGuard.skill_id,
+        skillName: activeGuard.skill_name,
+        round: newCheckCount,
+      });
       // 超过轮数限制→自动关闭，往下游传 hint
       if (newCheckCount > MAX_GUARD_ROUNDS) {
         await db.runAsync(
@@ -1781,6 +1788,45 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
   // ── Step 4 (v2): confidence=high → skill_suggest 推荐流程（v2 暂保留模板，Step8改为Agent）
   if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId) {
     console.log(`[AgentService] 💡 skill_suggest: skill=${selectedSkillName}(${selectedSkillId}) 高置信度，向用户介绍并询问确认`);
+
+    // ── Step 4 (v2): 跨skill守卫切换 ─────────────────────────────────────────
+    // 若当前有活跃守卫且是【不同 skill】，先关闭旧守卫，再建新守卫
+    if (ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id !== selectedSkillId) {
+      const oldGuard = ctxSnapshot.activeGuard;
+      try {
+        await db.runAsync(
+          `UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`,
+          [oldGuard.id],
+        );
+        console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${oldGuard.id} skill=${oldGuard.skill_name}`);
+        void appendTaskEvent(requestId, 'guard_lifecycle', {
+          action: 'closed_by_new_skill',
+          guardId: oldGuard.id,
+          oldSkillId: oldGuard.skill_id,
+          oldSkillName: oldGuard.skill_name,
+          newSkillId: selectedSkillId,
+          newSkillName: selectedSkillName,
+        });
+      } catch (e: any) {
+        console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
+      }
+    }
+
+    // 若当前已有相同 skill 的活跃守卫，不重复创建
+    const existingSameGuard = ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id === selectedSkillId
+      ? ctxSnapshot.activeGuard : null;
+    if (existingSameGuard) {
+      console.log(`[SkillGuard] ♻️ 同skill守卫已存在 id=${existingSameGuard.id}，不重复创建`);
+      void appendTaskEvent(requestId, 'guard_lifecycle', {
+        action: 'existing',
+        guardId: existingSameGuard.id,
+        skillId: selectedSkillId,
+        skillName: selectedSkillName,
+        note: 'skill_suggest重入：同skill守卫已存在',
+      });
+    }
+
+
     const fromName = req.meta.from_name || '您';
     const skillDescText = selectedSkillDesc || '';
     const suggestMsg = `${fromName}，根据您的需求，我们有一项「${selectedSkillName}」服务可能适合您。\n\n${skillDescText ? `📋 ${skillDescText.slice(0, 100)}${skillDescText.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
@@ -1812,6 +1858,14 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${selectedSkillName} session=${sessionId}`);
       void appendTaskEvent(requestId, 'skill_guard_activated', {
         guardId, skillId: selectedSkillId, skillName: selectedSkillName,
+        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+      });
+      // ── Step 4 (v2): guard_lifecycle=new_created 标准事件 ─────────────────
+      void appendTaskEvent(requestId, 'guard_lifecycle', {
+        action:    'new_created',
+        guardId,
+        skillId:   selectedSkillId,
+        skillName: selectedSkillName,
         expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
       });
     } catch (e: any) {
