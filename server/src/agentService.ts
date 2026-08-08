@@ -1050,15 +1050,27 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 - 直接称呼客户为"${fromName}"
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
-- 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理`;
+- 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理
+- 如客户询问工单进度、报告状态、之前提交的服务情况，必须先调用 query_ticket 工具查询真实状态，再据实回答；工单状态说明：created=已创建待处理，waiting_input=等待您填写信息，submitted=您已提交等待分析，processing=AI正在分析中，done=分析已完成，expired=已过期`;
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024,
-    { tools: wikiCtx?.health_wiki ? WIKI_TOOLS : undefined, userId: meta.user_id });
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
+    tools:      WIKI_TOOLS,   // 含 query_ticket，让 AI 按需查工单
+    userId:     meta.user_id,
+    onToolCall: (name, _args, result) => {
+      if (name === 'query_ticket') {
+        void appendTaskEvent(requestId, 'tool_query_ticket', {
+          userId: meta.user_id,
+          result: (() => { try { return JSON.parse(result); } catch { return result; } })(),
+        });
+        console.log(`[AgentService] 🔧 [Chat] tool_query_ticket 已触发 userId=${meta.user_id}`);
+      }
+    },
+  });
 
   // ── LLMWiki: 后台写日志 ──
   backgroundPostLog(meta.user_id, content, reply.trim());
