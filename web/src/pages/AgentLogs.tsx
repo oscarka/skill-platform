@@ -554,6 +554,10 @@ function AgentTasksPanel() {
                   skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
                   ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                   ticket_result_sent:    { icon: '📊', label: '报告已发送', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
+                  // ── v2 架构新增事件 (Steps 4-7) ──────────────────────────────────────────
+                  guard_lifecycle:       { icon: '🛰️', label: '守卫生命周期', dotBg: '#7c3aed', cardBg: '#f5f3ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
+                  agent_context_assembled: { icon: '📦', label: 'Agent上下文包', dotBg: '#0369a1', cardBg: '#f0f9ff', cardBorder: '#7dd3fc', textColor: '#075985' },
+                  tool_query_ticket:     { icon: '🔍', label: '查询工单', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -827,7 +831,60 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
+                        {evType === 'guard_lifecycle' && (() => {
+                          const p = ev.payload || {};
+                          const actionMap: Record<string, string> = {
+                            new_created: '🆕 新建守卫',
+                            existing:    '♻️ 复用守卫',
+                            closed_by_new_skill: '🔄 跨skill切换关闭',
+                          };
+                          return (
+                            <div style={{ fontSize: '.79rem', background: '#f5f3ff', border: '1px solid #c4b5fd', borderRadius: 8, padding: '6px 10px', lineHeight: 1.6 }}>
+                              <span style={{ fontWeight: 600 }}>{actionMap[p.action] || p.action}</span>
+                              {p.skillName && <span style={{ marginLeft: 8, color: '#6d28d9' }}>「{p.skillName}」</span>}
+                              {p.round != null && <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: '.72rem' }}>第{p.round}轮</span>}
+                              {p.oldSkillName && <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: '.72rem' }}>{p.oldSkillName} → {p.newSkillName}</span>}
+                            </div>
+                          );
+                        })()}
+
+                        {evType === 'agent_context_assembled' && (() => {
+                          const p = ev.payload || {};
+                          const statusMap: Record<string, { color: string; label: string }> = {
+                            new_created:      { color: '#7c3aed', label: '🆕 新建守卫' },
+                            confirmed_ticket: { color: '#059669', label: '✅ 已确认建单' },
+                            declined:         { color: '#dc2626', label: '❌ 已拒绝' },
+                            pending_unclear:  { color: '#d97706', label: '⏳ 待确认' },
+                            none:             { color: '#64748b', label: '○ 无守卫' },
+                          };
+                          const st = statusMap[p.guardStatus] || { color: '#64748b', label: p.guardStatus };
+                          return (
+                            <div style={{ fontSize: '.79rem', background: '#f0f9ff', border: '1px solid #7dd3fc', borderRadius: 8, padding: '8px 12px', lineHeight: 1.7 }}>
+                              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
+                                <span><b>守卫状态</b> <span style={{ color: st.color, fontWeight: 600 }}>{st.label}</span></span>
+                                {p.routeSkill && <span><b>路由Skill</b> {p.routeSkill}</span>}
+                                {p.confidence && <span><b>置信度</b> {p.confidence}</span>}
+                                {p.hasTicket && <span><b>工单</b> {p.ticketStatus || '有'}</span>}
+                              </div>
+                              {p.directive && <div style={{ marginTop: 6, padding: '4px 8px', background: '#e0f2fe', borderRadius: 5, color: '#0369a1', fontSize: '.76rem' }}>📋 {p.directive.slice(0, 150)}{p.directive.length > 150 ? '…' : ''}</div>}
+                            </div>
+                          );
+                        })()}
+
+                        {evType === 'tool_query_ticket' && (() => {
+                          const p = ev.payload || {};
+                          const r = p.result || {};
+                          return (
+                            <div style={{ fontSize: '.79rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: 8, padding: '6px 10px' }}>
+                              {r.found === false
+                                ? <span style={{ color: '#6b7280' }}>无近期工单</span>
+                                : <span><b>{r.skill_name || '工单'}</b> · {r.status} · 报告{r.report ? `${r.report.length}字` : '无'}</span>
+                              }
+                            </div>
+                          );
+                        })()}
+
+                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent','guard_lifecycle','agent_context_assembled','tool_query_ticket'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
