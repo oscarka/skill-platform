@@ -275,6 +275,24 @@ const WIKI_TOOLS = [
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
+  // ── Step 6 (v2): query_ticket — Agent 按需查询工单/报告内容 ───────────────────
+  {
+    type: 'function' as const,
+    function: {
+      name: 'query_ticket',
+      description: '查询用户最近一条工单或分析报告的详细内容。当用户询问报告细节、分析结果、工单进度时调用。返回报告正文、状态和工单ID。',
+      parameters: {
+        type: 'object',
+        properties: {
+          user_id: {
+            type: 'string',
+            description: '用户ID，从对话上下文获取',
+          },
+        },
+        required: [],
+      },
+    },
+  },
 ];
 
 // ─── In-memory store for pending async health queries ─────────────────────────
@@ -462,7 +480,11 @@ async function callGeminiMessages(
   messages: { role: string; content: string }[],
   apiKey: string,
   maxTokens = 4096,
-  options?: { tools?: any[]; userId?: string },
+  options?: {
+    tools?: any[];
+    userId?: string;
+    onToolCall?: (name: string, args: any, result: string) => void;  // Step 6: tool call 事件回调
+  },
 ): Promise<string> {
   const BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
   const tools = options?.tools;
@@ -544,6 +566,30 @@ async function callGeminiMessages(
       } else if (fnName === 'get_medication_plan') {
         result = await fetchWikiPage(userId, 'medication_plan.md');
         console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
+      } else if (fnName === 'query_ticket') {
+        // Step 6 (v2): 查询工单/报告内容
+        const ticket = await db.getAsync<any>(
+          `SELECT id, skill_id, skill_name, status, raw_result, report_url, created_at
+           FROM tickets
+           WHERE created_by=? AND status IN ('done','processing','submitted','waiting_input')
+           ORDER BY created_at DESC LIMIT 1`,
+          [userId || ''],
+        ).catch(() => null);
+        if (ticket) {
+          result = JSON.stringify({
+            ticket_id:    ticket.id,
+            skill_name:   ticket.skill_name || ticket.skill_id,
+            status:       ticket.status,
+            report:       ticket.raw_result || '（报告尚未生成）',
+            report_url:   ticket.report_url || null,
+            created_at:   ticket.created_at,
+          });
+          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${ticket.raw_result?.length || 0}`);
+        } else {
+          result = JSON.stringify({ found: false, message: '未找到近期工单' });
+          console.log(`[Gemini] 📋 query_ticket → 无工单 userId=${userId}`);
+        }
+        options?.onToolCall?.(fnName, { user_id: userId }, result);
       } else {
         result = `未知工具: ${fnName}`;
       }
@@ -1058,8 +1104,21 @@ async function handleHealthDirect(
     { role: 'user', content: contextBlock },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048,
-    { tools: wikiCtx?.health_wiki ? WIKI_TOOLS : undefined, userId: meta.user_id });
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048, {
+    tools: WIKI_TOOLS,  // Step 6: 始终传入，包含 query_ticket
+    userId: meta.user_id,
+    onToolCall: (name, args, result) => {
+      // Step 6: 记录 tool call 事件到日志
+      if (name === 'query_ticket') {
+        void appendTaskEvent(requestId, 'tool_query_ticket', {
+          userId: meta.user_id,
+          result: (() => { try { return JSON.parse(result); } catch { return result; } })(),
+        });
+        console.log(`[AgentService] 🔧 tool_query_ticket 已触发 userId=${meta.user_id}`);
+      }
+    },
+  });
+
 
   // ── LLMWiki: 后台写日志 ──
   backgroundPostLog(meta.user_id, content, reply.trim());
