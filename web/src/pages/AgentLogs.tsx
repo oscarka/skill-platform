@@ -527,8 +527,9 @@ function AgentTasksPanel() {
                 const stepMs = item.ts - prevTs;
                 const evType: string = ev.event_type;
                 const evCfg: Record<string, { icon: string; label: string; dotBg: string; cardBg: string; cardBorder: string; textColor: string }> = {
-                  message_received: { icon: '📩', label: '收到消息', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#bfdbfe', textColor: '#1e40af' },
-                  wiki_fetched:     { icon: '📚', label: 'Wiki 上下文', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#bbf7d0', textColor: '#065f46' },
+                  message_received:  { icon: '📩', label: '收到消息', dotBg: '#2563eb', cardBg: '#eff6ff', cardBorder: '#bfdbfe', textColor: '#1e40af' },
+                  wiki_fetched:      { icon: '📚', label: 'Wiki 上下文', dotBg: '#059669', cardBg: '#f0fdf4', cardBorder: '#bbf7d0', textColor: '#065f46' },
+                  context_snapshot:  { icon: '📸', label: '上下文快照', dotBg: '#0891b2', cardBg: '#f0f9ff', cardBorder: '#bae6fd', textColor: '#0369a1' },
                   app_prewarm:      { icon: '📱', label: '应用预热', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#e9d5ff', textColor: '#5b21b6' },
                   route_decided:    { icon: '🔀', label: '路由决策', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#e9d5ff', textColor: '#5b21b6' },
                   skill_selected:   { icon: '🎯', label: 'Skill 选择', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#c2410c' },
@@ -578,6 +579,18 @@ function AgentTasksPanel() {
                               <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8' }}>来源: {p.source || selected.source_channel}</span>
                               {p.history_count > 0 && <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#e0e7ff', color: '#4338ca' }}>📜 历史 {p.history_count} 条</span>}
                               {p.has_notes && <span style={{ fontSize: '.7rem', padding: '1px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e' }}>📝 含备注</span>}
+                            </div>
+                          </div>
+                        )}
+                        {evType === 'context_snapshot' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, marginBottom: 6 }}>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: p.hasGuard ? '#fef3c7' : '#f1f5f9', color: p.hasGuard ? '#92400e' : '#94a3b8' }}>
+                                🛡️ 守卫: {p.hasGuard ? `${p.guardSkill || '未知'}（已${p.guardRounds}轮）` : '无'}
+                              </span>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: p.hasTicket ? '#d1fae5' : '#f1f5f9', color: p.hasTicket ? '#065f46' : '#94a3b8' }}>
+                                📋 工单: {p.hasTicket ? `${p.ticketSkill || '?'} · ${p.ticketStatus} · ${p.ticketAge}前` : '无'}
+                              </span>
                             </div>
                           </div>
                         )}
@@ -814,7 +827,7 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
+                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>
