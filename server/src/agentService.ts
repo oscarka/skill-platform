@@ -560,10 +560,58 @@ async function callGeminiMessages(
   throw new Error('Tool call loop exceeded max rounds');
 }
 
+// ─── v2 架构：Step2 — 路由前上下文预查询 ─────────────────────────────────────
+
+export interface ContextSnapshot {
+  // 守卫状态
+  activeGuard: any | null;         // 当前 session 的活跃守卫行（null=无）
+  // 工单状态（最近7天内任意skill的最新工单）
+  recentTicket: any | null;        // null=无最近工单
+}
+
+/**
+ * 在路由AI调用之前，一次性查好守卫和工单状态。
+ * 后续所有步骤（路由、守卫、Agent上下文组装）直接使用，不重复查DB。
+ */
+async function queryContextSnapshot(
+  sessionId: string | null,
+  userId: string | null,
+): Promise<ContextSnapshot> {
+  const nowMs = Date.now();
+  const sevenDaysAgo = nowMs - 7 * 24 * 60 * 60 * 1000;
+
+  // 查守卫：当前 session 的活跃守卫（最新一条）
+  let activeGuard: any | null = null;
+  if (sessionId) {
+    activeGuard = await db.getAsync<any>(
+      `SELECT * FROM skill_confirm_guards
+       WHERE session_id=? AND status='active' AND expires_at>?
+       ORDER BY created_at DESC LIMIT 1`,
+      [sessionId, nowMs],
+    ).catch(() => null);
+  }
+
+  // 查工单：该用户7天内最新工单（任意skill）
+  let recentTicket: any | null = null;
+  if (userId) {
+    recentTicket = await db.getAsync<any>(
+      `SELECT t.*, tr.raw_result, tr.report_url
+       FROM tickets t
+       LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+       WHERE t.created_by=? AND t.created_at>? AND t.status != 'error'
+       ORDER BY t.created_at DESC LIMIT 1`,
+      [userId, sevenDaysAgo],
+    ).catch(() => null);
+  }
+
+  return { activeGuard, recentTicket };
+}
+
 // ─── 1. Gemini 3.6 Flash 轻量路由（chat vs health） ──────────────────────────
 
 // Route result also carries timing and prompt for logging
 export interface RouteResult { type: 'chat' | 'health'; durationMs: number; systemPrompt: string; userMsg: string; rawResult: string; model: string; }
+
 
 async function routeMessage(content: string, notes: string, history: { role: string; content: string }[], apiKey: string): Promise<RouteResult> {
   const systemPrompt = `你是一个智能分诊助手。根据客户消息和近期对话历史判断属于哪一类：
@@ -1311,6 +1359,21 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       }
     }
   }
+
+  // ── Step 0.8 (v2): 路由前上下文预查询 ─────────────────────────────────────
+  // 一次性查好守卫状态 + 工单状态，后续所有步骤直接用，不重复查DB
+  const ctxSnapshot = await queryContextSnapshot(sessionId || null, userId || null);
+  void appendTaskEvent(requestId, 'context_snapshot', {
+    hasGuard:    !!ctxSnapshot.activeGuard,
+    guardSkill:  ctxSnapshot.activeGuard?.skill_name || null,
+    guardId:     ctxSnapshot.activeGuard?.id || null,
+    guardRounds: ctxSnapshot.activeGuard?.check_count || 0,
+    hasTicket:   !!ctxSnapshot.recentTicket,
+    ticketSkill: ctxSnapshot.recentTicket?.skill_id || null,
+    ticketStatus:ctxSnapshot.recentTicket?.status || null,
+    ticketAge:   ctxSnapshot.recentTicket ? Math.round((Date.now() - Number(ctxSnapshot.recentTicket.created_at)) / 60000) + 'min' : null,
+  });
+  console.log(`[AgentService] 📸 context_snapshot: guard=${ctxSnapshot.activeGuard?.skill_name||'none'} ticket=${ctxSnapshot.recentTicket?.status||'none'}`);
 
   // ── Step 0.9: Skill 确认守卫前置检查 ─────────────────────────────────────────
   // 在 routeMessage 之前检查：当前 session 是否有激活的 skill_suggest 守卫？
