@@ -1086,13 +1086,22 @@ async function handleHealthDirect(
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
   const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
   const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
+
+  // Step 7 (v2): 读取 directive（由 assembleAgentContext 代码生成，非AI）
+  const directive = (req as any)._directive as string | undefined;
+  const directiveBlock = directive
+    ? `\n\n【本轮指令（优先遵循）】\n${directive}`
+    : '';
+
   const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
-回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
 - 不要使用 Markdown 格式
 - 亲切专业，直接称呼客户为"${fromName}"
-- 如无健康档案，基于对话内容给出通用建议`;
+- 如无健康档案，基于对话内容给出通用建议
+- 如有【本轮指令】，优先遵循指令中的行为要求，再正常回答问题`;
+
 
   const contextBlock = [
     notes ? `【客户备注】\n${notes}` : '',
@@ -2162,7 +2171,14 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     });
     console.log(`[AgentService] 📦 agent_context_assembled: guardStatus=${agentCtxPkg.guardStatus} directive=${agentCtxPkg.directive?.slice(0,50)||'(none)'}`);
 
+    // ── Step 7 (v2): 把 directive 注入 req，供 handleHealthDirect 的 system prompt 使用
+    if (agentCtxPkg.directive) {
+      (req as any)._directive = agentCtxPkg.directive;
+      console.log(`[AgentService] 📋 directive注入 →「${agentCtxPkg.directive.slice(0, 60)}...」`);
+    }
+
     const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
+
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
