@@ -43,6 +43,7 @@ const fs_1 = __importDefault(require("fs"));
 const uuid_1 = require("uuid");
 const db = __importStar(require("../db"));
 const aiProcessor_1 = require("../aiProcessor");
+const agentService_1 = require("../agentService");
 const marked_1 = require("marked");
 exports.resultRouter = express_1.default.Router();
 const REPORTS_DIR = path_1.default.resolve(__dirname, '..', '..', '..', 'reports');
@@ -65,7 +66,7 @@ exports.resultRouter.post('/process/:ticketId', async (req, res) => {
         // Respond immediately, process in background
         res.json({ message: 'Processing started', ticket_id: ticket.id, override_model: overrideModel || null });
         // Run async (non-blocking)
-        (0, aiProcessor_1.processTicket)(ticket.id, { overrideModel }).catch(err => {
+        (0, aiProcessor_1.processTicket)(ticket.id, undefined, { overrideModel }).catch(err => {
             console.error(`[Processor] Ticket ${ticket.id} failed:`, err.message);
         });
     }
@@ -411,10 +412,23 @@ exports.resultRouter.get('/:ticketId/report', async (req, res) => {
   <div class="rpt-disclaimer">
     ⚠️ 本报告仅供健康信息参考，不替代医生诊断、处方或治疗建议。如有疑虑请及时就医。
   </div>
+
+  ${ticket.status === 'done' ? `
+  <div id="confirm-section" style="margin-top:32px;padding:20px 24px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;font-family:var(--sans);text-align:center;">
+    <p style="margin-bottom:16px;font-size:14px;color:#374151;font-weight:500;">请确认报告内容是否符合您的情况，确认后将存入您的健康档案。</p>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+      <button id="btn-confirm" onclick="confirmReport()" style="padding:11px 32px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--sans);transition:opacity .15s;">✅ 确认报告内容</button>
+      <button id="btn-reject" onclick="rejectReport()" style="padding:11px 32px;background:#fff;color:#dc2626;border:2px solid #dc2626;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--sans);transition:opacity .15s;">❌ 内容有误，不认可</button>
+    </div>
+    <p id="confirm-msg" style="margin-top:12px;font-size:13px;color:#6b7280;"></p>
+  </div>` : ticket.status === 'patient_confirmed' ? `
+  <div style="margin-top:32px;padding:16px 24px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-family:var(--sans);text-align:center;color:#15803d;font-weight:600;">✅ 您已确认此报告，内容已存入健康档案</div>` : ticket.status === 'patient_rejected' ? `
+  <div style="margin-top:32px;padding:16px 24px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;font-family:var(--sans);text-align:center;color:#dc2626;font-weight:600;">❌ 您已标记此报告内容有误，工作人员将跟进</div>` : ''}
+
 </div>
 
 <script>
-  // Auto-color risk level cells: scan first-column td for 高风险/中风险/低风险
+  // Auto-color risk level cells
   document.querySelectorAll('tbody tr').forEach(tr => {
     const firstTd = tr.querySelector('td:first-child');
     if (!firstTd) return;
@@ -423,6 +437,51 @@ exports.resultRouter.get('/:ticketId/report', async (req, res) => {
     else if (/中风险|中危/.test(txt)) firstTd.classList.add('risk-mid');
     else if (/低风险|低危/.test(txt)) firstTd.classList.add('risk-low');
   });
+
+  function setLoading(loading) {
+    document.getElementById('btn-confirm').disabled = loading;
+    document.getElementById('btn-reject').disabled = loading;
+    document.getElementById('btn-confirm').style.opacity = loading ? '0.5' : '1';
+    document.getElementById('btn-reject').style.opacity = loading ? '0.5' : '1';
+  }
+
+  async function confirmReport() {
+    if (!confirm('确认后报告将存入您的健康档案，确定吗？')) return;
+    setLoading(true);
+    document.getElementById('confirm-msg').textContent = '正在提交…';
+    try {
+      const r = await fetch('/api/results/${req.params.ticketId}/confirm', { method: 'POST' });
+      const d = await r.json();
+      if (r.ok) {
+        document.getElementById('confirm-section').innerHTML = '<div style="color:#15803d;font-weight:600;">✅ 已确认！报告已存入您的健康档案。</div>';
+      } else {
+        document.getElementById('confirm-msg').textContent = '提交失败：' + (d.error || '未知错误');
+        setLoading(false);
+      }
+    } catch(e) {
+      document.getElementById('confirm-msg').textContent = '网络错误，请重试';
+      setLoading(false);
+    }
+  }
+
+  async function rejectReport() {
+    if (!confirm('标记为内容有误？')) return;
+    setLoading(true);
+    document.getElementById('confirm-msg').textContent = '正在提交…';
+    try {
+      const r = await fetch('/api/results/${req.params.ticketId}/reject', { method: 'POST' });
+      const d = await r.json();
+      if (r.ok) {
+        document.getElementById('confirm-section').innerHTML = '<div style="color:#dc2626;font-weight:600;">❌ 已标记内容有误，工作人员将跟进处理。</div>';
+      } else {
+        document.getElementById('confirm-msg').textContent = '提交失败：' + (d.error || '未知错误');
+        setLoading(false);
+      }
+    } catch(e) {
+      document.getElementById('confirm-msg').textContent = '网络错误，请重试';
+      setLoading(false);
+    }
+  }
 </script>
 </body>
 </html>`;
@@ -459,6 +518,63 @@ exports.resultRouter.get('/:ticketId/report', async (req, res) => {
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
         res.send(html);
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/results/:ticketId/confirm ─────────────────────────────────────
+// Patient confirms report → status=patient_confirmed + write to LLMWiki
+exports.resultRouter.post('/:ticketId/confirm', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.ticketId]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        if (ticket.status !== 'done')
+            return res.status(400).json({ error: `Cannot confirm: ticket status is "${ticket.status}", must be "done"` });
+        const result = await db.getAsync('SELECT * FROM ticket_results WHERE ticket_id=?', [ticket.id]);
+        if (!result)
+            return res.status(400).json({ error: 'No result to confirm' });
+        const skill = await db.getAsync('SELECT name FROM skills WHERE id=?', [ticket.skill_id]);
+        // Update ticket status
+        await db.runAsync(`UPDATE tickets SET status='patient_confirmed', updated_at=? WHERE id=?`, [Date.now(), ticket.id]);
+        res.json({ success: true, message: '报告已确认，正在写入健康档案' });
+        // Async: write to LLMWiki (non-blocking)
+        const userId = ticket.created_by;
+        if (userId) {
+            const content = result.revised_result || result.raw_result || '';
+            const skillName = skill?.name || 'AI分析';
+            const logContent = `【${skillName}报告 - 患者已确认】\n\n${content}`;
+            try {
+                await (0, agentService_1.writeWikiLog)(userId, logContent, 'ai_report', `${skillName}分析报告（患者确认版）`);
+                console.log(`[Confirm] 报告写入 LLMWiki log: userId=${userId}`);
+                (0, agentService_1.triggerWikiSyncPublic)(userId, `patient_confirmed_${ticket.id}`);
+                console.log(`[Confirm] 触发 Wiki sync: userId=${userId}`);
+            }
+            catch (e) {
+                console.error(`[Confirm] LLMWiki write failed for userId=${userId}:`, e.message);
+            }
+        }
+        else {
+            console.log(`[Confirm] 跳过 Wiki sync: ticket ${ticket.id} 无 created_by`);
+        }
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── POST /api/results/:ticketId/reject ──────────────────────────────────────
+// Patient rejects report → status=patient_rejected (no wiki write)
+exports.resultRouter.post('/:ticketId/reject', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT id, status FROM tickets WHERE id=?', [req.params.ticketId]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        if (ticket.status !== 'done')
+            return res.status(400).json({ error: `Cannot reject: ticket status is "${ticket.status}", must be "done"` });
+        await db.runAsync(`UPDATE tickets SET status='patient_rejected', updated_at=? WHERE id=?`, [Date.now(), ticket.id]);
+        res.json({ success: true, message: '已标记报告内容有误' });
+        console.log(`[Reject] Ticket ${ticket.id} marked as patient_rejected`);
     }
     catch (err) {
         res.status(500).json({ error: err.message });

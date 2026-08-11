@@ -40,12 +40,35 @@ export async function createAgentTask(opts: {
   } catch (err: any) { console.warn('[AgentTask] createAgentTask failed:', err.message); }
 }
 
-export async function updateAgentTask(id: string, fields: {
+// ─── Fire-and-forget 写入队列 ────────────────────────────────────────────────
+// 核心问题：每次 void appendTaskEvent / void updateAgentTask 都 await db.runAsync(),
+// 占用 pool 连接 1-3s（跨太平洋延迟）。多个并发 fire-and-forget 写入会耗尽连接池，
+// 导致主流程的关键查询 timeout。
+// 解决：串行队列，同一时间只用 1 个连接处理非关键写入。
+const _writeQueue: Array<() => Promise<void>> = [];
+let _writeQueueRunning = false;
+
+function enqueueWrite(fn: () => Promise<void>) {
+  _writeQueue.push(fn);
+  if (!_writeQueueRunning) _drainWriteQueue();
+}
+
+async function _drainWriteQueue() {
+  _writeQueueRunning = true;
+  while (_writeQueue.length > 0) {
+    const fn = _writeQueue.shift()!;
+    try { await fn(); }
+    catch (err: any) { console.warn('[AgentTask][Queue] write failed:', err.message); }
+  }
+  _writeQueueRunning = false;
+}
+
+export function updateAgentTask(id: string, fields: {
   status?: string; routeType?: string; skillId?: string;
   replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
   jobTranscript?: string; contextSnapshot?: string; cuaEvents?: string;
-}): Promise<void> {
-  try {
+}): void {
+  enqueueWrite(async () => {
     const sets: string[] = []; const vals: any[] = [];
     if (fields.status       !== undefined) { sets.push('status=?');        vals.push(fields.status); }
     if (fields.routeType    !== undefined) { sets.push('route_type=?');    vals.push(fields.routeType); }
@@ -60,20 +83,21 @@ export async function updateAgentTask(id: string, fields: {
     if (!sets.length) return;
     vals.push(id);
     await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);
-  } catch (err: any) { console.warn('[AgentTask] updateAgentTask failed:', err.message); }
+  });
 }
 
-export async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
-  try {
-    const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const ts = Date.now();
+export function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): void {
+  const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+  // SSE 推送立即执行（不等 DB 写入），保证前端实时更新
+  taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
+  // DB 写入排队
+  enqueueWrite(async () => {
     await db.runAsync(
       `INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`,
       [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, ts]
     );
-    // Push to SSE subscribers in real-time
-    taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
-  } catch (err: any) { console.warn('[AgentTask] appendTaskEvent failed:', err.message); }
+  });
 }
 
 
@@ -190,15 +214,18 @@ async function fetchWikiContext(userId: string, query: string, fromName?: string
   if (!LLMWIKI_BASE || !userId) {
     return { user_profile: '', health_wiki: '', mode: 'none' };
   }
+  const t0 = Date.now();
   try {
     const url = `${LLMWIKI_BASE}/api/clients/${userId}/context-inject?query=${encodeURIComponent(query)}`;
     console.log(`[WikiContext] GET ${url}`);
     const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    const ttfbMs = Date.now() - t0;
     
     if (res.status === 404) {
       // ── 用户不存在，自动创建 ──
-      console.log(`[WikiContext] 用户 ${userId} 不存在，自动创建档案...`);
+      console.log(`[WikiContext] 用户 ${userId} 不存在（ttfb=${ttfbMs}ms），自动创建档案...`);
       try {
+        const t1 = Date.now();
         const createRes = await fetch(`${LLMWIKI_BASE}/api/clients`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -208,14 +235,16 @@ async function fetchWikiContext(userId: string, query: string, fromName?: string
           }),
           signal: AbortSignal.timeout(10_000),
         });
+        console.log(`[WikiContext] 创建请求 ${Date.now() - t1}ms HTTP ${createRes.status}`);
         if (createRes.ok) {
           const created = await createRes.json() as any;
           console.log(`[WikiContext] ✓ 自动创建成功 id=${created.id} name=${created.name}`);
           // 再次尝试拉取上下文（创建后已有默认 wiki 模板）
+          const t2 = Date.now();
           const retryRes = await fetch(url, { signal: AbortSignal.timeout(8_000) });
           if (retryRes.ok) {
             const data = await retryRes.json() as any;
-            console.log(`[WikiContext] ✓ 创建后拉取成功 mode=${data.mode}`);
+            console.log(`[WikiContext] ✓ 创建后拉取 ${Date.now() - t2}ms mode=${data.mode} total=${Date.now() - t0}ms`);
             return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
           }
         } else {
@@ -228,14 +257,14 @@ async function fetchWikiContext(userId: string, query: string, fromName?: string
     }
     
     if (!res.ok) {
-      console.log(`[WikiContext] HTTP ${res.status} — 跳过`);
+      console.log(`[WikiContext] HTTP ${res.status} ttfb=${ttfbMs}ms — 跳过`);
       return { user_profile: '', health_wiki: '', mode: 'none' };
     }
     const data = await res.json() as any;
-    console.log(`[WikiContext] ✓ mode=${data.mode} wiki=${(data.health_wiki || '').length}字 profile=${(data.user_profile || '').length}字`);
+    console.log(`[WikiContext] ✓ ttfb=${ttfbMs}ms total=${Date.now() - t0}ms mode=${data.mode} wiki=${(data.health_wiki || '').length}字 profile=${(data.user_profile || '').length}字`);
     return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
   } catch (err: any) {
-    console.warn(`[WikiContext] ✗ 拉取失败（不影响主流程）:`, err.message);
+    console.warn(`[WikiContext] ✗ ${Date.now() - t0}ms 拉取失败:`, err.message);
     return { user_profile: '', health_wiki: '', mode: 'error' };
   }
 }
@@ -508,6 +537,7 @@ async function callGeminiMessages(
       reqBody.tools = tools;
     }
 
+    const t0Fetch = Date.now();
     const res = await fetch(`${BASE}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -517,13 +547,17 @@ async function callGeminiMessages(
       body: JSON.stringify(reqBody),
       signal: AbortSignal.timeout(60_000),
     });
+    const ttfbMs = Date.now() - t0Fetch;
 
     if (!res.ok) {
       const errText = await res.text();
+      console.warn(`[Gemini][TIMING] round=${round} fetch_err=${res.status} ttfb=${ttfbMs}ms`);
       throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
     }
 
     const data = await res.json() as any;
+    const totalFetchMs = Date.now() - t0Fetch;
+    console.log(`[Gemini][TIMING] round=${round} ttfb=${ttfbMs}ms total=${totalFetchMs}ms model=${reqBody.model} prompt_tokens=${data.usage?.prompt_tokens ?? '?'} completion_tokens=${data.usage?.completion_tokens ?? '?'} total_tokens=${data.usage?.total_tokens ?? '?'}`);
     const choice = data.choices?.[0];
     const finishReason: string = choice?.finish_reason || 'unknown';
     const usage = data.usage || {};
@@ -567,27 +601,61 @@ async function callGeminiMessages(
         result = await fetchWikiPage(userId, 'medication_plan.md');
         console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
       } else if (fnName === 'query_ticket') {
-        // Step 6 (v2): 查询工单/报告内容（JOIN ticket_results 获取报告正文）
-        const ticket = await db.getAsync<any>(
-          `SELECT t.id, t.skill_id, t.skill_name, t.status, t.created_at,
-                  tr.raw_result, tr.report_url
-           FROM tickets t
-           LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
-           WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
-           ORDER BY t.created_at DESC LIMIT 1`,
-          [userId || ''],
-        ).catch(() => null);
+        // Step 6 (v2): 查询工单/报告内容（JOIN ticket_results + skills 获取报告正文和技能名）
+        let ticket: any = null;
+        try {
+          ticket = await db.getAsync<any>(
+            `SELECT t.id, t.skill_id, t.token, s.name as skill_name, t.status, t.created_at,
+                    tr.raw_result, tr.report_url
+             FROM tickets t
+             LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+             LEFT JOIN skills s ON s.id = t.skill_id
+             WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+             ORDER BY t.created_at DESC LIMIT 1`,
+            [userId || ''],
+          );
+        } catch (qerr: any) {
+          console.error(`[Gemini] ❌ query_ticket SQL error userId=${userId}: ${qerr?.message}`);
+          // fallback: 无 JOIN 版本（兜底）
+          try {
+            ticket = await db.getAsync<any>(
+              `SELECT t.id, t.skill_id, t.token, t.status, t.created_at
+               FROM tickets t
+               WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+               ORDER BY t.created_at DESC LIMIT 1`,
+              [userId || ''],
+            );
+            console.log(`[Gemini] 📋 query_ticket fallback (no JOIN) → ticket_id=${ticket?.id}`);
+          } catch (ferr: any) {
+            console.error(`[Gemini] ❌ query_ticket fallback error: ${ferr?.message}`);
+          }
+        }
         if (ticket) {
           const reportContent = ticket.raw_result || null;
+          // waiting_input 状态：构造 H5 填写链接，让 AI 直接提供给用户
+          let fillUrl: string | null = null;
+          if (ticket.status === 'waiting_input' && ticket.token) {
+            const h5BaseRow = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']).catch(() => null);
+            const serviceUrl = process.env.PUBLIC_BASE_URL || '';
+            const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
+            fillUrl = `${h5Base}?token=${ticket.token}`;
+          }
           result = JSON.stringify({
-            ticket_id:    ticket.id,
-            skill_name:   ticket.skill_name || ticket.skill_id,
-            status:       ticket.status,
-            report:       reportContent || '（报告尚未生成）',
-            report_url:   ticket.report_url || null,
-            created_at:   ticket.created_at,
+            ticket_id:   ticket.id,
+            skill_name:  ticket.skill_name || ticket.skill_id,
+            status:      ticket.status,
+            status_desc: ticket.status === 'waiting_input'  ? '等待您填写信息（请直接把 fill_url 发给用户，不要再问他们是否想用服务）'
+                       : ticket.status === 'submitted'      ? '您已提交，等待分析'
+                       : ticket.status === 'processing'     ? 'AI正在分析中'
+                       : ticket.status === 'done'           ? '分析已完成'
+                       : ticket.status === 'created'        ? '已创建待处理'
+                       : ticket.status,
+            fill_url:    fillUrl,
+            report:      reportContent || null,
+            report_url:  ticket.report_url || null,
+            created_at:  ticket.created_at,
           });
-          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${reportContent?.length || 0}`);
+          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} fill_url=${fillUrl ? '有' : '无'} report_len=${reportContent?.length || 0}`);
         } else {
           result = JSON.stringify({ found: false, message: '未找到近期工单' });
           console.log(`[Gemini] 📋 query_ticket → 无工单 userId=${userId}`);
@@ -772,14 +840,16 @@ ${skillList}
 // ─── v2 架构：Step3 — 统一路由决策（替代 routeMessage + routeSkill）──────────
 
 export interface RouteDecisionResult {
-  skill_id:   string | null;
-  skill_name: string | null;
-  skill_desc: string | null;
-  confidence: 'high' | 'low' | 'none'; // high=需要推荐skill | low=健康问题直接回答 | none=普通聊天
-  reason:     string;
-  durationMs: number;
-  model:      string;
-  rawResult:  string;
+  skill_id:     string | null;
+  skill_name:   string | null;
+  skill_desc:   string | null;
+  confidence:   'high' | 'low' | 'none'; // high=需要推荐skill | low=健康问题直接回答 | none=普通聊天
+  reason:       string;
+  durationMs:   number;
+  model:        string;
+  rawResult:    string;
+  systemPrompt: string;   // 路由 AI 的 system prompt（用于 AgentLogs 展开显示）
+  userMsg:      string;   // 路由 AI 的 user message（含近期历史）
 }
 
 /**
@@ -803,7 +873,7 @@ async function routeDecision(
   // 无可用 skill 时降级
   if (!availableSkills.length) {
     return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'low',
-             reason: '无可用skill，直接AI回复', durationMs: 0, model, rawResult: '' };
+             reason: '无可用skill，直接AI回复', durationMs: 0, model, rawResult: '', systemPrompt: '', userMsg: '' };
   }
 
   const skillList = availableSkills
@@ -862,13 +932,14 @@ ${skillList}
 
     console.log(`[RouteDecision] skill=${finalSkillName || 'none'} confidence=${confidence} reason=${parsed.reason} (${durationMs}ms)`);
     return { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
-             confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim() };
+             confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim(),
+             systemPrompt, userMsg };
 
   } catch (err) {
     const durationMs = Date.now() - t0;
     console.warn('[RouteDecision] 路由失败，降级 confidence=none:', err);
     return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'none',
-             reason: '路由失败，降级直接回复', durationMs, model, rawResult: '(error)' };
+             reason: '路由失败，降级直接回复', durationMs, model, rawResult: '(error)', systemPrompt: '', userMsg: '' };
   }
 }
 
@@ -1055,12 +1126,34 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
 - 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理
-- 如客户询问工单进度、报告状态、之前提交的服务情况，必须先调用 query_ticket 工具查询真实状态，再据实回答；工单状态说明：created=已创建待处理，waiting_input=等待您填写信息，submitted=您已提交等待分析，processing=AI正在分析中，done=分析已完成，expired=已过期`;
+- 只有当客户**明确提到曾经提交过某项分析服务**（如"我提交的报告"、"之前做的营养分析"、"我的工单结果"、"分析报告出来了吗"等），才调用 query_ticket 工具查询；如果客户只是泛泛询问进度但**没有任何提交过服务的上下文**，直接正常回答，不要调用工具；工单状态处理规则：
+  「waiting_input」= 用户已有待填写工单，必须直接把 fill_url 链接发给用户引导他们填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
+  「submitted/processing」= AI 分析中，告知预计时间
+  「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
+  「created」= 已创建待处理，告知工单已建即可
+  「expired」= 已过期，可重新开始
+- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名`;
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content },
   ];
+
+  // 记录完整上下文（供 AgentLogs 展开查看，含 chat 路径/降级路径）
+  void appendTaskEvent(requestId, 'health_direct_input', {
+    systemPrompt,
+    systemPromptLen: systemPrompt.length,
+    userMsg:         content,
+    historyMessages: history.slice(-20).map(h => ({ role: h.role, content: h.content })),
+    historyCount:    history.length,
+    toolNames:       WIKI_TOOLS.map(t => t.function.name),
+    wikiProfileLen:  wikiCtx?.user_profile?.length || 0,
+    wikiHealthLen:   wikiCtx?.health_wiki?.length  || 0,
+    hasDirective:    false,
+    directive:       null,
+    totalMsgChars:   messages.reduce((s, m) => s + m.content.length, 0) + systemPrompt.length,
+    path:            'chat',
+  });
 
   const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
     tools:      WIKI_TOOLS,   // 含 query_ticket，让 AI 按需查工单
@@ -1131,6 +1224,22 @@ async function handleHealthDirect(
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content: contextBlock },
   ];
+
+  // 记录完整上下文（供 AgentLogs 展开查看）
+  void appendTaskEvent(requestId, 'health_direct_input', {
+    systemPrompt,
+    systemPromptLen: systemPrompt.length,
+    userMsg:         contextBlock,
+    historyMessages: history.slice(-20).map(h => ({ role: h.role, content: h.content })),
+    historyCount:    history.length,
+    toolNames:       WIKI_TOOLS.map(t => t.function.name),
+    wikiProfileLen:  wikiCtx?.user_profile?.length || 0,
+    wikiHealthLen:   wikiCtx?.health_wiki?.length  || 0,
+    hasDirective:    !!directive,
+    directive:       directive || null,
+    totalMsgChars:   messages.reduce((s, m) => s + m.content.length, 0) + systemPrompt.length,
+    path:            'health_direct',
+  });
 
   const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048, {
     tools: WIKI_TOOLS,  // Step 6: 始终传入，包含 query_ticket
@@ -1209,7 +1318,7 @@ async function handleHealthSkill(
         [meta.user_id, skillId, oneHourAgo]
       );
 
-      if (existing && existing.status !== 'error') {
+      if (existing && existing.status !== 'error' && existing.status !== 'expired') {
         const exUrl     = `${h5Base}?token=${existing.token}`;
         const baseUrl   = h5Base.replace(/\/h5$/, '');
         const reportUrl = `${baseUrl}/api/results/${existing.id}/report`;
@@ -1228,6 +1337,9 @@ async function handleHealthSkill(
 
         if (reply) {
           void appendTaskEvent(requestId, 'ticket_reused', { ticketId: existing.id, status: existing.status });
+          // ← 关键修复：把 ticket 的 request_id 更新为当前 requestId
+          // 这样 H5 提交、AI 处理进度等事件会写到「当前这条」渠道日志里，而不是旧的创建记录
+          void db.runAsync(`UPDATE tickets SET request_id=?, updated_at=? WHERE id=?`, [requestId, Date.now(), existing.id]);
           const endMs = Date.now();
           void updateAgentTask(requestId, {
             status: 'done', routeType: 'ticket_reused', skillId,
@@ -1276,13 +1388,14 @@ async function handleHealthSkill(
     const ticketUrl  = `${h5Base}?token=${token}`;
     const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
 
-    void appendTaskEvent(requestId, 'ticket_created', {
+    // 用 await 确保事件写入 DB，防止 Cloud Run 实例缩容时 fire-and-forget 被中止
+    await appendTaskEvent(requestId, 'ticket_created', {
       ticketId, skillId, skillName,
       token: token.slice(0, 8) + '...',
       ticketUrl,
       prefilledNotes: prefilledNotes?.slice(0, 200) || '',
     });
-    void appendTaskEvent(requestId, 'reply_sent', {
+    await appendTaskEvent(requestId, 'reply_sent', {
       replyLen: replyToUser.length, reply: replyToUser.slice(0, 300),
       channel: delivery.app, recipient: delivery.recipient, note: 'ticket_link',
     });
@@ -1523,12 +1636,36 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   console.log(`[AgentService] request_id=${requestId} session=${sessionId} source=${srcChannel}`);
 
-  // ── 创建 agent_task 记录（await 确保写入，不受 fire-and-forget 影响）──────────
-  await createAgentTask({
-    id: requestId, sessionId, userId, sourceChannel: srcChannel,
-    inputContent: req.content,
-    meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
-  });
+  // ── 并行执行三个无依赖的初始化操作 ─────────────────────────────────────────
+  // 1. createAgentTask (DB INSERT) — 必须完成才能写后续事件
+  // 2. fetchWikiContext (HTTP → llmwiki) — 拉取健康上下文
+  // 3. queryContextSnapshot (DB SELECT) — 查守卫+工单状态
+  // 三者之间无数据依赖，全部并行发起
+  const t0Parallel = Date.now();
+
+  const [taskResult, wikiResult, snapshotResult] = await Promise.allSettled([
+    // ① createAgentTask
+    createAgentTask({
+      id: requestId, sessionId, userId, sourceChannel: srcChannel,
+      inputContent: req.content,
+      meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
+    }),
+    // ② fetchWikiContext（仅在有 userId 和 LLMWIKI_BASE 时才执行）
+    (userId && LLMWIKI_BASE)
+      ? fetchWikiContext(userId, req.content, req.meta?.from_name)
+      : Promise.resolve({ user_profile: '', health_wiki: '', mode: 'none' as string }),
+    // ③ queryContextSnapshot
+    queryContextSnapshot(sessionId || null, userId || null),
+  ]);
+
+  console.log(`[AgentService] ⚡ parallel init done in ${Date.now() - t0Parallel}ms (task=${taskResult.status} wiki=${wikiResult.status} snapshot=${snapshotResult.status})`);
+
+  // ── 处理 createAgentTask 结果 ──────────────────────────────────────────────
+  // task 创建失败不影响主流程，但记录警告
+  if (taskResult.status === 'rejected') {
+    console.warn(`[AgentTask] createAgentTask failed (parallel):`, taskResult.reason?.message);
+  }
+
   // ── 存完整上下文快照（历史、备注）供日志查看 ─────────────────────────────────
   void updateAgentTask(requestId, {
     contextSnapshot: JSON.stringify({
@@ -1591,10 +1728,15 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     });
   }
 
-  // ── Step 0: 自动从 LLMWiki 拉取健康上下文（公共服务层）─────────────────────
-  // 若用户不存在，自动在 LLMWiki 创建档案（使用 from_name 作为姓名）
+  // ── Step 0: 处理 WikiContext 结果 ─────────────────────────────────────────
   if (userId && LLMWIKI_BASE) {
-    let wikiCtx = await fetchWikiContext(userId, req.content, req.meta?.from_name);
+    let wikiCtx = wikiResult.status === 'fulfilled'
+      ? wikiResult.value as { user_profile: string; health_wiki: string; mode: string }
+      : { user_profile: '', health_wiki: '', mode: 'error' };
+
+    if (wikiResult.status === 'rejected') {
+      console.warn(`[WikiContext] ✗ 并行拉取失败（不影响主流程）:`, wikiResult.reason?.message);
+    }
 
     // ── 过滤纯模板 profile（只有 HTML 注释和"暂无记录"，无实质内容）──────────────
     const profileMeaningful = (wikiCtx.user_profile || '')
@@ -1680,9 +1822,15 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     }
   }
 
-  // ── Step 0.8 (v2): 路由前上下文预查询 ─────────────────────────────────────
-  // 一次性查好守卫状态 + 工单状态，后续所有步骤直接用，不重复查DB
-  const ctxSnapshot = await queryContextSnapshot(sessionId || null, userId || null);
+  // ── Step 0.8 (v2): 使用并行查询结果（已在上面 Promise.allSettled 中完成）──────
+  const ctxSnapshot = snapshotResult.status === 'fulfilled'
+    ? snapshotResult.value
+    : { activeGuard: null, recentTicket: null } as ContextSnapshot;
+
+  if (snapshotResult.status === 'rejected') {
+    console.warn(`[AgentService] context_snapshot failed (parallel):`, snapshotResult.reason?.message);
+  }
+
   void appendTaskEvent(requestId, 'context_snapshot', {
     hasGuard:    !!ctxSnapshot.activeGuard,
     guardSkill:  ctxSnapshot.activeGuard?.skill_name || null,
@@ -1722,7 +1870,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       );
 
       console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name} round=${newCheckCount}/${MAX_GUARD_ROUNDS}`);
-      void appendTaskEvent(requestId, 'skill_guard_check', {
+      await appendTaskEvent(requestId, 'skill_guard_check', {
         guardId: activeGuard.id,
         skillId: activeGuard.skill_id,
         skillName: activeGuard.skill_name,
@@ -1732,7 +1880,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         userMsg: req.content.slice(0, 200),
       });
       // ── Step 4 (v2): guard_lifecycle=existing 事件 ─────────────────────────
-      void appendTaskEvent(requestId, 'guard_lifecycle', {
+      await appendTaskEvent(requestId, 'guard_lifecycle', {
         action: 'existing',
         guardId: activeGuard.id,
         skillId: activeGuard.skill_id,
@@ -1746,7 +1894,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
           [activeGuard.id],
         );
         console.log(`[SkillGuard] ⏱️ 超过 ${MAX_GUARD_ROUNDS} 轮限制，守卫已关闭`);
-        void appendTaskEvent(requestId, 'skill_guard_closed', {
+        await appendTaskEvent(requestId, 'skill_guard_closed', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
           reason: 'round_limit',
@@ -1803,7 +1951,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
         };
         console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0,100)}"`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+        await appendTaskEvent(requestId, 'skill_guard_judgment', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
           interest: guardResult.interest,
@@ -1813,7 +1961,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         });
       } catch (e: any) {
         console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+        await appendTaskEvent(requestId, 'skill_guard_judgment', {
           guardId: activeGuard.id,
           error: e.message,
           interest: 'yes',
@@ -1827,7 +1975,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           [reason, activeGuard.id],
         );
         console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuard.id} reason=${reason}`);
-        void appendTaskEvent(requestId, 'skill_guard_closed', {
+        await appendTaskEvent(requestId, 'skill_guard_closed', {
           guardId: activeGuard.id,
           skillName: activeGuard.skill_name,
           reason,
@@ -1868,7 +2016,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         if (isUserAsking || prevClarifyCount > 0) {
           // 用户在提问，或已追问过 → 走正常路由，守卫保持
           console.log(`[SkillGuard] ❓ unclear 但用户在提问或已追问过(${prevClarifyCount}次)，走正常路由`);
-          void appendTaskEvent(requestId, 'skill_guard_judgment', {
+          await appendTaskEvent(requestId, 'skill_guard_judgment', {
             guardId: activeGuard.id,
             note: `unclear→正常路由 isUserAsking=${isUserAsking} prevClarify=${prevClarifyCount}`,
           });
@@ -1879,7 +2027,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           // 用户发了短暂模糊词 且 尚未追问过 → 不再直接发守卫消息，改走 Agent
           // Agent 会通过 directive(pending_unclear) 自然地引导用户确认
           console.log(`[SkillGuard] ❓ 首次模糊确认，交给 Agent 引导（不再守卫直接发消息）`);
-          void appendTaskEvent(requestId, 'skill_guard_clarify', {
+          await appendTaskEvent(requestId, 'skill_guard_clarify', {
             guardId: activeGuard.id,
             skillName: activeGuard.skill_name,
             note: '首次unclear→交给Agent引导',
@@ -1954,14 +2102,16 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 
     console.log(`[AgentService] → routeDecision: confidence=${rdResult.confidence} skill=${rdResult.skill_name || 'none'} (${rdResult.durationMs}ms)`);
     void appendTaskEvent(requestId, 'route_decided', {
-      confidence: rdResult.confidence,
-      skill_id:   rdResult.skill_id,
-      skill_name: rdResult.skill_name,
-      reason:     rdResult.reason,
-      durationMs: rdResult.durationMs,
-      model:      rdResult.model,
-      rawResult:  rdResult.rawResult?.slice(0, 200),
-      guardHint:  guardHint || null,
+      confidence:   rdResult.confidence,
+      skill_id:     rdResult.skill_id,
+      skill_name:   rdResult.skill_name,
+      reason:       rdResult.reason,
+      durationMs:   rdResult.durationMs,
+      model:        rdResult.model,
+      rawResult:    rdResult.rawResult?.slice(0, 200),
+      guardHint:    guardHint || null,
+      systemPrompt: rdResult.systemPrompt,
+      userMsg:      rdResult.userMsg?.slice(0, 1000),
     });
   }
 
@@ -2012,7 +2162,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           [oldGuard.id],
         );
         console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${oldGuard.id} skill=${oldGuard.skill_name}`);
-        void appendTaskEvent(requestId, 'guard_lifecycle', {
+        await appendTaskEvent(requestId, 'guard_lifecycle', {
           action: 'closed_by_new_skill',
           guardId: oldGuard.id,
           oldSkillId: oldGuard.skill_id,
@@ -2030,7 +2180,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       ? ctxSnapshot.activeGuard : null;
     if (existingSameGuard) {
       console.log(`[SkillGuard] ♻️ 同skill守卫已存在 id=${existingSameGuard.id}，不重复创建`);
-      void appendTaskEvent(requestId, 'guard_lifecycle', {
+      await appendTaskEvent(requestId, 'guard_lifecycle', {
         action: 'existing',
         guardId: existingSameGuard.id,
         skillId: selectedSkillId,
@@ -2069,12 +2219,12 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
          suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000],
       );
       console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${selectedSkillName} session=${sessionId}`);
-      void appendTaskEvent(requestId, 'skill_guard_activated', {
+      await appendTaskEvent(requestId, 'skill_guard_activated', {
         guardId, skillId: selectedSkillId, skillName: selectedSkillName,
         expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
       });
       // ── Step 4 (v2): guard_lifecycle=new_created 标准事件 ─────────────────
-      void appendTaskEvent(requestId, 'guard_lifecycle', {
+      await appendTaskEvent(requestId, 'guard_lifecycle', {
         action:    'new_created',
         guardId,
         skillId:   selectedSkillId,
@@ -2136,6 +2286,16 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         `历史 ${(req.history || []).length} 条`,
       ].join(' · '),
     });
+    // 在 skill 路径也发 agent_context_assembled，供 INT-8 等测试验证守卫确认后的上下文
+    await appendTaskEvent(requestId, 'agent_context_assembled', {
+      guardStatus:   currentGuardStatus,
+      guardSkillName: currentGuardSkillName,
+      routeSkill:    selectedSkillName,
+      confidence:    'high',
+      hasTicket:     false,
+      ticketStatus:  null,
+      directive:     `confirmed_ticket → 执行 skill「${selectedSkillName}」`,
+    });
     const skillResult = await handleHealthSkill(
       req, apiKey, requestId, delivery,
       profile, selectedSkillId, selectedSkillName,
@@ -2164,7 +2324,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       isFirstClarify,                          // Step 7fix: 首次 unclear 需要 Agent 主动引导
     } as any);
 
-    void appendTaskEvent(requestId, 'agent_context_assembled', {
+    await appendTaskEvent(requestId, 'agent_context_assembled', {
       guardStatus:   agentCtxPkg.guardStatus,
       routeSkill:    agentCtxPkg.routeSkillName,
       confidence:    agentCtxPkg.routeConfidence,
@@ -2184,7 +2344,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
-    void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
+    await appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
     return directResult;
   }
 }

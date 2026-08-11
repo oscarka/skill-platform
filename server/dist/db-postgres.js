@@ -28,7 +28,9 @@ const DATABASE_URL = process.env.DATABASE_URL ||
 // Schema 名称 — 所有表都在 skill_platform schema 下，与其他项目隔离
 const DB_SCHEMA = process.env.DB_SCHEMA || 'skill_platform';
 exports.pool = new pg_1.Pool({
-    connectionString: DATABASE_URL,
+    connectionString: DATABASE_URL.includes('?')
+        ? DATABASE_URL + `&options=-csearch_path%3D${DB_SCHEMA}`
+        : DATABASE_URL + `?options=-csearch_path%3D${DB_SCHEMA}`,
     // 强制使用代码级 SSL 配置，避免连接串里的 sslmode 被新版 pg 解析为 verify-full
     ssl: DATABASE_URL.includes('supabase.co')
         ? { rejectUnauthorized: false, checkServerIdentity: () => undefined }
@@ -37,9 +39,9 @@ exports.pool = new pg_1.Pool({
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 15000,
 });
-// 每个连接建立后设置 search_path，让 SQL 无需写 schema 前缀
+// 每个连接建立后也设置 search_path（双保险，用于非 pgBouncer 直连场景）
 exports.pool.on('connect', (client) => {
-    client.query(`SET search_path TO ${DB_SCHEMA}, public`);
+    client.query(`SET search_path TO ${DB_SCHEMA}, public`).catch(() => { });
 });
 exports.pool.on('error', (err) => {
     console.error('[DB] Pool error:', err.message);
@@ -174,6 +176,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   expires_at      BIGINT NOT NULL,
   created_at      BIGINT NOT NULL,
   updated_at      BIGINT NOT NULL,
+  delivery_info   TEXT,
   FOREIGN KEY (skill_id) REFERENCES skills(id)
 );
 
@@ -272,6 +275,64 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
   updated_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
   UNIQUE(provider, mcp_name)
 );
+
+-- 统一 Agent 任务表 —— 所有渠道的每次交互都在这里有记录
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id              TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  source_channel  TEXT NOT NULL DEFAULT 'unknown',
+  input_content   TEXT,
+  route_type      TEXT,
+  skill_id        TEXT,
+  ticket_id       TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  reply_content   TEXT,
+  error_message   TEXT,
+  meta            TEXT,
+  started_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  ended_at        BIGINT,
+  duration_ms      INTEGER,
+  job_transcript   TEXT,
+  context_snapshot TEXT,
+  cua_events       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_user    ON agent_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status  ON agent_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_started ON agent_tasks(started_at DESC);
+
+-- 任务内的详细事件流
+CREATE TABLE IF NOT EXISTS agent_task_events (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  event_type  TEXT NOT NULL,
+  payload     TEXT,
+  ts          BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_task ON agent_task_events(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_ts   ON agent_task_events(ts DESC);
+
+-- Skill 确认守卫表 —— skill_suggest 发出后激活，监听后续用户回外是否确认使用 skill
+CREATE TABLE IF NOT EXISTS skill_confirm_guards (
+  id              TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  skill_id        TEXT NOT NULL,
+  skill_name      TEXT NOT NULL,
+  suggest_msg     TEXT,                   -- agent 当时发的推荐话术
+  suggest_ts      BIGINT NOT NULL,        -- skill_suggest 发出时刻（用于截取后续对话）
+  status          TEXT NOT NULL DEFAULT 'active',  -- active | closed
+  close_reason    TEXT,                   -- user_confirmed | user_declined | expired | switched_skill | round_limit
+  check_count     INTEGER NOT NULL DEFAULT 0,      -- 已检查轮数
+  created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
+  expires_at      BIGINT NOT NULL         -- created_at + 30分钟
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status);
+
 `;
 async function initDb() {
     try {
@@ -285,6 +346,41 @@ async function initDb() {
             `ALTER TABLE skills ADD COLUMN IF NOT EXISTS plugin_config TEXT`,
             `ALTER TABLE ticket_results ADD COLUMN IF NOT EXISTS ai_log TEXT`,
             `ALTER TABLE skills ADD COLUMN IF NOT EXISTS mcp_names TEXT DEFAULT NULL`,
+            `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS job_transcript TEXT`,
+            `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS context_snapshot TEXT`,
+            `ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS cua_events TEXT`,
+            // skill_confirm_guards 表已在 SCHEMA_SQL 中创建，IF NOT EXISTS 自动安全
+            // check_count 是新加字段，需要对已有表做迁移
+            `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS check_count INTEGER NOT NULL DEFAULT 0`,
+            // tickets wiki 确认字段
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_confirmed_at BIGINT DEFAULT NULL`,
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS wiki_declined INTEGER NOT NULL DEFAULT 0`,
+            // delivery_info: 存储 callback_url + delivery，AI 处理完后通知用户
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
+            // request_id: 存储创建工单的原始 agent 任务 ID，用于通知时回写渠道消息日志
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS request_id TEXT`,
+            // 架构改造 v2：守卫生命周期字段
+            // guard_mode: 守卫的创建模式（new_created=本消息新建 | existing=已有守卫 | closed_by_new_skill=被新skill关闭）
+            `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS guard_mode TEXT DEFAULT 'existing'`,
+            // closed_reason: 守卫关闭原因（user_declined | user_confirmed | closed_by_new_skill | max_rounds）
+            `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS closed_reason TEXT`,
+            // 确保 ticket_results 表存在（老 schema 可能漏建）
+            `CREATE TABLE IF NOT EXISTS ticket_results (
+        id              TEXT PRIMARY KEY,
+        ticket_id       TEXT UNIQUE NOT NULL,
+        raw_result      TEXT,
+        ai_log          TEXT,
+        revised_result  TEXT,
+        revision_notes  TEXT,
+        revised_by      TEXT,
+        revised_at      BIGINT,
+        report_path     TEXT,
+        report_type     TEXT,
+        report_url      TEXT,
+        created_at      BIGINT NOT NULL,
+        updated_at      BIGINT NOT NULL,
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+      )`,
         ];
         for (const sql of migrations) {
             try {

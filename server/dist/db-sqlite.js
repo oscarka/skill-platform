@@ -75,6 +75,7 @@ function initDb() {
       expires_at      INTEGER NOT NULL,
       created_at      INTEGER NOT NULL,
       updated_at      INTEGER NOT NULL,
+      delivery_info   TEXT,
       FOREIGN KEY (skill_id) REFERENCES skills(id)
     );
 
@@ -157,6 +158,30 @@ function initDb() {
       created_at          INTEGER NOT NULL,
       updated_at          INTEGER NOT NULL
     )`,
+        // Ticket: wiki 确认时间戳（NULL=未确认，>0=用户点了「认可并执行」）
+        `ALTER TABLE tickets ADD COLUMN wiki_confirmed_at INTEGER DEFAULT NULL`,
+        // Ticket: wiki 取消标记（用户点了「取消」）
+        `ALTER TABLE tickets ADD COLUMN wiki_declined INTEGER NOT NULL DEFAULT 0`,
+        // Skill 确认守卫表 —— skill_suggest 后激活，三值判断监听用户是否确认
+        `CREATE TABLE IF NOT EXISTS skill_confirm_guards (
+      id           TEXT PRIMARY KEY,
+      session_id   TEXT NOT NULL,
+      user_id      TEXT NOT NULL,
+      skill_id     TEXT NOT NULL,
+      skill_name   TEXT NOT NULL,
+      suggest_msg  TEXT,
+      suggest_ts   INTEGER NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'active',
+      close_reason TEXT,
+      check_count  INTEGER NOT NULL DEFAULT 0,
+      created_at   INTEGER NOT NULL,
+      expires_at   INTEGER NOT NULL
+    )`,
+        `CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status)`,
+        // 为已有表添加 check_count列
+        `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
+        // 为已有 tickets 表添加 delivery_info 列（存储 callback_url + delivery 供 AI 处理完后通知用户）
+        `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
     ];
     for (const sql of migrations) {
         try {

@@ -235,7 +235,7 @@ export async function notifyUserTicketDone(ticketId: string): Promise<void> {
 }
 
 // ─── Main processor ───────────────────────────────────────────────────────────
-export async function processTicket(ticketId: string, opts?: { overrideModel?: string }): Promise<void> {
+export async function processTicket(ticketId: string, requestId?: string, opts?: { overrideModel?: string }): Promise<void> {
   const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
   if (!ticket) throw new Error('Ticket not found');
 
@@ -247,6 +247,21 @@ export async function processTicket(ticketId: string, opts?: { overrideModel?: s
   // Mark as processing
   const now = Date.now();
   await db.runAsync(`UPDATE tickets SET status='processing', ai_started_at=?, updated_at=? WHERE id=?`, [now, now, ticketId]);
+
+  // 回写渠道日志：AI 开始处理
+  const logReqId = requestId || ticket.request_id;
+  if (logReqId) {
+    try {
+      const { appendTaskEvent } = await import('./agentService');
+      void appendTaskEvent(logReqId, 'ticket_ai_started', {
+        ticketId,
+        skillName: skill.name || '',
+        inputCount: inputs.length,
+        startedAt: new Date(now).toISOString(),
+        note: 'AI 正在分析您提交的信息，请耐心等待...',
+      });
+    } catch { /* 日志失败不影响主流程 */ }
+  }
 
   try {
     let rawResult: string;

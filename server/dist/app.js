@@ -38,7 +38,8 @@ app.use('/api/h5', h5Routes_1.h5Router);
 app.use('/api/results', resultRoutes_1.resultRouter);
 app.use('/api/test', testRoutes_1.testRouter);
 app.use('/api/mcp-configs', mcpRoutes_1.mcpRouter);
-app.use('/api/v1/agent', agentRoutes_1.agentRouter); // 通用 Agent 接口（新增，不影响现有路由）
+app.use('/api/v1/agent', agentRoutes_1.agentRouter); // 通用 Agent 接口
+app.use('/api/orch', agentRoutes_1.agentRouter); // 渠道统一入口（/api/orch/ingest）
 app.use('/', oauthRoutes_1.oauthRouter); // OAuth routes: /auth/google/start, /auth/google/callback, /api/oauth/*
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {

@@ -39,7 +39,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ticketRouter = void 0;
 const express_1 = __importDefault(require("express"));
 const uuid_1 = require("uuid");
+const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+const multer_1 = __importDefault(require("multer"));
 const db = __importStar(require("../db"));
+const aiProcessor_1 = require("../aiProcessor");
+// Multer for ticket input file replacement
+const UPLOADS_DIR = path_1.default.resolve(__dirname, '..', '..', '..', 'uploads', 'inputs');
+if (!fs_1.default.existsSync(UPLOADS_DIR))
+    fs_1.default.mkdirSync(UPLOADS_DIR, { recursive: true });
+const inputUpload = (0, multer_1.default)({ dest: UPLOADS_DIR, limits: { fileSize: 30 * 1024 * 1024 } });
 exports.ticketRouter = express_1.default.Router();
 const EXPIRY_DAYS = async () => {
     const row = await db.getAsync('SELECT value FROM settings WHERE key=?', ['ticket_expiry_days']);
@@ -48,7 +57,7 @@ const EXPIRY_DAYS = async () => {
 const STATUS_LABEL = {
     created: '待发送', waiting_input: '等待提交', submitted: '已提交',
     processing: 'AI 处理中', done: '已完成', returned: '已打回',
-    expired: '已过期', error: '处理出错',
+    expired: '已过期', error: '处理出错', patient_confirmed: '患者已确认', patient_rejected: '患者不认可',
 };
 async function h5BaseUrl() {
     const row = await db.getAsync('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
@@ -69,6 +78,7 @@ async function ticketToResponse(t, skill) {
         status_label: STATUS_LABEL[t.status] || t.status,
         return_reason: t.return_reason,
         return_count: t.return_count,
+        request_id: t.request_id, // ← 关联原始 agent 任务，供 AgentLogs 回写
         h5_url: `${await h5BaseUrl()}?token=${t.token}`,
         h5_submitted_at: t.h5_submitted_at,
         ai_started_at: t.ai_started_at,
@@ -198,6 +208,26 @@ exports.ticketRouter.put('/:id/return', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// ─── PUT /api/tickets/:id/status — Admin: override status directly ─────────────
+const VALID_STATUSES = ['created', 'waiting_input', 'submitted', 'processing', 'done', 'returned', 'error', 'expired'];
+exports.ticketRouter.put('/:id/status', async (req, res) => {
+    try {
+        const { status, return_reason } = req.body;
+        if (!status || !VALID_STATUSES.includes(status)) {
+            return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+        }
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const now = Date.now();
+        await db.runAsync(`UPDATE tickets SET status=?, return_reason=COALESCE(?,return_reason), updated_at=? WHERE id=?`, [status, return_reason ?? null, now, ticket.id]);
+        const updated = await db.getAsync('SELECT * FROM tickets WHERE id=?', [ticket.id]);
+        res.json({ ticket: await ticketToResponse(updated) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 // ─── GET /api/tickets/:id/status — Poll status ────────────────────────────────
 exports.ticketRouter.get('/:id/status', async (req, res) => {
     try {
@@ -258,6 +288,22 @@ exports.ticketRouter.post('/:id/agent-callback', async (req, res) => {
             if (ticket.status !== 'processing') {
                 await db.runAsync(`UPDATE tickets SET status='processing', updated_at=? WHERE id=?`, [now, ticketId]);
             }
+            // ── 实时回写 AgentLogs：每个进度步骤都写一条 ticket_progress 事件 ──────────
+            if (ticket.request_id && stepEntry.id && !currentLog.slice(0, -1).some((e) => e.id === stepEntry.id)) {
+                const stepLabel = stepEntry.event || stepEntry.type || 'step';
+                // 尽量从多个字段里找到有意义的内容（message 步骤内容可能在 output/text/result 里）
+                const rawDetail = stepEntry.detail || stepEntry.content || stepEntry.output || stepEntry.text || stepEntry.result || '';
+                const stepDetail = typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail);
+                const { appendTaskEvent: _ate } = await Promise.resolve().then(() => __importStar(require('../agentService')));
+                void _ate(ticket.request_id, 'ticket_progress', {
+                    ticketId,
+                    stepId: stepEntry.id,
+                    stepLabel,
+                    stepDetail: stepDetail.slice(0, 500), // 500字够显示有意义的内容
+                    hasContent: stepDetail.length > 0,
+                    ts: stepEntry.ts || new Date().toISOString(),
+                });
+            }
             return res.json({ ok: true, streamed: true });
         }
         // ─── 最终回调（Agent 执行完成或失败）────────────────────────────────────────
@@ -273,21 +319,173 @@ exports.ticketRouter.post('/:id/agent-callback', async (req, res) => {
             ? JSON.stringify(body.transcript, null, 2)
             : '';
         const now = Date.now();
+        // 构造报告查看链接（passed=true 时存入 report_url）
+        const h5Base = await h5BaseUrl();
+        const serviceBase = h5Base.replace(/\/h5$/, '');
+        const reportUrl = passed ? `${serviceBase}/api/results/${ticketId}/report` : null;
         const existing = await db.getAsync('SELECT id FROM ticket_results WHERE ticket_id=?', [ticketId]);
         if (existing) {
-            await db.runAsync(`UPDATE ticket_results SET raw_result=?, ai_log=?, updated_at=? WHERE ticket_id=?`, [rawResult, aiLog, now, ticketId]);
+            await db.runAsync(`UPDATE ticket_results SET raw_result=?, ai_log=?, report_url=?, updated_at=? WHERE ticket_id=?`, [rawResult, aiLog, reportUrl, now, ticketId]);
         }
         else {
             const { v4: uuidv4 } = require('uuid');
-            await db.runAsync(`INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, created_at, updated_at) VALUES (?,?,?,?,?,?)`, [uuidv4(), ticketId, rawResult, aiLog, now, now]);
+            await db.runAsync(`INSERT INTO ticket_results (id, ticket_id, raw_result, ai_log, report_url, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`, [uuidv4(), ticketId, rawResult, aiLog, reportUrl, now, now]);
         }
         const newStatus = passed ? 'done' : 'error';
         await db.runAsync(`UPDATE tickets SET status=?, ai_completed_at=?, updated_at=? WHERE id=?`, [newStatus, now, now, ticketId]);
         console.log(`[TicketAgent] Callback for ticket ${ticketId}: passed=${passed}, preview=${rawResult.slice(0, 80)}`);
         res.json({ ok: true });
+        // ── 回写渠道日志（无论成功/失败都记录到 AgentLogs）──────────────────────────
+        const ticketForLog = await db.getAsync('SELECT request_id, patient_name, skill_id, delivery_info FROM tickets WHERE id=?', [ticketId]);
+        if (ticketForLog?.request_id) {
+            try {
+                const { appendTaskEvent } = await Promise.resolve().then(() => __importStar(require('../agentService')));
+                const skillForLog = await db.getAsync('SELECT name FROM skills WHERE id=?', [ticketForLog.skill_id]);
+                const skillNameLog = skillForLog?.name || '技能';
+                const h5BaseForLog = await h5BaseUrl();
+                const serviceBase = h5BaseForLog.replace('/h5', '');
+                const rUrl = passed ? `${serviceBase}/api/results/${ticketId}/report` : null;
+                if (passed) {
+                    // 成功：记录 skill_done 和 reply_sent
+                    void appendTaskEvent(ticketForLog.request_id, 'skill_done', {
+                        ticketId,
+                        skillName: skillNameLog,
+                        outputLen: rawResult.length,
+                        output_preview: rawResult.slice(0, 5000), // 完整输出（前端可展开查看）
+                        report_url: rUrl || '',
+                    });
+                    // 构建发送给用户的回复文本
+                    let deliveryInfo = {};
+                    try {
+                        deliveryInfo = JSON.parse(ticketForLog.delivery_info || '{}');
+                    }
+                    catch { }
+                    const fromName = ticketForLog.patient_name || '您';
+                    const replyMsg = rUrl
+                        ? `${fromName}，您的「${skillNameLog}」分析报告已生成 🎉\n\n点击查看完整报告：\n${rUrl}`
+                        : rawResult.slice(0, 200);
+                    void appendTaskEvent(ticketForLog.request_id, 'reply_sent', {
+                        reply: replyMsg.slice(0, 500),
+                        channel: deliveryInfo.app || 'wechat',
+                        recipient: deliveryInfo.recipient || fromName,
+                        mode: rUrl ? '报告链接' : '摘要降级',
+                        result_url: rUrl || '',
+                    });
+                }
+                else {
+                    // 失败：记录 skill_error
+                    void appendTaskEvent(ticketForLog.request_id, 'skill_error', {
+                        ticketId,
+                        skillName: skillNameLog,
+                        errorPreview: rawResult.slice(0, 200),
+                    });
+                }
+                // 把处理任务（req_h5_*）标记为完成/失败，更新左侧列表状态
+                const isProcessingTask = ticketForLog.request_id?.startsWith('req_h5_');
+                if (isProcessingTask) {
+                    const { updateAgentTask } = await Promise.resolve().then(() => __importStar(require('../agentService')));
+                    // replyContent = 实际发给用户的消息（报告链接通知），与 reply_sent 事件一致
+                    const replyMsgForTask = passed
+                        ? (() => {
+                            let di = {};
+                            try {
+                                di = JSON.parse(ticketForLog.delivery_info || '{}');
+                            }
+                            catch { }
+                            const name = ticketForLog.patient_name || '您';
+                            return rUrl
+                                ? `${name}，您的「${skillNameLog}」分析报告已生成 🎉\n\n点击查看完整报告：\n${rUrl}`
+                                : rawResult.slice(0, 300);
+                        })()
+                        : `处理失败: ${rawResult.slice(0, 100)}`;
+                    void updateAgentTask(ticketForLog.request_id, {
+                        status: passed ? 'done' : 'error',
+                        endedAt: Date.now(),
+                        replyContent: replyMsgForTask,
+                    });
+                }
+                console.log(`[TicketAgent] ✨ 回写渠道日志 requestId=${ticketForLog.request_id} passed=${passed}`);
+            }
+            catch (logErr) {
+                console.warn(`[TicketAgent] 回写日志失败:`, logErr.message);
+            }
+        }
+        // ── 通知用户（仅成功时）────────────────────────────────────────────────────
+        if (passed) {
+            void (0, aiProcessor_1.notifyUserTicketDone)(ticketId).catch(e => console.error(`[TicketNotify] 通知失败 ticketId=${ticketId}:`, e.message));
+        }
     }
     catch (err) {
         console.error('[TicketAgent] Callback error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PUT /api/tickets/:id/inputs — Staff edits submitted inputs ───────────────
+// Accepts multipart/form-data:
+//   fields         — JSON string: { fieldKey: newValue, ... }  (text inputs)
+//   file_<inputId> — replacement file for that specific input row
+exports.ticketRouter.put('/:id/inputs', inputUpload.any(), async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const now = Date.now();
+        const files = req.files || [];
+        // ── Update text fields ────────────────────────────────────────────────────
+        let fields = {};
+        try {
+            fields = req.body.fields ? JSON.parse(req.body.fields) : {};
+        }
+        catch {
+            fields = {};
+        }
+        for (const [fieldKey, newValue] of Object.entries(fields)) {
+            const strValue = typeof newValue === 'object'
+                ? JSON.stringify(newValue)
+                : String(newValue ?? '');
+            const existing = await db.getAsync('SELECT id FROM ticket_inputs WHERE ticket_id=? AND field_key=? AND field_type=?', [ticket.id, fieldKey, 'text']);
+            if (existing) {
+                await db.runAsync('UPDATE ticket_inputs SET value=? WHERE id=?', [strValue, existing.id]);
+            }
+            else {
+                await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, value, created_at) VALUES (?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, fieldKey, 'text', strValue, now]);
+            }
+        }
+        // ── Replace file inputs ───────────────────────────────────────────────────
+        for (const file of files) {
+            const match = file.fieldname.match(/^file_(.+)$/);
+            if (!match)
+                continue;
+            const inputId = match[1];
+            let fileName = file.originalname;
+            try {
+                fileName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+            }
+            catch { }
+            const oldRow = await db.getAsync('SELECT * FROM ticket_inputs WHERE id=?', [inputId]);
+            const fieldKey = oldRow?.field_key || 'file';
+            if (oldRow) {
+                if (oldRow.file_path && fs_1.default.existsSync(oldRow.file_path)) {
+                    try {
+                        fs_1.default.unlinkSync(oldRow.file_path);
+                    }
+                    catch { }
+                }
+                await db.runAsync('DELETE FROM ticket_inputs WHERE id=?', [inputId]);
+            }
+            await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at) VALUES (?,?,?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, fieldKey, 'file', file.path, fileName, file.mimetype, now]);
+        }
+        // Ensure ticket is reprocessable
+        if (!['submitted', 'done', 'error'].includes(ticket.status)) {
+            await db.runAsync(`UPDATE tickets SET status='submitted', updated_at=? WHERE id=?`, [now, ticket.id]);
+        }
+        else {
+            await db.runAsync(`UPDATE tickets SET updated_at=? WHERE id=?`, [now, ticket.id]);
+        }
+        const updatedInputs = await db.allAsync('SELECT * FROM ticket_inputs WHERE ticket_id=? ORDER BY created_at', [ticket.id]);
+        res.json({ ok: true, inputs: updatedInputs });
+    }
+    catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
