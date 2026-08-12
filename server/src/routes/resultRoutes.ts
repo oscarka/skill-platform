@@ -10,7 +10,7 @@ import { marked } from 'marked';
 export const resultRouter = express.Router();
 
 const REPORTS_DIR = path.resolve(__dirname, '..', '..', '..', 'reports');
-if (!fs.existsSync(REPORTS_DIR)) try { fs.mkdirSync(REPORTS_DIR, { recursive: true }); } catch { /* Cloud Run read-only FS */ }
+if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
 
 // ─── POST /api/results/process/:ticketId ─────────────────────────────────────
 // Trigger AI processing. Runs async (doesn't block response).
@@ -31,7 +31,7 @@ resultRouter.post('/process/:ticketId', async (req, res) => {
     res.json({ message: 'Processing started', ticket_id: ticket.id, override_model: overrideModel || null });
 
     // Run async (non-blocking)
-    processTicket(ticket.id, undefined, { overrideModel }).catch(err => {
+    processTicket(ticket.id, { overrideModel }).catch(err => {
       console.error(`[Processor] Ticket ${ticket.id} failed:`, err.message);
     });
   } catch (err: any) {

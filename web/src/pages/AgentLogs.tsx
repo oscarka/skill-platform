@@ -248,11 +248,9 @@ function AgentTasksPanel() {
     return () => clearInterval(t);
   }, [filter]);
 
-  // Event polling fallback for ticket tasks — catches skill_done/skill_error/ticket_result_sent if SSE dropped
+  // Event polling fallback for ticket tasks — catches ticket_result_sent if SSE dropped
   const eventsRef = useRef<any[]>(events);
   useEffect(() => { eventsRef.current = events; }, [events]);
-
-  const TICKET_DONE_EVENTS = ['ticket_result_sent', 'skill_done', 'skill_error'];
 
   useEffect(() => {
     if (!selected?.id) return;
@@ -261,7 +259,7 @@ function AgentTasksPanel() {
 
     const poll = setInterval(async () => {
       // Stop if result already in events
-      if (eventsRef.current.some((e: any) => TICKET_DONE_EVENTS.includes(e.event_type))) {
+      if (eventsRef.current.some((e: any) => e.event_type === 'ticket_result_sent')) {
         clearInterval(poll);
         return;
       }
@@ -274,7 +272,7 @@ function AgentTasksPanel() {
             const newEvs = data.events.filter((e: any) => !prevIds.has(e.id));
             return newEvs.length ? [...prev, ...newEvs] : prev;
           });
-          if (data.events.some((e: any) => TICKET_DONE_EVENTS.includes(e.event_type))) {
+          if (data.events.some((e: any) => e.event_type === 'ticket_result_sent')) {
             clearInterval(poll);
           }
         }
@@ -328,47 +326,8 @@ function AgentTasksPanel() {
       timeline.push({ _kind: 'cua_group', ts: deliveredTs, cuaEvents: selected.cua_events });
     }
 
-    // Canonical event type order — ensures logical flow even when ts values are equal
-    // (all appendTaskEvent calls are void/async so DB insertion order is non-deterministic)
-    const EVENT_ORDER: Record<string, number> = {
-      message_received:             0,
-      wiki_fetched:                 1,
-      context_snapshot:             2,
-      app_prewarm:                  3,
-      route_decided:                4,
-      skill_skipped_low_confidence: 5,
-      skill_suggest:                6,
-      skill_guard_activated:        7,
-      skill_guard_check:            8,
-      skill_guard_judgment:         9,
-      skill_guard_clarify:          10,
-      skill_guard_closed:           11,
-      guard_lifecycle:              12,
-      agent_context_assembled:      13,
-      health_direct_input:          13.5,
-      ticket_created:               14,
-      ticket_reused:                14,
-      skill_selected:               15,
-      skill_input:                  16,
-      skill_started:                17,
-      cua_step:                     18,
-      skill_done:                   19,
-      result_link_built:            20,
-      wiki_sync_pending:            21,
-      wiki_confirmed:               22,
-      wiki_declined:                22,
-      reassurance_sent:             23,
-      tool_query_ticket:            24,
-      reply_sent:                   25,
-      reply_preempted:              25,
-      ticket_result_sent:           26,
-    };
-    const evOrder = (item: any): number => {
-      if (item._kind !== 'agent_event') return -1;
-      return EVENT_ORDER[item.ev?.event_type] ?? 50;
-    };
-    timeline.forEach((item, i) => { item._seq = i; });
-    timeline.sort((a, b) => (a.ts - b.ts) || (evOrder(a) - evOrder(b)) || (a._seq - b._seq));
+    // Sort by ts
+    timeline.sort((a, b) => a.ts - b.ts);
     return timeline;
   };
 
@@ -593,19 +552,8 @@ function AgentTasksPanel() {
                   skill_guard_judgment:  { icon: '🤔', label: '守卫判断', dotBg: '#d97706', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#92400e' },
                   skill_guard_clarify:   { icon: '❓', label: '守卫追问', dotBg: '#ea580c', cardBg: '#fff7ed', cardBorder: '#fed7aa', textColor: '#9a3412' },
                   skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
-                  ticket_submitted:      { icon: '📝', label: '用户已提交表单', dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#0e7490' },
-                   ticket_ai_started:    { icon: '🤖', label: 'AI 开始处理',    dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
-                   ticket_processing:    { icon: '🔄', label: '工单处理中',     dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#0e7490' },
-                   ticket_progress:      { icon: '⚙️', label: 'AI 处理进度',   dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
-                   ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
+                  ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                   ticket_result_sent:    { icon: '📊', label: '报告已发送', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
-                   ticket_reused:         { icon: '♻️', label: '工单复用',   dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
-                   skill_error:           { icon: '⚠️', label: 'Skill 失败', dotBg: '#dc2626', cardBg: '#fff5f5', cardBorder: '#fca5a5', textColor: '#b91c1c' },
-                  // ── v2 架构新增事件 (Steps 4-7) ──────────────────────────────────────────
-                  guard_lifecycle:       { icon: '🛰️', label: '守卫生命周期', dotBg: '#7c3aed', cardBg: '#f5f3ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
-                  agent_context_assembled: { icon: '📦', label: 'Agent上下文包', dotBg: '#0369a1', cardBg: '#f0f9ff', cardBorder: '#7dd3fc', textColor: '#075985' },
-                  tool_query_ticket:     { icon: '🔍', label: '查询工单', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
-                  health_direct_input:   { icon: '🧠', label: '发送给 Agent', dotBg: '#7c3aed', cardBg: '#faf5ff', cardBorder: '#ddd6fe', textColor: '#5b21b6' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -669,14 +617,9 @@ function AgentTasksPanel() {
                               <span style={{ color: '#c084fc' }}>分诊路由 AI</span>
                             </div>
                             {/* AI 判定结论 */}
-                            {p.rawResult && p.rawResult !== '(error)' && (
-                              <div style={{ marginBottom: 8, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 6, padding: '6px 10px', fontSize: '.8rem', fontFamily: 'monospace', color: '#065f46' }}>
+                            {p.rawResult && (
+                              <div style={{ marginBottom: 8, background: p.routeType === 'health' ? '#faf5ff' : '#f0fdf4', border: `1px solid ${p.routeType === 'health' ? '#e9d5ff' : '#bbf7d0'}`, borderRadius: 6, padding: '6px 10px', fontSize: '.8rem', fontFamily: 'monospace', color: p.routeType === 'health' ? '#6d28d9' : '#065f46' }}>
                                 AI 判定结论：{p.rawResult}
-                              </div>
-                            )}
-                            {p.rawResult === '(error)' && (
-                              <div style={{ marginBottom: 8, background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 6, padding: '6px 10px', fontSize: '.8rem', color: '#dc2626', display: 'flex', alignItems: 'center', gap: 6 }}>
-                                ⚠️ 路由 AI 调用失败（降级为直接回复）
                               </div>
                             )}
                             {p.systemPrompt && <details style={{ marginBottom: 6 }}><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开 System Prompt ({p.systemPrompt.length} 字符)</summary><pre style={{ fontSize: '11px', color: '#374151', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 8, borderRadius: 6, border: '1px solid #e5e7eb' }}>{p.systemPrompt}</pre></details>}
@@ -711,23 +654,6 @@ function AgentTasksPanel() {
                               选中：{p.skillName} <code style={{ fontSize: '.7rem', color: '#78716c', fontWeight: 400 }}>{(p.skillId || '').slice(0, 8)}</code>
                             </div>
                             {p.reason && <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '7px 10px', borderRadius: 6, borderLeft: '3px solid #fb923c', lineHeight: 1.6 }}>理由：{p.reason}</div>}
-                          </div>
-                        )}
-                        {evType === 'skill_suggest' && (
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                              <span style={{ background: '#fde68a', color: '#92400e', padding: '2px 10px', borderRadius: 12, fontSize: '.8rem', fontWeight: 700 }}>💡 {p.skillName || '未知 Skill'}</span>
-                              {p.skillId && <code style={{ fontSize: '.7rem', color: '#a16207' }}>{(p.skillId || '').slice(0, 8)}</code>}
-                              {!p.skillName && !p.skillId && <span style={{ fontSize: '.72rem', color: '#92400e' }}>（旧版数据，字段缺失）</span>}
-                            </div>
-                            {p.reason && <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '7px 10px', borderRadius: 6, borderLeft: '3px solid #fbbf24', lineHeight: 1.6, marginBottom: 8 }}>路由理由：{p.reason}</div>}
-                            {p.suggestMsg ? (
-                              <div style={{ fontSize: '.85rem', color: '#451a03', background: 'rgba(255,255,255,.7)', padding: '8px 12px', borderRadius: 7, border: '1px solid #fde68a', lineHeight: 1.7, whiteSpace: 'pre-wrap' as const }}>
-                                {p.suggestMsg}
-                              </div>
-                            ) : (
-                              !p.reason && <div style={{ fontSize: '.8rem', color: '#92400e', fontStyle: 'italic' }}>守卫推荐消息（内容未记录）</div>
-                            )}
                           </div>
                         )}
                         {evType === 'skill_input' && (
@@ -888,59 +814,6 @@ function AgentTasksPanel() {
                             {p.prefilledNotes && <div style={{ marginTop: 4, fontSize: '.75rem', color: '#374151', background: '#f0fdfa', padding: '4px 8px', borderRadius: 4 }}>预填: {p.prefilledNotes}</div>}
                           </div>
                         )}
-                        {evType === 'ticket_submitted' && (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                              <span style={{ fontWeight: 600, color: '#0e7490' }}>📝 表单已提交</span>
-                              <span style={{ background: '#cffafe', color: '#0e7490', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
-                              <span style={{ background: '#f1f5f9', color: '#475569', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.patientName}</span>
-                              <span style={{ background: '#e0f2fe', color: '#0369a1', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.fieldCount} 个字段{p.fileCount > 0 ? ` + ${p.fileCount} 个文件` : ''}</span>
-                            </div>
-                            {p.fieldValues && Object.keys(p.fieldValues as Record<string,string>).length > 0 ? (
-                              <details style={{ marginTop: 2 }}>
-                                <summary style={{ cursor: 'pointer', fontSize: '.74rem', color: '#0891b2', userSelect: 'none', padding: '2px 0' }}>▶ 展开填写内容</summary>
-                                <div style={{ fontSize: '.78rem', background: '#f0fdfa', borderRadius: 6, padding: '8px 10px', border: '1px solid #a5f3fc', marginTop: 4 }}>
-                                  {Object.entries(p.fieldValues as Record<string, string>).map(([k, v]) => (
-                                    <div key={k} style={{ display: 'flex', gap: 8, marginBottom: 4, lineHeight: 1.5 }}>
-                                      <span style={{ color: '#0e7490', fontWeight: 600, minWidth: 100, flexShrink: 0 }}>{k}</span>
-                                      <span style={{ color: '#1e293b', wordBreak: 'break-all' }}>{v || '（未填写）'}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </details>
-                            ) : p.fieldKeys?.length > 0 ? (
-                              <div style={{ fontSize: '.74rem', color: '#64748b', background: '#f0fdfa', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace' }}>
-                                字段：{p.fieldKeys.join('、')}
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-                        {evType === 'ticket_ai_started' && (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                              <span style={{ fontWeight: 600, color: '#5b21b6' }}>🤖 AI 开始分析</span>
-                              <span style={{ background: '#ede9fe', color: '#5b21b6', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
-                              <span style={{ background: '#f5f3ff', color: '#7c3aed', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.inputCount} 项输入</span>
-                              <span style={{ color: '#9ca3af', fontSize: '.72rem' }}>{p.note}</span>
-                            </div>
-                          </div>
-                        )}
-                        {evType === 'ticket_progress' && (() => {
-                          const detail = p.stepDetail ? String(p.stepDetail) : '';
-                          return (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <span style={{ background: '#f3f4f6', color: '#374151', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem', fontFamily: 'monospace' }}>{p.stepLabel}</span>
-                            {detail && (
-                              <details style={{ marginTop: 4 }}>
-                                <summary style={{ cursor: 'pointer', fontSize: '.74rem', color: '#7c3aed', userSelect: 'none' }}>▶ 查看详情</summary>
-                                <div style={{ fontSize: '.75rem', color: '#6b7280', borderLeft: '3px solid #c4b5fd', paddingLeft: 8, lineHeight: 1.5, whiteSpace: 'pre-wrap', marginTop: 4, maxHeight: 300, overflow: 'auto' }}>
-                                  {detail}
-                                </div>
-                              </details>
-                            )}
-                          </div>
-                          );
-                        })()}
                         {evType === 'ticket_result_sent' && (
                           <div style={{ fontSize: '.82rem' }}>
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
@@ -954,170 +827,7 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {evType === 'reply_preempted' && (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                              <span style={{ fontWeight: 600, color: '#be123c' }}>✂️ 回复被抢占</span>
-                              {p.reason && <span style={{ background: '#ffe4e6', color: '#be123c', padding: '1px 8px', borderRadius: 4, fontSize: '.72rem' }}>{p.reason}</span>}
-                              {p.newer_task_id && <code style={{ fontSize: '.68rem', color: '#9ca3af' }}>→ {String(p.newer_task_id).slice(0, 12)}</code>}
-                            </div>
-                            <div style={{ fontSize: '.78rem', color: '#9f1239', background: '#fff1f2', padding: '5px 9px', borderRadius: 5, borderLeft: '3px solid #fb7185', lineHeight: 1.5 }}>
-                              {p.skipped_reply_preview
-                                ? `未发送预览：${p.skipped_reply_preview}`
-                                : '本次回复在生成完成前被后续消息抢占，内容未记录'}
-                            </div>
-                          </div>
-                        )}
-                        {evType === 'result_link_built' && (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: p.resultViewUrl ? 6 : 0 }}>
-                              <span style={{ background: '#eff6ff', color: '#1e40af', padding: '1px 8px', borderRadius: 4, fontSize: '.72rem', fontWeight: 600 }}>{p.mode || '链接模式'}</span>
-                              <span style={{ color: '#64748b', fontSize: '.72rem' }}>输出 {p.outputLen || 0}字 → 回复 {p.replyLen || 0}字</span>
-                            </div>
-                            {p.replyPreview && <div style={{ fontSize: '.78rem', color: '#374151', lineHeight: 1.5 }}>{p.replyPreview}</div>}
-                            {p.resultViewUrl && <div style={{ fontSize: '.72rem', color: '#2563eb', fontFamily: 'monospace', wordBreak: 'break-all', marginTop: 4 }}>{p.resultViewUrl}</div>}
-                          </div>
-                        )}
-                        {evType === 'wiki_sync_pending' && (
-                          <div style={{ fontSize: '.82rem', color: '#5b21b6' }}>
-                            <span style={{ background: '#ede9fe', padding: '2px 8px', borderRadius: 4, marginRight: 8 }}>⏸️ 等待用户确认</span>
-                            {p.reason && <span style={{ color: '#6d28d9', fontSize: '.78rem' }}>{p.reason}</span>}
-                          </div>
-                        )}
-                        {(evType === 'wiki_confirmed' || evType === 'wiki_declined') && (
-                          <div style={{ fontSize: '.82rem', display: 'flex', gap: 8, alignItems: 'center' }}>
-                            <span style={{ fontWeight: 600, color: evType === 'wiki_confirmed' ? '#059669' : '#6b7280' }}>
-                              {evType === 'wiki_confirmed' ? '✅ 用户认可 Wiki 已同步' : '🚫 用户取消 Wiki 未同步'}
-                            </span>
-                            {p.userId && <code style={{ fontSize: '.68rem', color: '#9ca3af' }}>{p.userId}</code>}
-                          </div>
-                        )}
-                        {evType === 'skill_skipped_low_confidence' && (
-                          <div style={{ fontSize: '.82rem' }}>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-                              <span style={{ fontWeight: 600, color: '#92400e' }}>📊 低置信度跳过</span>
-                              {(p.skippedSkillName || p.skillName) && (
-                                <span style={{ background: '#fde68a', color: '#78350f', padding: '1px 8px', borderRadius: 4, fontSize: '.72rem' }}>{p.skippedSkillName || p.skillName}</span>
-                              )}
-                              {!p.skippedSkillName && !p.skillName && <span style={{ fontSize: '.72rem', color: '#92400e' }}>置信度不足，走普通回复</span>}
-                            </div>
-                            {(p.reason || p.note) && <div style={{ fontSize: '.78rem', color: '#78350f', borderLeft: '3px solid #fbbf24', paddingLeft: 8 }}>{p.reason || p.note}</div>}
-                          </div>
-                        )}
-
-                        {evType === 'guard_lifecycle' && (() => {
-                          const p = ev.payload || {};
-                          const actionMap: Record<string, string> = {
-                            new_created: '🆕 新建守卫',
-                            existing:    '♻️ 复用守卫',
-                            closed_by_new_skill: '🔄 跨skill切换关闭',
-                          };
-                          return (
-                            <div style={{ fontSize: '.79rem', background: '#f5f3ff', border: '1px solid #c4b5fd', borderRadius: 8, padding: '6px 10px', lineHeight: 1.6 }}>
-                              <span style={{ fontWeight: 600 }}>{actionMap[p.action] || p.action}</span>
-                              {p.skillName && <span style={{ marginLeft: 8, color: '#6d28d9' }}>「{p.skillName}」</span>}
-                              {p.round != null && <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: '.72rem' }}>第{p.round}轮</span>}
-                              {p.oldSkillName && <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: '.72rem' }}>{p.oldSkillName} → {p.newSkillName}</span>}
-                            </div>
-                          );
-                        })()}
-
-                        {evType === 'agent_context_assembled' && (() => {
-                          const p = ev.payload || {};
-                          const statusMap: Record<string, { color: string; label: string }> = {
-                            new_created:      { color: '#7c3aed', label: '🆕 新建守卫' },
-                            confirmed_ticket: { color: '#059669', label: '✅ 已确认建单' },
-                            declined:         { color: '#dc2626', label: '❌ 已拒绝' },
-                            pending_unclear:  { color: '#d97706', label: '⏳ 待确认' },
-                            none:             { color: '#64748b', label: '○ 无守卫' },
-                          };
-                          const st = statusMap[p.guardStatus] || { color: '#64748b', label: p.guardStatus };
-                          return (
-                            <div style={{ fontSize: '.79rem', background: '#f0f9ff', border: '1px solid #7dd3fc', borderRadius: 8, padding: '8px 12px', lineHeight: 1.7 }}>
-                              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' as const }}>
-                                <span><b>守卫状态</b> <span style={{ color: st.color, fontWeight: 600 }}>{st.label}</span></span>
-                                {p.routeSkill && <span><b>路由Skill</b> {p.routeSkill}</span>}
-                                {p.confidence && <span><b>置信度</b> {p.confidence}</span>}
-                                {p.hasTicket && <span><b>工单</b> {p.ticketStatus || '有'}</span>}
-                              </div>
-                              {p.directive && <div style={{ marginTop: 6, padding: '4px 8px', background: '#e0f2fe', borderRadius: 5, color: '#0369a1', fontSize: '.76rem' }}>📋 {p.directive.slice(0, 150)}{p.directive.length > 150 ? '…' : ''}</div>}
-                            </div>
-                          );
-                        })()}
-
-                        {evType === 'tool_query_ticket' && (() => {
-                          const p = ev.payload || {};
-                          const r = p.result || {};
-                          return (
-                            <div style={{ fontSize: '.79rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: 8, padding: '6px 10px' }}>
-                              {r.found === false
-                                ? <span style={{ color: '#6b7280' }}>无近期工单</span>
-                                : <span><b>{r.skill_name || '工单'}</b> · {r.status} · 报告{r.report ? `${r.report.length}字` : '无'}</span>
-                              }
-                            </div>
-                          );
-                        })()}
-
-                        {evType === 'health_direct_input' && (() => {
-                          const p = ev.payload || {};
-                          return (
-                            <div style={{ fontSize: '.82rem' }}>
-                              {/* HTTP-style bar */}
-                              <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6 }}>
-                                <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>POST</span> <span style={{ color: '#f1f5f9' }}>/chat/completions</span></div>
-                                <span style={{ color: '#c084fc' }}>{p.path === 'chat' ? '普通对话 Agent（降级）' : '健康 Agent 直接回复'}</span>
-                              </div>
-                              {/* Stats row */}
-                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const, marginBottom: 8, fontSize: '.75rem' }}>
-                                {p.path === 'chat' && <span style={{ background: '#fee2e2', color: '#b91c1c', padding: '2px 7px', borderRadius: 4, fontWeight: 600 }}>⚠️ 路由降级</span>}
-                                <span style={{ background: '#ede9fe', color: '#5b21b6', padding: '2px 7px', borderRadius: 4 }}>系统提示词 {p.systemPromptLen || 0}字</span>
-                                {p.wikiProfileLen > 0 && <span style={{ background: '#ecfdf5', color: '#065f46', padding: '2px 7px', borderRadius: 4 }}>客户画像 {p.wikiProfileLen}字</span>}
-                                {p.wikiHealthLen > 0 && <span style={{ background: '#f0fdf4', color: '#15803d', padding: '2px 7px', borderRadius: 4 }}>健康档案 {p.wikiHealthLen}字</span>}
-                                {p.historyCount > 0 && <span style={{ background: '#fff7ed', color: '#c2410c', padding: '2px 7px', borderRadius: 4 }}>对话历史 {p.historyCount}条</span>}
-                                <span style={{ background: '#f1f5f9', color: '#475569', padding: '2px 7px', borderRadius: 4 }}>总计 {p.totalMsgChars || 0}字</span>
-                                {p.hasDirective && <span style={{ background: '#fef3c7', color: '#92400e', padding: '2px 7px', borderRadius: 4 }}>📋 有 directive</span>}
-                                {p.toolNames?.length > 0 && <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 7px', borderRadius: 4 }}>🔧 {p.toolNames.join(', ')}</span>}
-                              </div>
-                              {/* Expandable system prompt */}
-                              {p.systemPrompt && (
-                                <details style={{ marginBottom: 6 }}>
-                                  <summary style={{ fontSize: '.72rem', color: '#6d28d9', cursor: 'pointer', userSelect: 'none' as const }}>▶ 展开 System Prompt ({p.systemPromptLen} 字，含客户画像+健康档案)</summary>
-                                  <pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 500, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #ddd6fe' }}>{p.systemPrompt}</pre>
-                                </details>
-                              )}
-                              {/* Expandable history messages */}
-                              {p.historyMessages?.length > 0 && (
-                                <details style={{ marginBottom: 6 }}>
-                                  <summary style={{ fontSize: '.72rem', color: '#c2410c', cursor: 'pointer', userSelect: 'none' as const }}>▶ 展开对话历史 ({p.historyMessages.length} 条消息)</summary>
-                                  <div style={{ marginTop: 6, maxHeight: 300, overflow: 'auto', background: '#fff8f1', padding: 10, borderRadius: 7, border: '1px solid #fed7aa' }}>
-                                    {p.historyMessages.map((m: any, i: number) => (
-                                      <div key={i} style={{ marginBottom: 8, fontSize: '11px' }}>
-                                        <span style={{ fontWeight: 600, color: m.role === 'user' ? '#c2410c' : '#059669' }}>[{m.role === 'user' ? '客户' : '助手'}]</span>
-                                        <span style={{ color: '#1e293b', marginLeft: 6 }}>{m.content}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </details>
-                              )}
-                              {/* Expandable directive */}
-                              {p.directive && (
-                                <details style={{ marginBottom: 6 }}>
-                                  <summary style={{ fontSize: '.72rem', color: '#92400e', cursor: 'pointer', userSelect: 'none' as const }}>▶ 展开 Directive 指令</summary>
-                                  <pre style={{ fontSize: '11px', color: '#92400e', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 200, overflow: 'auto', background: '#fffbeb', padding: 10, borderRadius: 7, border: '1px solid #fde68a' }}>{p.directive}</pre>
-                                </details>
-                              )}
-                              {/* Expandable user message */}
-                              {p.userMsg && (
-                                <details>
-                                  <summary style={{ fontSize: '.72rem', color: '#6d28d9', cursor: 'pointer', userSelect: 'none' as const }}>▶ 展开用户消息 (含备注+当前问题)</summary>
-                                  <pre style={{ fontSize: '11px', color: '#1e293b', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 300, overflow: 'auto', background: '#fff', padding: 10, borderRadius: 7, border: '1px solid #ddd6fe' }}>{p.userMsg}</pre>
-                                </details>
-                              )}
-                            </div>
-                          );
-                        })()}
-
-                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_processing','ticket_progress','ticket_submitted','ticket_ai_started','ticket_created','ticket_reused','ticket_result_sent','skill_error','guard_lifecycle','agent_context_assembled','tool_query_ticket','health_direct_input'].includes(evType) && (
+                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
                           <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
                         )}
                       </div>

@@ -30,17 +30,8 @@ export const pool = new Pool({
     ? { rejectUnauthorized: false, checkServerIdentity: () => undefined }
     : false,
   max: 10,
-  // ── 连接池调优（基于实测数据）──────────────────────────────────────────────
-  // 实测：冷连接建立 = 1700ms (DNS+TCP+TLS+PG auth)，热连接查询 = 230ms
-  // 策略：尽量保持连接存活，用 keepAlive 探测替代频繁重建
-  //   1. idleTimeoutMillis=60s: 连接空闲 60 秒才释放（避免频繁重建 1.7s 开销）
-  //   2. keepAlive=10s: TCP 探测间隔 10 秒，快速发现死连接
-  //   3. connectionTimeoutMillis=5s: 新连接建立超时（正常 1.7s，超过说明网络异常）
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,   // 10s 开始 keepalive 探测（快速检测死连接）
-  idleTimeoutMillis: 60000,             // 60s 空闲才释放（保持连接温热）
-  connectionTimeoutMillis: 5000,        // 5s 连接建立超时
-  statement_timeout: 10000,             // 10s 单查询超时保护
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000,
 });
 
 // 每个连接建立后也设置 search_path（双保险，用于非 pgBouncer 直连场景）
@@ -55,70 +46,31 @@ pool.on('error', (err) => {
 console.log(`[DB] PostgreSQL pool initialized → schema: ${DB_SCHEMA}`);
 
 
-// ─── Async helpers (with split-phase timing) ─────────────────────────────────
-
-const SLOW_QUERY_MS = 500;
-
-function logQueryTiming(op: string, sql: string, connectMs: number, queryMs: number) {
-  const totalMs = connectMs + queryMs;
-  const poolStats = `pool(total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount})`;
-  const sqlPreview = sql.replace(/\s+/g, ' ').slice(0, 80);
-  if (totalMs > SLOW_QUERY_MS) {
-    console.warn(`[DB][SLOW] ${op} connect=${connectMs}ms query=${queryMs}ms total=${totalMs}ms ${poolStats} SQL: ${sqlPreview}`);
-  }
-}
+// ─── Async helpers ─────────────────────────────────────────────────────────────
 
 /** Execute INSERT/UPDATE/DELETE */
 export async function runAsync(sql: string, params: any[] = []): Promise<void> {
-  const t0 = Date.now();
-  const client = await pool.connect();
-  const connectMs = Date.now() - t0;
-  try {
-    const pgSql = toPostgresSql(sql, params);
-    const t1 = Date.now();
-    await client.query(pgSql.sql, pgSql.params);
-    logQueryTiming('RUN', sql, connectMs, Date.now() - t1);
-  } finally { client.release(); }
+  const pgSql = toPostgresSql(sql, params);
+  await pool.query(pgSql.sql, pgSql.params);
 }
 
 /** Fetch single row */
 export async function getAsync<T>(sql: string, params: any[] = []): Promise<T | undefined> {
-  const t0 = Date.now();
-  const client = await pool.connect();
-  const connectMs = Date.now() - t0;
-  try {
-    const pgSql = toPostgresSql(sql, params);
-    const t1 = Date.now();
-    const result = await client.query(pgSql.sql, pgSql.params);
-    logQueryTiming('GET', sql, connectMs, Date.now() - t1);
-    return result.rows[0] as T | undefined;
-  } finally { client.release(); }
+  const pgSql = toPostgresSql(sql, params);
+  const result = await pool.query(pgSql.sql, pgSql.params);
+  return result.rows[0] as T | undefined;
 }
 
 /** Fetch all rows */
 export async function allAsync<T>(sql: string, params: any[] = []): Promise<T[]> {
-  const t0 = Date.now();
-  const client = await pool.connect();
-  const connectMs = Date.now() - t0;
-  try {
-    const pgSql = toPostgresSql(sql, params);
-    const t1 = Date.now();
-    const result = await client.query(pgSql.sql, pgSql.params);
-    logQueryTiming('ALL', sql, connectMs, Date.now() - t1);
-    return result.rows as T[];
-  } finally { client.release(); }
+  const pgSql = toPostgresSql(sql, params);
+  const result = await pool.query(pgSql.sql, pgSql.params);
+  return result.rows as T[];
 }
 
 /** Execute raw SQL (for schema creation) */
 export async function execAsync(sql: string): Promise<void> {
-  const t0 = Date.now();
-  const client = await pool.connect();
-  const connectMs = Date.now() - t0;
-  try {
-    const t1 = Date.now();
-    await client.query(sql);
-    logQueryTiming('EXEC', sql, connectMs, Date.now() - t1);
-  } finally { client.release(); }
+  await pool.query(sql);
 }
 
 // ─── SQLite → PostgreSQL SQL 转换 ──────────────────────────────────────────────
@@ -430,23 +382,6 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS guard_mode TEXT DEFAULT 'existing'`,
       // closed_reason: 守卫关闭原因（user_declined | user_confirmed | closed_by_new_skill | max_rounds）
       `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS closed_reason TEXT`,
-      // 确保 ticket_results 表存在（老 schema 可能漏建）
-      `CREATE TABLE IF NOT EXISTS ticket_results (
-        id              TEXT PRIMARY KEY,
-        ticket_id       TEXT UNIQUE NOT NULL,
-        raw_result      TEXT,
-        ai_log          TEXT,
-        revised_result  TEXT,
-        revision_notes  TEXT,
-        revised_by      TEXT,
-        revised_at      BIGINT,
-        report_path     TEXT,
-        report_type     TEXT,
-        report_url      TEXT,
-        created_at      BIGINT NOT NULL,
-        updated_at      BIGINT NOT NULL,
-        FOREIGN KEY (ticket_id) REFERENCES tickets(id)
-      )`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
