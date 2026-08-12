@@ -406,6 +406,174 @@ def bench():
     return jsonify(results), 200
 
 
+
+@app.route("/bench_methods", methods=["GET"])
+def bench_methods():
+    """
+    /bench_methods — 在 Cloud Run 内部对比 4 种 Gemini 连接方式的速度
+    无需认证（调试用）。使用环境变量里的 AI_API_KEY + AI_BASE_URL。
+
+    参数（query string）：
+      model=gemini-2.5-flash   # 可选，默认自动选第一个可用模型
+      runs=1                   # 每种方式跑几次，默认 1
+    """
+    import time as _t, json as _j, urllib.request as _ur, urllib.error as _ue
+
+    ai_key   = os.environ.get("AI_API_KEY", "") or os.environ.get("DOUBAO_API_KEY", "")
+    ai_base  = os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+    model    = request.args.get("model", os.environ.get("AI_MODEL", "gemini-2.5-flash"))
+    runs     = max(1, min(3, int(request.args.get("runs", "1"))))
+
+    MSGS = [
+        {"role": "system", "content": "你是简短的助手，回答控制在 60 字以内。"},
+        {"role": "user",   "content": "简单介绍 DASH 饮食法对高血压的作用。"},
+    ]
+    MAX_TOK = 128
+
+    results = {"model": model, "base": ai_base, "runs": runs, "methods": {}}
+
+    if not ai_key:
+        return jsonify({"error": "no AI_API_KEY in env"}), 500
+
+    def _run_urllib():
+        body = _j.dumps({"model": model, "messages": MSGS, "max_tokens": MAX_TOK, "stream": True}).encode()
+        req = _ur.Request(f"{ai_base}/chat/completions", data=body,
+                          headers={"Authorization": f"Bearer {ai_key}", "Content-Type": "application/json"},
+                          method="POST")
+        t0 = _t.time()
+        r = {"method": "urllib (当前实现)", "ok": False}
+        try:
+            with _ur.urlopen(req, timeout=90) as resp:
+                r["connect_ms"] = round((_t.time() - t0) * 1000)
+                first = True; content = ""; chunks = 0
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if not line or not line.startswith("data:"): continue
+                    p = line[5:].strip()
+                    if p == "[DONE]": break
+                    try: ch = _j.loads(p)
+                    except: continue
+                    chunks += 1
+                    if first: r["ttft_ms"] = round((_t.time() - t0) * 1000); first = False
+                    for c in ch.get("choices", []):
+                        if c.get("delta", {}).get("content"): content += c["delta"]["content"]
+            r.update({"ok": True, "total_ms": round((_t.time()-t0)*1000),
+                      "chunks": chunks, "content_len": len(content), "preview": content[:60]})
+        except Exception as e:
+            r.update({"error": str(e)[:200], "total_ms": round((_t.time()-t0)*1000)})
+        return r
+
+    def _run_openai_sdk():
+        r = {"method": "openai SDK (httpx, HTTP/1.1)", "ok": False}
+        t0 = _t.time()
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=ai_key, base_url=ai_base, timeout=90)
+            stream = client.chat.completions.create(model=model, messages=MSGS, max_tokens=MAX_TOK, stream=True)
+            first = True; content = ""; chunks = 0
+            for chunk in stream:
+                chunks += 1
+                if first: r["connect_ms"] = r["ttft_ms"] = round((_t.time()-t0)*1000); first = False
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content += chunk.choices[0].delta.content
+            r.update({"ok": True, "total_ms": round((_t.time()-t0)*1000),
+                      "chunks": chunks, "content_len": len(content), "preview": content[:60]})
+        except Exception as e:
+            r.update({"error": str(e)[:200], "total_ms": round((_t.time()-t0)*1000)})
+        return r
+
+    def _run_httpx():
+        r = {"method": "httpx 直连 HTTP/2", "ok": False}
+        t0 = _t.time()
+        try:
+            import httpx
+            body = {"model": model, "messages": MSGS, "max_tokens": MAX_TOK, "stream": True}
+            headers = {"Authorization": f"Bearer {ai_key}", "Content-Type": "application/json"}
+            with httpx.Client(http2=True, timeout=90) as client:
+                with client.stream("POST", f"{ai_base}/chat/completions",
+                                   json=body, headers=headers) as resp:
+                    resp.raise_for_status()
+                    r["connect_ms"] = round((_t.time()-t0)*1000)
+                    first = True; content = ""; chunks = 0
+                    for line in resp.iter_lines():
+                        if not line or not line.startswith("data:"): continue
+                        p = line[5:].strip()
+                        if p == "[DONE]": break
+                        try: ch = _j.loads(p)
+                        except: continue
+                        chunks += 1
+                        if first: r["ttft_ms"] = round((_t.time()-t0)*1000); first = False
+                        for c in ch.get("choices", []):
+                            if c.get("delta", {}).get("content"): content += c["delta"]["content"]
+            r.update({"ok": True, "total_ms": round((_t.time()-t0)*1000),
+                      "chunks": chunks, "content_len": len(content), "preview": content[:60]})
+        except Exception as e:
+            r.update({"error": str(e)[:200], "total_ms": round((_t.time()-t0)*1000)})
+        return r
+
+    def _run_genai_sdk():
+        r = {"method": "google-genai SDK (native)", "ok": False}
+        t0 = _t.time()
+        try:
+            from google import genai as _genai
+            from google.genai import types as _gtypes
+            client = _genai.Client(api_key=ai_key)
+            content = ""
+            first = True
+            chunks = 0
+            for chunk in client.models.generate_content_stream(
+                model=model,
+                contents=MSGS[1]["content"],
+                config=_gtypes.GenerateContentConfig(
+                    system_instruction=MSGS[0]["content"],
+                    max_output_tokens=MAX_TOK,
+                ),
+            ):
+                chunks += 1
+                if first:
+                    r["connect_ms"] = r["ttft_ms"] = round((_t.time()-t0)*1000)
+                    first = False
+                if chunk.text:
+                    content += chunk.text
+            r.update({"ok": True, "total_ms": round((_t.time()-t0)*1000),
+                      "chunks": chunks, "content_len": len(content), "preview": content[:60]})
+        except Exception as e:
+            r.update({"error": str(e)[:300], "total_ms": round((_t.time()-t0)*1000)})
+        return r
+
+    benches = [_run_urllib, _run_openai_sdk, _run_httpx, _run_genai_sdk]
+
+    for fn in benches:
+        name = fn.__name__
+        run_results = []
+        for i in range(runs):
+            run_results.append(fn())
+            if i < runs - 1:
+                _t.sleep(2)
+        results["methods"][name] = run_results
+
+    # 汇总
+    summary = []
+    for name, runs_list in results["methods"].items():
+        ok = [r for r in runs_list if r.get("ok")]
+        method_name = runs_list[0].get("method", name) if runs_list else name
+        if ok:
+            def avg(k): return round(sum(r.get(k) or 0 for r in ok) / len(ok))
+            summary.append({
+                "method": method_name,
+                "ok_runs": len(ok),
+                "connect_ms_avg": avg("connect_ms"),
+                "ttft_ms_avg": avg("ttft_ms"),
+                "total_ms_avg": avg("total_ms"),
+                "chunks_avg": round(sum(r.get("chunks",0) for r in ok)/len(ok)),
+            })
+        else:
+            summary.append({"method": method_name, "ok_runs": 0,
+                            "error": runs_list[0].get("error","?")[:100] if runs_list else "?"})
+    results["summary"] = summary
+    return jsonify(results), 200
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     print(f"[server] Persistent Sandbox Service starting on port {port}", flush=True)

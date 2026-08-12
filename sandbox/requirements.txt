@@ -1,8 +1,9 @@
 requests
-httpx
+httpx[http2]
 PyPDF2
 pdfplumber
 python-docx
 Pillow
 pandas
 openai
+google-genai
