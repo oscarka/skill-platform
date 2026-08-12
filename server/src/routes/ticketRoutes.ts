@@ -260,12 +260,16 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
 
     // ─── 实时流式进度上报 (Real-time CUA Transcript Streaming) ─────────────────────
     if (body?.type === 'progress' || body?.type === 'transcript_step') {
+      const { v4: uuidv4 } = require('uuid');
       const stepEntry = body.entry || {
+        id: uuidv4(),
         type: 'event',
         event: body.event?.step || 'progress',
         detail: body.event?.detail || '',
         ts: body.event?.ts || new Date().toISOString()
       };
+      // 确保所有 stepEntry 都有 id（没有 id 的不会写入 AgentLogs 渠道消息）
+      if (!stepEntry.id) stepEntry.id = uuidv4();
 
       const now = Date.now();
       const existing = await db.getAsync<any>('SELECT * FROM ticket_results WHERE ticket_id=?', [ticketId]);
