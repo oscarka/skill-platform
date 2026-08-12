@@ -890,16 +890,21 @@ def _resolve_tool_name(messages: list, tool_call_id: str) -> str:
 
 
 # ─── AI 调用（OpenAI 兼容接口，仿 OpenClaw FailoverError 多 provider）───────
-def _parse_sse_stream(r) -> dict:
+def _parse_sse_stream(r, t_connect: float = None) -> dict:
     """
     解析 OpenAI-compatible SSE 流，合并 delta → 标准 chat.completions 响应格式。
     参照 OpenClaw openai-transport-stream.ts 的 chunk 合并逻辑。
     每次 readline() 只等一个 chunk（毫秒级），彻底解决 read timeout 问题。
     """
+    import time as _t
     choices: dict = {}   # index → {role, content, tool_calls[]}
     usage: dict = {}
     model_out = ""
     finish_reason = None
+    _first_token_ts: float = None
+    _chunk_count: int = 0
+    _last_heartbeat: float = _t.time()
+    _t_start = t_connect or _t.time()
 
     for raw_line in r:
         line = raw_line.decode("utf-8", errors="replace").rstrip()
@@ -917,6 +922,20 @@ def _parse_sse_stream(r) -> dict:
             chunk = json.loads(payload)
         except json.JSONDecodeError:
             continue
+
+        # ── 首 token 计时（TTFT）──────────────────────────────────────────────
+        _chunk_count += 1
+        _now = _t.time()
+        if _first_token_ts is None:
+            _first_token_ts = _now
+            ttft_ms = round((_first_token_ts - _t_start) * 1000)
+            print(f"[llm] first_token ttft={ttft_ms}ms", flush=True)
+
+        # ── 每 10 秒打一次心跳，证明流仍在进行 ─────────────────────────────
+        if _now - _last_heartbeat >= 10:
+            elapsed = round(_now - _t_start)
+            print(f"[llm] streaming... elapsed={elapsed}s chunks={_chunk_count}", flush=True)
+            _last_heartbeat = _now
 
         # ── 检测 SSE 流内嵌的错误（Doubao 偶发：空响应、工具调用失败等）──────
         if "error" in chunk:
@@ -979,6 +998,12 @@ def _parse_sse_stream(r) -> dict:
         if not c["message"].get("tool_calls"):
             c["message"].pop("tool_calls", None)
 
+    _total_s = round(_t.time() - _t_start, 1)
+    _p_tok = usage.get("prompt_tokens", "?") if usage else "?"
+    _c_tok = usage.get("completion_tokens", "?") if usage else "?"
+    print(f"[llm] stream_done total={_total_s}s chunks={_chunk_count} "
+          f"prompt_tokens={_p_tok} completion_tokens={_c_tok} "
+          f"finish={finish_reason} model={model_out}", flush=True)
     return {
         "choices": list(choices.values()),
         "model": model_out,
@@ -1020,28 +1045,40 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
     )
     # 网络瞬时错误（SSL EOF、ConnectionReset）自动重试 2 次
     last_err = None
+    import time as _t2
     for attempt in range(3):
+        t_attempt_start = _t2.time()
+        print(f"[llm] -> {base}/chat/completions model={use_model} "
+              f"msgs={len(messages)} tools={'yes' if tools else 'no'} "
+              f"attempt={attempt+1}", flush=True)
         try:
             # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
+            t_connect_start = _t2.time()
             with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
+                t_connected = _t2.time()
+                print(f"[llm] connected in {round((t_connected-t_connect_start)*1000)}ms "
+                      f"status={r.status}", flush=True)
                 # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
                 try:
                     r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
                 except Exception:
                     pass
-                return _parse_sse_stream(r)
+                return _parse_sse_stream(r, t_connect=t_connect_start)
         except urllib.error.HTTPError as e:
             body_str = e.read().decode(errors="replace")
+            print(f"[llm] HTTPError {e.code} after {round((_t2.time()-t_attempt_start)*1000)}ms: {body_str[:200]}", flush=True)
             raise RuntimeError(f"AI API error {e.code}: {body_str}")
         except (urllib.error.URLError, socket.error, OSError) as e:
             last_err = e
             err_str = str(e)
+            elapsed_ms = round((_t2.time() - t_attempt_start) * 1000)
+            print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
             # SSL EOF / ConnectionReset / timeout → 可重试
             if attempt < 2 and ('EOF' in err_str or 'ssl' in err_str.lower()
                                 or 'reset' in err_str.lower() or 'ConnectionReset' in err_str):
                 import time
                 wait = (attempt + 1) * 2  # 2s, 4s
-                print(f"[_do_ai_call] transient error (attempt {attempt+1}/3): {err_str[:80]}, retry in {wait}s", flush=True)
+                print(f"[llm] retry in {wait}s...", flush=True)
                 time.sleep(wait)
                 # 重建 Request（urllib.request.Request 被消费后不可重用）
                 req = urllib.request.Request(
@@ -1317,7 +1354,16 @@ def executor_react_loop(
             progress_hint += " | Context 较满，信息够了请直接输出结论"
         messages[0] = {"role": "system", "content": base_system + progress_hint}
 
+        # ── 每 turn 前打印 context 大小诊断 ──────────────────────────────────
+        _ctx_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        _ctx_msgs = len(messages)
+        print(f"[executor] turn={turn} start elapsed={elapsed_case:.1f}s "
+              f"context={pressure['pressure_pct']}% msgs={_ctx_msgs} chars~{_ctx_chars}", flush=True)
+
+        _t_llm_start = time.time()
         resp = call_ai(messages, tools=executor_tools)
+        _t_llm_end = time.time()
+        _llm_elapsed = round(_t_llm_end - _t_llm_start, 1)
         choice0 = resp["choices"][0]
         msg = choice0["message"]
         msg.pop("_thinking", None)  # 清除内部字段，不影响消息历史
@@ -1331,6 +1377,12 @@ def executor_react_loop(
         used_model = resp.get("model") or AI_MODEL
         usage = resp.get("usage") or {}
         finish_reason = choice0.get("finish_reason", "stop")
+        _p = usage.get("prompt_tokens", "?")
+        _c = usage.get("completion_tokens", "?")
+        _tc_names = [tc["function"]["name"] for tc in tc_list] if tc_list else []
+        print(f"[executor] turn={turn} llm_done {_llm_elapsed}s "
+              f"prompt={_p} completion={_c} finish={finish_reason} "
+              f"tool_calls={_tc_names or 'none'} content_len={len(content)}", flush=True)
         req_meta = {
             "method": "POST",
             "endpoint": f"{AI_BASE_URL.rstrip('/')}/chat/completions",
