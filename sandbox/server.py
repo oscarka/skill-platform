@@ -97,6 +97,103 @@ def health():
     return jsonify({"status": "ok", "active_jobs": active, "cached_skills": cached}), 200
 
 
+@app.route("/diag/gemini-ttft", methods=["GET", "POST"])
+def diag_gemini_ttft():
+    """诊断端点：从 Cloud Run 内部直接请求 Gemini API，测量 TTFT
+    GET  ?key=...&model=...  → 简单 prompt 测试
+    POST body={key, model, system, user, tools, max_tokens} → 完整复现 runner.py 请求
+    GET  ?key=...&mode=full&skill_id=... → 用缓存的 SKILL_MD 自动构建完整请求
+    """
+    import urllib.request as _ur
+
+    if request.method == "POST":
+        d = request.get_json(force=True)
+        api_key = d.get("key", "")
+        model = d.get("model", "gemini-3.6-flash")
+        msgs = d.get("messages") or [
+            {"role": "system", "content": d.get("system", "You are helpful.")},
+            {"role": "user", "content": d.get("user", "Hello")},
+        ]
+        tools = d.get("tools")
+        max_tokens = d.get("max_tokens", 32)
+    else:
+        api_key = request.args.get("key", "")
+        model = request.args.get("model", "gemini-3.6-flash")
+        mode = request.args.get("mode", "simple")
+        max_tokens = int(request.args.get("max_tokens", "32"))
+
+        if mode == "full":
+            # 用缓存的 SKILL_MD 构建完整请求
+            skill_id = request.args.get("skill_id", "a2a53e54-98ca-4980-8b19-c18dea109877")
+            with _skill_cache_lock:
+                skill_md = _skill_cache.get(skill_id, "")
+            if not skill_md:
+                skill_md = _fetch_single_skill(skill_id)
+            system = skill_md.strip() + "\n\n---\n## 执行规则\n你是一个正在执行上述 Skill 的 AI Agent。\n收集到足够信息后直接输出结论。"
+            system += "\n\n📍 第 1 轮 | Context 已用约 0% | 已用 0s"
+            user = "[表单提交] AI营养师\n姓名：测试用户\n性别：男\n年龄：42\n身高：178cm\n体重：75kg\n目标：减脂\n活动水平：久坐"
+            msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            tools = [
+                {"type":"function","function":{"name":"exec","description":"执行bash命令","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+                {"type":"function","function":{"name":"write_file","description":"写文件","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+                {"type":"function","function":{"name":"read_file","description":"读文件","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+                {"type":"function","function":{"name":"web_search","description":"搜索网络","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+            ]
+            max_tokens = 32000
+        else:
+            prompt = request.args.get("prompt", "Say hello in one word.")
+            msgs = [{"role": "user", "content": prompt}]
+            tools = None
+
+    if not api_key:
+        return jsonify({"error": "pass key"}), 400
+
+    base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    req_body = {"model": model, "messages": msgs, "max_tokens": max_tokens, "stream": True}
+    if tools:
+        req_body["tools"] = tools
+        req_body["tool_choice"] = "auto"
+    data = json.dumps(req_body).encode()
+
+    req = _ur.Request(f"{base}/chat/completions", data=data,
+                      headers={"Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json"},
+                      method="POST")
+    t0 = time.time()
+    ctx_chars = sum(len(str(m.get("content",""))) for m in msgs)
+    result = {"model": model, "body_bytes": len(data), "ctx_chars": ctx_chars,
+              "tools": bool(tools), "max_tokens": max_tokens}
+    try:
+        with _ur.urlopen(req, timeout=180) as r:
+            result["connect_ms"] = round((time.time() - t0) * 1000)
+            try: r.fp.raw._sock.settimeout(120)
+            except: pass
+            first = True
+            for raw in r:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line or not line.startswith("data:"): continue
+                p = line[5:].strip()
+                if p == "[DONE]": break
+                if first:
+                    result["ttft_ms"] = round((time.time() - t0) * 1000)
+                    first = False
+                try:
+                    ch = json.loads(p)
+                    for c in ch.get("choices", []):
+                        if c.get("finish_reason"): result["finish"] = c["finish_reason"]
+                        d = c.get("delta", {})
+                        if d.get("tool_calls"):
+                            result["tool_call"] = d["tool_calls"][0].get("function",{}).get("name")
+                except: pass
+            result["total_ms"] = round((time.time() - t0) * 1000)
+            result["ok"] = True
+    except Exception as e:
+        result["error"] = str(e)[:200]
+        result["total_ms"] = round((time.time() - t0) * 1000)
+        result["ok"] = False
+    return jsonify(result), 200
+
+
 @app.route("/run", methods=["POST"])
 def run():
     """
@@ -423,14 +520,44 @@ def bench_methods():
     ai_base  = request.args.get("base", os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"))
     model    = request.args.get("model", os.environ.get("AI_MODEL", "gemini-2.5-flash"))
     runs     = max(1, min(3, int(request.args.get("runs", "1"))))
+    pad_size = int(request.args.get("pad", "0"))   # 填充到指定字符数，模拟真实工单 context 大小
+
+    _real_system = (
+        "你是一位 AI 全维度营养顾问，提供专业的营养分析和饮食建议。\n"
+        "你的任务是根据用户的个人信息和健康目标，生成详细的营养方案。\n"
+        "请使用科学依据（中国居民膳食指南2022、DASH饮食法等）作为参考。\n"
+        "回答要简洁专业，控制在 200 字以内。"
+    )
+    _real_user = (
+        "用户信息：42岁男性，身高178cm，体重75kg，BMI=23.67，久坐办公，"
+        "每天做饭时间约30分钟，偏好外卖和偏咸口味。\n"
+        "健康需求：改善睡眠、控制血压、优化外卖饮食选择。\n"
+        "请简单介绍 DASH 饮食法对高血压的作用，并给出3条具体建议。"
+    )
+
+    sys_content = _real_system
+    if pad_size > len(sys_content):
+        _pad_chunk = (
+            "营养素参考摄入量DRIs是评估个体营养摄入是否适宜的标准。"
+            "DASH饮食强调多摄入蔬菜水果全谷物低脂乳制品，减少钠饱和脂肪和红肉摄入。"
+            "研究显示DASH饮食可使收缩压降低8-14mmHg，是经临床验证的降压饮食方案。"
+            "中医体质分型包括平和质气虚质阳虚质阴虚质痰湿质湿热质血瘀质气郁质特禀质九种。"
+            "运动营养学关注运动前中后的营养补充策略以优化运动表现和恢复。"
+            "特殊人群营养包括孕期哺乳期婴幼儿青少年老年等各阶段的营养需求。"
+            "肠道菌群与营养吸收免疫调节和代谢健康密切相关，益生菌和益生元有助于维持菌群平衡。"
+        )
+        while len(sys_content) < pad_size:
+            sys_content += _pad_chunk[:pad_size - len(sys_content)]
 
     MSGS = [
-        {"role": "system", "content": "你是简短的助手，回答控制在 60 字以内。"},
-        {"role": "user",   "content": "简单介绍 DASH 饮食法对高血压的作用。"},
+        {"role": "system", "content": sys_content},
+        {"role": "user",   "content": _real_user},
     ]
-    MAX_TOK = 128
+    MAX_TOK = 256
+    _total_chars = sum(len(m["content"]) for m in MSGS)
 
-    results = {"model": model, "base": ai_base, "runs": runs, "methods": {}}
+    results = {"model": model, "base": ai_base, "runs": runs,
+               "input_chars": _total_chars, "pad_size": pad_size, "methods": {}}
 
     if not ai_key:
         return jsonify({"error": "no AI_API_KEY in env"}), 500

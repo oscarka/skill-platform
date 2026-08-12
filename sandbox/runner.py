@@ -5,6 +5,22 @@ sandbox/runner.py  — AI Agent sandbox runner
 import os, sys, json, subprocess, time, textwrap, base64, re, shlex, signal
 from datetime import datetime, timezone
 
+# ⚡ Cloud Run IPv6 修复：DNS 返回 IPv6 地址但容器无 IPv6 出站能力，
+# 导致 urllib 尝试多个 IPv6 后才 fallback 到 IPv4（浪费 45-100 秒）。
+# 强制所有 DNS 解析只返回 IPv4 地址。
+import socket as _sock
+_orig_getaddrinfo = _sock.getaddrinfo
+def _ipv4_only_getaddrinfo(*args, **kwargs):
+    results = _orig_getaddrinfo(*args, **kwargs)
+    ipv4 = [r for r in results if r[0] == _sock.AF_INET]
+    return ipv4 if ipv4 else results  # fallback 到原始结果如果没有 IPv4
+_sock.getaddrinfo = _ipv4_only_getaddrinfo
+
+# ⚡ 预创建 SSL context（只执行一次）。ssl.create_default_context() 加载 CA 证书包，
+# 在 Cloud Run 容器中耗时 30-40 秒。移到模块级别避免每次 LLM 调用重复加载。
+import ssl as _ssl_mod
+_SSL_CTX = _ssl_mod.create_default_context()
+print(f"[init] SSL context created, CA certs loaded", flush=True)
 # 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
 _home = os.path.expanduser("~")
 if os.getcwd() == "/" and os.path.isdir(_home):
@@ -1054,7 +1070,7 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
         try:
             # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
             t_connect_start = _t2.time()
-            with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
+            with urllib.request.urlopen(req, timeout=first_token_timeout, context=_SSL_CTX) as r:
                 t_connected = _t2.time()
                 print(f"[llm] connected in {round((t_connected-t_connect_start)*1000)}ms "
                       f"status={r.status}", flush=True)
@@ -1073,9 +1089,10 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             err_str = str(e)
             elapsed_ms = round((_t2.time() - t_attempt_start) * 1000)
             print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
-            # SSL EOF / ConnectionReset / timeout → 可重试
+            # SSL EOF / ConnectionReset / RemoteDisconnected / timeout → 可重试
             if attempt < 2 and ('EOF' in err_str or 'ssl' in err_str.lower()
-                                or 'reset' in err_str.lower() or 'ConnectionReset' in err_str):
+                                or 'reset' in err_str.lower() or 'ConnectionReset' in err_str
+                                or 'closed' in err_str.lower() or 'Remote end' in err_str):
                 import time
                 wait = (attempt + 1) * 2  # 2s, 4s
                 print(f"[llm] retry in {wait}s...", flush=True)
