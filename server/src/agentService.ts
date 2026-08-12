@@ -1948,7 +1948,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
   }
 
   // ── Step 3 (v2): confidence=none → 普通聊天，直接 Agent 回复 ─────────────────
-  if (routeConfidence === 'none') {
+  // ⚠️ 例外：pending_unclear 时必须走 handleHealthDirect（注入 directive），不走 handleChatReply
+  if (routeConfidence === 'none' && currentGuardStatus !== 'pending_unclear') {
     void updateAgentTask(requestId, { status: 'executing', routeType: 'chat' });
     const chatResult = await handleChatReply(req, apiKey, requestId, delivery, profile);
 

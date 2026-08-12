@@ -434,12 +434,16 @@ async function main() {
   // ─── Step 5：工单结果 ───────────────────────────────────────────────────────
   section('Step 5：检查工单结果');
   const d      = finalDetailRes.data;
+  // report_url 可在 d.result 或 d.ticket 中，优先取 d.result（更新鲜）
   const result = d?.result || {};
-  const rawRes = result.raw_result || '';
+  const ticket = d?.ticket || {};
+  const reportUrl = result.report_url || ticket.report_url
+    || finalData?.result?.report_url || finalData?.report_url || '';
+  const rawRes = result.raw_result || ticket.raw_result || finalData?.raw_result || '';
 
   console.log(`\n  result 完整字段:`);
   console.log(`    raw_result (${rawRes.length}字): ${rawRes.slice(0,500)}${rawRes.length>500?'...':''}`);
-  console.log(`    report_url:  ${result.report_url || '(无)'}`);
+  console.log(`    report_url:  ${reportUrl || '(无)'}`);
   const aiLogStr = result.ai_log || '';
   console.log(`    ai_log:      ${aiLogStr.length} bytes`);
   if (aiLogStr) {
@@ -453,7 +457,7 @@ async function main() {
   }
 
   if (finalStatus === 'done') {
-    ok('result.report_url 存在', !!result.report_url, result.report_url || '（无）');
+    ok('result.report_url 存在', !!reportUrl, reportUrl || '（无）');
     ok('result.raw_result 存在', !!rawRes, `${rawRes.length} 字`);
   } else {
     ok('result.raw_result 包含错误信息', !!rawRes, rawRes.slice(0,80));
