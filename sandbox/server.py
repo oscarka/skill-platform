@@ -419,8 +419,8 @@ def bench_methods():
     """
     import time as _t, json as _j, urllib.request as _ur, urllib.error as _ue
 
-    ai_key   = os.environ.get("AI_API_KEY", "") or os.environ.get("DOUBAO_API_KEY", "")
-    ai_base  = os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+    ai_key   = request.args.get("key", "") or os.environ.get("AI_API_KEY", "") or os.environ.get("DOUBAO_API_KEY", "")
+    ai_base  = request.args.get("base", os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"))
     model    = request.args.get("model", os.environ.get("AI_MODEL", "gemini-2.5-flash"))
     runs     = max(1, min(3, int(request.args.get("runs", "1"))))
 
@@ -489,7 +489,16 @@ def bench_methods():
             import httpx
             body = {"model": model, "messages": MSGS, "max_tokens": MAX_TOK, "stream": True}
             headers = {"Authorization": f"Bearer {ai_key}", "Content-Type": "application/json"}
-            with httpx.Client(http2=True, timeout=90) as client:
+            # 尝试 HTTP/2，没有 h2 包时降级到 HTTP/1.1
+            try:
+                http2 = True
+                test_client = httpx.Client(http2=True)
+                test_client.close()
+                r["method"] = "httpx HTTP/2"
+            except Exception:
+                http2 = False
+                r["method"] = "httpx HTTP/1.1 (h2未安装)"
+            with httpx.Client(http2=http2, timeout=90) as client:
                 with client.stream("POST", f"{ai_base}/chat/completions",
                                    json=body, headers=headers) as resp:
                     resp.raise_for_status()
@@ -506,7 +515,8 @@ def bench_methods():
                         for c in ch.get("choices", []):
                             if c.get("delta", {}).get("content"): content += c["delta"]["content"]
             r.update({"ok": True, "total_ms": round((_t.time()-t0)*1000),
-                      "chunks": chunks, "content_len": len(content), "preview": content[:60]})
+                      "chunks": chunks, "content_len": len(content), "preview": content[:60],
+                      "http2": http2})
         except Exception as e:
             r.update({"error": str(e)[:200], "total_ms": round((_t.time()-t0)*1000)})
         return r
@@ -515,8 +525,8 @@ def bench_methods():
         r = {"method": "google-genai SDK (native)", "ok": False}
         t0 = _t.time()
         try:
-            from google import genai as _genai
-            from google.genai import types as _gtypes
+            import google.genai as _genai
+            import google.genai.types as _gtypes
             client = _genai.Client(api_key=ai_key)
             content = ""
             first = True

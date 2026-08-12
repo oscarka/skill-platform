@@ -28,13 +28,14 @@ RUN npm install -g mcporter
 
 # 预装常用 Python 库（简历解析、PDF、HTTP、OCR等）
 RUN pip3 install --no-cache-dir --break-system-packages \
-    requests httpx \
+    requests httpx h2 \
     PyPDF2 pdfplumber \
     python-docx python-pptx \
     Pillow pytesseract \
     pandas numpy \
     openai \
     google-cloud-storage \
+    google-genai \
     psycopg2-binary \
     flask gunicorn
 
@@ -49,6 +50,8 @@ COPY sandbox/transcript.py /transcript.py
 COPY sandbox/truncation.py /truncation.py
 COPY sandbox/redact.py /redact.py
 COPY sandbox/requirements.txt /requirements.txt
+# 安装 requirements.txt 里的额外包（覆盖/补充 Dockerfile 硬编码的版本）
+RUN pip3 install --no-cache-dir --break-system-packages -r /requirements.txt 2>/dev/null || true
 
 USER sandbox
 
