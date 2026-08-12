@@ -115,23 +115,36 @@ ticketRouter.post('/', async (req, res) => {
 // ─── GET /api/tickets — List tickets ──────────────────────────────────────────
 ticketRouter.get('/', async (req, res) => {
   try {
-    const { status, skill_id, q } = req.query as Record<string, string>;
+    const { status, skill_id, q, created_by } = req.query as Record<string, string>;
+    const limit  = Math.min(parseInt((req.query.limit  as string) || '100', 10), 500);
+    const offset = parseInt((req.query.offset as string) || '0', 10);
     let sql = `SELECT t.*, s.name as skill_name FROM tickets t
                LEFT JOIN skills s ON t.skill_id = s.id WHERE 1=1`;
+    let countSql = `SELECT COUNT(*) as cnt FROM tickets t WHERE 1=1`;
     const params: any[] = [];
-    if (status) { sql += ' AND t.status=?'; params.push(status); }
-    if (skill_id) { sql += ' AND t.skill_id=?'; params.push(skill_id); }
-    if (q) { sql += ' AND (t.title LIKE ? OR t.patient_name LIKE ? OR t.token LIKE ?)'; params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
-    sql += ' ORDER BY t.created_at DESC LIMIT 100';
+    const countParams: any[] = [];
+    if (status)     { sql += ' AND t.status=?';  countSql += ' AND t.status=?';  params.push(status);  countParams.push(status); }
+    if (skill_id)   { sql += ' AND t.skill_id=?'; countSql += ' AND t.skill_id=?'; params.push(skill_id); countParams.push(skill_id); }
+    if (created_by) { sql += ' AND t.created_by=?'; countSql += ' AND t.created_by=?'; params.push(created_by); countParams.push(created_by); }
+    if (q) {
+      sql += ' AND (t.title LIKE ? OR t.patient_name LIKE ? OR t.token LIKE ?)';
+      countSql += ' AND (t.title LIKE ? OR t.patient_name LIKE ? OR t.token LIKE ?)';
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+      countParams.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    sql += ` ORDER BY t.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
-    const rows = await db.allAsync<any>(sql, params);
+    const [rows, countRow] = await Promise.all([
+      db.allAsync<any>(sql, params),
+      db.getAsync<any>(countSql, countParams),
+    ]);
     const base = await h5BaseUrl();
     const tickets = await Promise.all(rows.map(async t => ({
       ...(await ticketToResponse(t)),
       skill_name: t.skill_name,
       h5_url: `${base}?token=${t.token}`,
     })));
-    res.json({ tickets });
+    res.json({ tickets, total: countRow?.cnt ?? tickets.length, limit, offset });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -100,7 +100,7 @@ export const api = {
 
   // ─── Tickets ───────────────────────────────────────────────────────────────
   tickets: {
-    list: (params?: { status?: string; skill_id?: string; q?: string }) => {
+    list: (params?: { status?: string; skill_id?: string; q?: string; created_by?: string; limit?: number; offset?: number }) => {
       const p = Object.fromEntries(Object.entries(params || {}).filter(([,v]) => v !== undefined && v !== ''));
       const qs = new URLSearchParams(p as any).toString();
       return request<any>(`/tickets${qs ? '?' + qs : ''}`);

@@ -1122,7 +1122,7 @@ export default function AgentLogs() {
   // ─── 数据加载 ─────────────────────────────────────────────────────────────────
   const loadList = useCallback(async (autoSelect = false) => {
     try {
-      const res = await api.tickets.list({ status: filterStatus || undefined, q: q || undefined });
+      const res = await api.tickets.list({ status: filterStatus || undefined, q: q || undefined, limit: 500 });
       const list = res.tickets || [];
       setTickets(list);
       setLoadingList(false);
