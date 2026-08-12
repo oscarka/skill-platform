@@ -46,6 +46,7 @@ WORKDIR /home/sandbox
 # 复制 runner 脚本及依赖模块
 COPY sandbox/runner.py /runner.py
 COPY sandbox/server.py /server.py
+COPY sandbox/diag_ssl.py /diag_ssl.py
 COPY sandbox/transcript.py /transcript.py
 COPY sandbox/truncation.py /truncation.py
 COPY sandbox/redact.py /redact.py

@@ -1062,17 +1062,82 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
     # 网络瞬时错误（SSL EOF、ConnectionReset）自动重试 2 次
     last_err = None
     import time as _t2
+    import traceback as _tb
+
+    # ── SSL 诊断：记录 request 详细信息 ──────────────────────────────────
+    body_len = len(data)
+    url_for_log = f"{base}/chat/completions"
+    print(f"[llm] request body_bytes={body_len} url={url_for_log}", flush=True)
+
     for attempt in range(3):
         t_attempt_start = _t2.time()
         print(f"[llm] -> {base}/chat/completions model={use_model} "
               f"msgs={len(messages)} tools={'yes' if tools else 'no'} "
               f"attempt={attempt+1}", flush=True)
+
+        # ── SSL 诊断：每次尝试前记录 DNS + SSL context 状态 ──────────────
+        try:
+            from urllib.parse import urlparse
+            _parsed = urlparse(url_for_log)
+            _host = _parsed.hostname
+            _port = _parsed.port or 443
+
+            # DNS 解析：看实际解析到哪个 IP
+            import socket as _diag_sock
+            _t_dns0 = _t2.time()
+            _addrs = _diag_sock.getaddrinfo(_host, _port, type=_diag_sock.SOCK_STREAM)
+            _t_dns1 = _t2.time()
+            _families = [('v4' if a[0] == _diag_sock.AF_INET else 'v6') for a in _addrs]
+            _ips = [a[4][0] for a in _addrs[:3]]
+            print(f"[llm:diag] DNS: host={_host} resolved={len(_addrs)} "
+                  f"families={_families[:5]} ips={_ips} "
+                  f"dns_ms={round((_t_dns1-_t_dns0)*1000)}", flush=True)
+
+            # SSL context 状态
+            print(f"[llm:diag] SSL_CTX: protocol={_SSL_CTX.protocol} "
+                  f"verify_mode={_SSL_CTX.verify_mode} "
+                  f"check_hostname={_SSL_CTX.check_hostname} "
+                  f"options=0x{_SSL_CTX.options:x} "
+                  f"min_version={_SSL_CTX.minimum_version} "
+                  f"max_version={_SSL_CTX.maximum_version}",
+                  flush=True)
+
+            # 系统状态：打开的文件描述符数量
+            try:
+                import subprocess as _sp
+                _fd_count = len(os.listdir(f'/proc/{os.getpid()}/fd'))
+                print(f"[llm:diag] open_fds={_fd_count} pid={os.getpid()}", flush=True)
+            except Exception:
+                pass
+        except Exception as _de:
+            print(f"[llm:diag] pre-check error: {_de}", flush=True)
+
         try:
             # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
             t_connect_start = _t2.time()
             with urllib.request.urlopen(req, timeout=first_token_timeout, context=_SSL_CTX) as r:
                 t_connected = _t2.time()
                 connect_ms = round((t_connected-t_connect_start)*1000)
+
+                # ── SSL 诊断：成功连接后记录底层 socket 信息 ──────────────
+                try:
+                    _raw = r.fp.raw._sock if hasattr(r.fp, 'raw') else None
+                    if _raw:
+                        _peer = _raw.getpeername() if hasattr(_raw, 'getpeername') else 'N/A'
+                        # 如果是 SSL socket，获取 SSL 信息
+                        _ssl_info = {}
+                        if hasattr(_raw, 'version'):
+                            _ssl_info['version'] = _raw.version()
+                        if hasattr(_raw, 'cipher'):
+                            _ssl_info['cipher'] = _raw.cipher()
+                        if hasattr(_raw, 'getpeercert'):
+                            _cert = _raw.getpeercert()
+                            _ssl_info['cert_subject'] = str(_cert.get('subject', ''))[:100] if _cert else 'N/A'
+                        print(f"[llm:diag] connected: peer={_peer} ssl={_ssl_info} "
+                              f"connect_ms={connect_ms}", flush=True)
+                except Exception as _se:
+                    print(f"[llm:diag] socket info error: {_se}", flush=True)
+
                 print(f"[llm] connected in {connect_ms}ms "
                       f"status={r.status}", flush=True)
                 _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
@@ -1092,6 +1157,60 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             err_str = str(e)
             elapsed_ms = round((_t2.time() - t_attempt_start) * 1000)
             print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
+
+            # ── SSL 诊断：失败时记录完整 traceback + 链路信息 ──────────────
+            print(f"[llm:diag:FAIL] === SSL EOF 详细诊断 ===", flush=True)
+            print(f"[llm:diag:FAIL] full_error: {type(e).__name__}: {e}", flush=True)
+            print(f"[llm:diag:FAIL] error_chain: {type(e).__name__}", flush=True)
+            _cause = e
+            while _cause.__cause__ or _cause.__context__:
+                _cause = _cause.__cause__ or _cause.__context__
+                print(f"[llm:diag:FAIL]   <- {type(_cause).__name__}: {_cause}", flush=True)
+            print(f"[llm:diag:FAIL] traceback:\n{_tb.format_exc()}", flush=True)
+            print(f"[llm:diag:FAIL] body_bytes={body_len} model={use_model} "
+                  f"timeout={first_token_timeout} attempt={attempt+1}", flush=True)
+
+            # 尝试直接用 http.client 做一次快速诊断连接
+            try:
+                import http.client as _hc
+                _t_diag0 = _t2.time()
+                _diag_conn = _hc.HTTPSConnection(_host, _port, timeout=10, context=_SSL_CTX)
+                _diag_conn.request("POST", "/v1beta/openai/chat/completions",
+                                   body=b'{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":5}',
+                                   headers={"Authorization": f"Bearer {key}",
+                                            "Content-Type": "application/json"})
+                _diag_resp = _diag_conn.getresponse()
+                _diag_body = _diag_resp.read()
+                _t_diag1 = _t2.time()
+                print(f"[llm:diag:FAIL] quick_probe: status={_diag_resp.status} "
+                      f"ms={round((_t_diag1-_t_diag0)*1000)} body={len(_diag_body)}b", flush=True)
+                _diag_conn.close()
+            except Exception as _pe:
+                print(f"[llm:diag:FAIL] quick_probe ALSO FAILED: {type(_pe).__name__}: {_pe}", flush=True)
+
+            # 再用全新 SSL context 试一次
+            try:
+                import ssl as _ssl2
+                _fresh_ctx = _ssl2.create_default_context()
+                _t_diag2 = _t2.time()
+                _diag_conn2 = _hc.HTTPSConnection(_host, _port, timeout=10, context=_fresh_ctx)
+                _diag_conn2.request("POST", "/v1beta/openai/chat/completions",
+                                    body=b'{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":5}',
+                                    headers={"Authorization": f"Bearer {key}",
+                                             "Content-Type": "application/json"})
+                _diag_resp2 = _diag_conn2.getresponse()
+                _diag_body2 = _diag_resp2.read()
+                _t_diag3 = _t2.time()
+                print(f"[llm:diag:FAIL] fresh_ctx_probe: status={_diag_resp2.status} "
+                      f"ms={round((_t_diag3-_t_diag2)*1000)} body={len(_diag_body2)}b", flush=True)
+                _diag_conn2.close()
+                if _diag_resp2.status == 200:
+                    print(f"[llm:diag:FAIL] ⚠️ FRESH SSL CTX WORKS! _SSL_CTX may be corrupted!", flush=True)
+            except Exception as _pe2:
+                print(f"[llm:diag:FAIL] fresh_ctx_probe ALSO FAILED: {type(_pe2).__name__}: {_pe2}", flush=True)
+
+            print(f"[llm:diag:FAIL] === 诊断结束 ===", flush=True)
+
             _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
                 "step": "网络重试", "detail": f"attempt {attempt+1} 失败（{elapsed_ms}ms）: {err_str[:80]}"})
             # SSL EOF / ConnectionReset / RemoteDisconnected / timeout → 可重试

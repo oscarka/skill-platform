@@ -435,6 +435,43 @@ def diag():
     return jsonify(results), 200
 
 
+@app.route("/diag/ssl", methods=["GET"])
+def diag_ssl():
+    """运行 diag_ssl.py 诊断脚本（在 Cloud Run 容器内测试 SSL 连接）
+    可通过 query params 传入: ?key=xxx&base_url=xxx&model=xxx
+    """
+    import subprocess, sys, pathlib
+    # 尝试多个可能的路径
+    candidates = [
+        "/diag_ssl.py",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag_ssl.py"),
+    ]
+    script_path = None
+    for c in candidates:
+        if os.path.isfile(c):
+            script_path = c
+            break
+    if not script_path:
+        return f"diag_ssl.py not found, tried: {candidates}", 404, {"Content-Type": "text/plain"}
+    
+    # 从 query params 或 env 获取 key
+    ai_key = request.args.get("key", "") or os.environ.get("AI_API_KEY", "") or os.environ.get("DOUBAO_API_KEY", "")
+    ai_base = request.args.get("base_url", "") or os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+    ai_model = request.args.get("model", "") or os.environ.get("AI_MODEL", "gemini-2.0-flash")
+    
+    env = {**os.environ, "AI_API_KEY": ai_key, "AI_BASE_URL": ai_base, "AI_MODEL": ai_model}
+    try:
+        r = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True, text=True, timeout=300,
+            env=env,
+        )
+        return r.stdout + ("\n--- STDERR ---\n" + r.stderr if r.stderr else ""), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT after 120s", 504, {"Content-Type": "text/plain"}
+    except Exception as e:
+        return f"ERROR: {e}", 500, {"Content-Type": "text/plain"}
+
 @app.route("/bench", methods=["GET"])
 def bench():
     """
