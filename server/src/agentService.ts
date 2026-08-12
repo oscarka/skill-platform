@@ -953,14 +953,17 @@ function assembleAgentContext(params: {
 
   } else if (guardStatus === 'pending_unclear' && guardSkillName) {
     if (routeSkillId && routeSkillId !== (params.recentTicket?.skill_id) && routeSkillName !== guardSkillName) {
-      // 不同 skill
+      // 话题跳到不同 skill
       directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
-        + `本次消息话题指向「${routeSkillName}」，无需重复推荐守卫中的服务。`
-        + `请先回答用户的问题。`;
+        + `本次消息话题指向其他方向，请先回答用户的问题，不必重复推荐服务。`;
+    } else if ((params as any).isFirstClarify) {
+      // 首次模糊确认（守卫首轮unclear，用户没有在提问）→ Agent 必须主动引导确认
+      directive = `用户刚才的回复意向不明确，是否要使用「${guardSkillName}」服务尚未确认。`
+        + `\n请先简短回答用户的问题，然后**在回复末尾自然地询问**：「您是想现在使用「${guardSkillName}」服务吗？」（语气自然，不要强迫）。`;
     } else {
-      // 同 skill 或无路由 skill
-      directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
-        + `请先回答用户的问题，如果对话场景合适，在回答末尾自然地引导用户确认是否使用该服务（不要强迫，感觉自然即可）。`;
+      // 已追问过或用户在提问 → 先回答，顺带引导
+      directive = `用户对「${guardSkillName}」服务有意向但尚未明确确认。`
+        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾轻描淡写地引导用户确认是否使用该服务（不要强迫）。`;
     }
 
   } else if (guardStatus === 'none' && existingTicket) {
@@ -1047,7 +1050,14 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 - 直接称呼客户为"${fromName}"
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
-- 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理`;
+- 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理
+- 只有当客户**明确提到曾经提交过某项分析服务**（如"我提交的报告"、"之前做的营养分析"、"我的工单结果"、"分析报告出来了吗"等），才调用 query_ticket 工具查询；如果客户只是泛泛询问进度但**没有任何提交过服务的上下文**，直接正常回答，不要调用工具；工单状态处理规则：
+  「waiting_input」= 用户已有待填写工单，必须直接把 fill_url 链接发给用户引导他们填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
+  「submitted/processing」= AI 分析中，告知预计时间
+  「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
+  「created」= 已创建待处理，告知工单已建即可
+  「expired」= 已过期，可重新开始
+- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名`;
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
@@ -1055,7 +1065,7 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
   ];
 
   const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024,
-    { tools: wikiCtx?.health_wiki ? WIKI_TOOLS : undefined, userId: meta.user_id });
+    { tools: WIKI_TOOLS, userId: meta.user_id });  // 始终传入，含 query_ticket
 
   // ── LLMWiki: 后台写日志 ──
   backgroundPostLog(meta.user_id, content, reply.trim());
@@ -1673,6 +1683,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   let guardHint = '';  // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
   let currentGuardStatus: GuardStatus = 'none';          // Step 5 (v2): 追踪守卫状态
   let currentGuardSkillName: string | null = null;       // Step 5 (v2): 守卫对应的 skill
+  let isFirstClarify = false;                            // Step 7fix: 首次 unclear 需要 Agent 主动引导
   if (sessionId) {
 
     const nowMs = Date.now();
@@ -1847,38 +1858,18 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           currentGuardSkillName = activeGuard.skill_name;   // Step 5
           // guardHint 不设置，直接 fall through 到正常路由
         } else {
-          // 用户发了短暂模糊词 且 尚未追问过 → 追问一次
-          console.log(`[SkillGuard] ❓ 首次模糊确认，追问用户`);
-          const clarifyMsg = `您是想现在开始「${activeGuard.skill_name}」分析吗？如果是，请直接告诉我「开始」或「好，帮我分析」～`;
-
+          // 用户发了短暂模糊词 且 尚未追问过 → 不再直接发守卫消息，改走 Agent
+          // Agent 会通过 directive(pending_unclear+isFirstClarify) 自然地引导用户确认
+          console.log(`[SkillGuard] ❓ 首次模糊确认，交给 Agent 引导（不再守卫直接发消息）`);
           void appendTaskEvent(requestId, 'skill_guard_clarify', {
             guardId: activeGuard.id,
             skillName: activeGuard.skill_name,
-            clarifyMsg,
+            note: '首次unclear→交给Agent引导',
           });
-          void appendTaskEvent(requestId, 'reply_sent', {
-            replyLen: clarifyMsg.length,
-            reply: clarifyMsg,
-            channel: delivery.app,
-            recipient: delivery.recipient,
-            note: 'guard_clarify',
-          });
-          const endMs = Date.now();
-          void updateAgentTask(requestId, {
-            status: 'done',
-            routeType: 'skill_guard_clarify',
-            replyContent: clarifyMsg,
-            endedAt: endMs,
-            durationMs: endMs - taskStartMs,
-          });
-          return {
-            request_id: requestId,
-            status:     'done',
-            reply:      clarifyMsg,
-            delivery,
-            reasoning:  `SkillGuard: 用户首次模糊，追问确认`,
-            route_type: 'skill_guard_clarify',
-          } as any;
+          currentGuardStatus    = 'pending_unclear';        // Step 5: Agent 将收到 pending_unclear directive
+          currentGuardSkillName = activeGuard.skill_name;
+          isFirstClarify        = true;                      // 首次 unclear → Agent 需要主动引导
+          // fall through → Agent 根据 directive 生成自然的引导回复
         }
 
 
@@ -2150,7 +2141,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       ticketUrl:      null,                    // 无工单，直接回复路径
       recentTicket:   ctxSnapshot.recentTicket || null,
       serviceUrl,
-    });
+      isFirstClarify,                          // Step 7fix: 首次 unclear 需要 Agent 主动引导
+    } as any);
 
     void appendTaskEvent(requestId, 'agent_context_assembled', {
       guardStatus:   agentCtxPkg.guardStatus,

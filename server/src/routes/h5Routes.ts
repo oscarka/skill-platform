@@ -5,11 +5,12 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db';
 import { processTicket } from '../aiProcessor';
+import { createAgentTask, updateAgentTask, appendTaskEvent } from '../agentService';
 
 export const h5Router = express.Router();
 
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, '..', '..', '..', 'uploads', 'files'));
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+try { if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch { /* Cloud Run read-only FS */ }
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
@@ -126,10 +127,43 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
       [now, now, ticket.id]
     );
 
-    // ✅ Auto-trigger AI processing (non-blocking — client gets response immediately)
-    console.log(`[H5] Ticket ${ticket.id} submitted — auto-triggering AI...`);
-    processTicket(ticket.id).catch(err => {
+    // ── 创建独立处理任务（左侧列表独立显示，状态 processing → done）───────────────
+    const skill = await db.getAsync<any>('SELECT name, id FROM skills WHERE id=?', [ticket.skill_id]);
+    const skillName = skill?.name || '技能';
+    const processingTaskId = `req_h5_${ticket.id.slice(0, 8)}_${now}`;
+
+    await createAgentTask({
+      id: processingTaskId,
+      sessionId: `h5_${ticket.id}`,
+      userId: ticket.created_by || 'unknown',
+      sourceChannel: 'wechat',
+      inputContent: `[表单提交] ${skillName} — ${ticket.patient_name || '用户'} 提交了表单`,
+      meta: { ticketId: ticket.id, skillName, patientName: ticket.patient_name, fromH5: true },
+    });
+
+    await updateAgentTask(processingTaskId, {
+      status: 'processing',
+      routeType: 'ticket_processing',
+      skillId: ticket.skill_id,
+    });
+
+    // ticket_submitted 事件：记录用户已提交表单
+    void appendTaskEvent(processingTaskId, 'ticket_submitted', {
+      ticketId: ticket.id,
+      skillName,
+      fieldCount: Object.keys(fields).length,
+      patientName: ticket.patient_name || '',
+      submittedAt: new Date(now).toISOString(),
+    });
+
+    // ticket.request_id 指向新任务，后续进度/完成事件都写这里
+    await db.runAsync(`UPDATE tickets SET request_id=?, updated_at=? WHERE id=?`, [processingTaskId, now, ticket.id]);
+
+    // ✅ 异步触发 AI（非阻塞，客户立即收到响应）
+    console.log(`[H5] Ticket ${ticket.id} submitted — auto-triggering AI, task=${processingTaskId}`);
+    processTicket(ticket.id, processingTaskId).catch(err => {
       console.error(`[H5→AI] Ticket ${ticket.id} AI failed:`, err.message);
+      void updateAgentTask(processingTaskId, { status: 'error', errorMessage: err.message, endedAt: Date.now() });
     });
 
     res.json({ success: true, message: '提交成功！AI 正在为您处理，结果将由工作人员反馈给您。' });

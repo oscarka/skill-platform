@@ -5,10 +5,11 @@ import fs from 'fs';
 import multer from 'multer';
 import * as db from '../db';
 import { notifyUserTicketDone } from '../aiProcessor';
+import { appendTaskEvent, updateAgentTask } from '../agentService';
 
 // Multer for ticket input file replacement
 const UPLOADS_DIR = path.resolve(__dirname, '..', '..', '..', 'uploads', 'inputs');
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch { /* Cloud Run read-only FS */ }
 const inputUpload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 30 * 1024 * 1024 } });
 
 
@@ -194,7 +195,7 @@ ticketRouter.put('/:id/return', async (req, res) => {
 });
 
 // ─── PUT /api/tickets/:id/status — Admin: override status directly ─────────────
-const VALID_STATUSES = ['created','waiting_input','submitted','processing','done','returned','error'];
+const VALID_STATUSES = ['created','waiting_input','submitted','processing','done','returned','error','expired'];
 ticketRouter.put('/:id/status', async (req, res) => {
   try {
     const { status, return_reason } = req.body;
@@ -283,6 +284,21 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
         await db.runAsync(`UPDATE tickets SET status='processing', updated_at=? WHERE id=?`, [now, ticketId]);
       }
 
+      // ── 实时写 AgentLogs：每个进度步骤写一条 ticket_progress 事件 ──────────────
+      if (ticket.request_id && stepEntry.id && !currentLog.slice(0, -1).some((e: any) => e.id === stepEntry.id)) {
+        const stepLabel = stepEntry.event || stepEntry.type || 'step';
+        const rawDetail = stepEntry.detail || stepEntry.content || stepEntry.output || stepEntry.text || stepEntry.result || '';
+        const stepDetail = typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail);
+        void appendTaskEvent(ticket.request_id, 'ticket_progress', {
+          ticketId,
+          stepId:    stepEntry.id,
+          stepLabel,
+          stepDetail: stepDetail.slice(0, 500),
+          hasContent: stepDetail.length > 0,
+          ts: stepEntry.ts || new Date().toISOString(),
+        });
+      }
+
       return res.json({ ok: true, streamed: true });
     }
 
@@ -322,6 +338,47 @@ ticketRouter.post('/:id/agent-callback', async (req, res) => {
 
     console.log(`[TicketAgent] Callback for ticket ${ticketId}: passed=${passed}, preview=${rawResult.slice(0, 80)}`);
     res.json({ ok: true });
+
+    // ── 回写 AgentLogs（skill_done / reply_sent / updateAgentTask）──────────────
+    if (ticket.request_id) {
+      try {
+        const skill = await db.getAsync<any>('SELECT name FROM skills WHERE id=?', [ticket.skill_id]);
+        const skillNameLog = skill?.name || '技能';
+        const h5Base = (await db.getAsync<{ value: string }>(
+          `SELECT value FROM settings WHERE key='h5_base_url'`
+        ))?.value || '';
+        const serviceBase = h5Base.replace(/\/h5$/, '');
+        const rUrl = passed && serviceBase ? `${serviceBase}/api/results/${ticketId}/report` : null;
+
+        if (passed) {
+          void appendTaskEvent(ticket.request_id, 'skill_done', {
+            ticketId,
+            skillName: skillNameLog,
+            outputLen:     rawResult.length,
+            output_preview: rawResult.slice(0, 200),
+            report_url:    rUrl || '',
+          });
+          const replyMsg = rUrl
+            ? `${ticket.patient_name || '您'}，您的「${skillNameLog}」分析报告已生成 🎉\n\n点击查看完整报告：\n${rUrl}`
+            : rawResult.slice(0, 300);
+          void appendTaskEvent(ticket.request_id, 'reply_sent', { reply: replyMsg });
+        } else {
+          void appendTaskEvent(ticket.request_id, 'skill_error', {
+            ticketId,
+            skillName: skillNameLog,
+            errorPreview: rawResult.slice(0, 200),
+          });
+        }
+
+        // 更新 AgentLogs 左侧任务状态
+        void updateAgentTask(ticket.request_id, {
+          status: passed ? 'done' : 'error',
+          endedAt: Date.now(),
+        });
+      } catch (logErr: any) {
+        console.warn(`[TicketAgent] 回写日志失败:`, logErr.message);
+      }
+    }
 
     // ── 通知用户：AI 处理完成 ──────────────────────────────────────────────────
     if (passed) {
