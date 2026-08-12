@@ -24,6 +24,20 @@ _sock.getaddrinfo = _ipv4_only_getaddrinfo
 import ssl as _ssl_mod
 _SSL_CTX = _ssl_mod.create_default_context()
 print(f"[init] SSL context created, CA certs loaded", flush=True)
+
+# ⚡ DNS 预热：Cloud Run 首次 DNS 解析可能耗时 4-5 秒
+# 在模块加载阶段做一次预热，后续 LLM 调用的 DNS 走缓存
+import time as _init_time
+_dns_warm_host = os.environ.get("AI_BASE_URL", "").split("//")[1].split("/")[0] if "//" in os.environ.get("AI_BASE_URL", "") else ""
+if _dns_warm_host:
+    _t_warm0 = _init_time.time()
+    try:
+        _warm_addrs = _sock.getaddrinfo(_dns_warm_host, 443, _sock.AF_INET, _sock.SOCK_STREAM)
+        _t_warm1 = _init_time.time()
+        print(f"[init] DNS pre-warm: {_dns_warm_host} -> {len(_warm_addrs)} addrs "
+              f"({round((_t_warm1-_t_warm0)*1000)}ms)", flush=True)
+    except Exception as _we:
+        print(f"[init] DNS pre-warm failed: {_we}", flush=True)
 # 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
 _home = os.path.expanduser("~")
 if os.getcwd() == "/" and os.path.isdir(_home):
@@ -1092,9 +1106,25 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             _t_dns1 = _t2.time()
             _families = [('v4' if a[0] == _diag_sock.AF_INET else 'v6') for a in _addrs]
             _ips = [a[4][0] for a in _addrs[:3]]
-            print(f"[llm:diag] DNS: host={_host} resolved={len(_addrs)} "
+            # 对比: 强制 AF_INET 和当前 patch 的差异
+            _t_af4_0 = _t2.time()
+            _addrs_af4 = _orig_getaddrinfo(_host, _port, _diag_sock.AF_INET, _diag_sock.SOCK_STREAM)
+            _t_af4_1 = _t2.time()
+            _af4_ms = round((_t_af4_1 - _t_af4_0) * 1000)
+
+            print(f"[llm:diag] DNS(patched): host={_host} resolved={len(_addrs)} "
                   f"families={_families[:5]} ips={_ips} "
                   f"dns_ms={round((_t_dns1-_t_dns0)*1000)}", flush=True)
+            print(f"[llm:diag] DNS(AF_INET): resolved={len(_addrs_af4)} "
+                  f"dns_ms={_af4_ms}", flush=True)
+
+            # 读 /etc/resolv.conf
+            try:
+                with open('/etc/resolv.conf') as _rc:
+                    _resolv = _rc.read().strip().replace('\n', ' | ')
+                print(f"[llm:diag] resolv.conf: {_resolv[:200]}", flush=True)
+            except Exception:
+                pass
 
             # SSL context 状态
             print(f"[llm:diag] SSL_CTX: protocol={_SSL_CTX.protocol} "
@@ -1510,6 +1540,12 @@ def executor_react_loop(
         resp = call_ai(messages, tools=executor_tools)
         _t_llm_end = time.time()
         _llm_elapsed = round(_t_llm_end - _t_llm_start, 1)
+
+        # ── 每轮 LLM 后上报进度（渠道日志可见）──
+        _total_elapsed = round(time.time() - case_start, 1)
+        _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+            "step": f"Turn {turn}",
+            "detail": f"LLM耗时 {_llm_elapsed}s | 总计 {_total_elapsed}s | context={pressure['pressure_pct']}%"})
         choice0 = resp["choices"][0]
         msg = choice0["message"]
         msg.pop("_thinking", None)  # 清除内部字段，不影响消息历史
@@ -1587,7 +1623,19 @@ def executor_react_loop(
             t_name = tc["function"]["name"]
             t_args = json.loads(tc["function"]["arguments"])
 
+            _t_tool_start = time.time()
             result_str = dispatch_tool(t_name, t_args)
+            _t_tool_end = time.time()
+            _tool_ms = round((_t_tool_end - _t_tool_start) * 1000)
+            _total_elapsed_tool = round(time.time() - case_start, 1)
+            print(f"[executor] tool {t_name} done in {_tool_ms}ms "
+                  f"total_elapsed={_total_elapsed_tool}s", flush=True)
+
+            # 工具耗时 > 2s 的才上报进度（避免刷屏）
+            if _tool_ms > 2000:
+                _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+                    "step": f"工具 {t_name}",
+                    "detail": f"耗时 {round(_tool_ms/1000, 1)}s | 总计 {_total_elapsed_tool}s"})
 
             # 记录工具调用（供 Evaluator 判断"是否真正用了工具"）
             try:
