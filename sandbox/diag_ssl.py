@@ -17,12 +17,12 @@ BASE_URL = os.environ.get("AI_BASE_URL", "https://generativelanguage.googleapis.
 HOST = BASE_URL.split("//")[1].split("/")[0] if "//" in BASE_URL else "generativelanguage.googleapis.com"
 MODEL = os.environ.get("AI_MODEL", "gemini-2.0-flash")
 
-# IPv4 patch（和 runner.py 一样）
+# IPv4 patch（和 runner.py 一致：在 syscall 级别强制 AF_INET）
 _orig_getaddrinfo = socket.getaddrinfo
-def _ipv4_only(host, port, *args, **kwargs):
-    results = _orig_getaddrinfo(host, port, *args, **kwargs)
-    ipv4 = [r for r in results if r[0] == socket.AF_INET]
-    return ipv4 if ipv4 else results
+def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+    if family == 0:
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
 socket.getaddrinfo = _ipv4_only
 
 SMALL_BODY = json.dumps({

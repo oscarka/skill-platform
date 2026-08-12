@@ -6,14 +6,17 @@ import os, sys, json, subprocess, time, textwrap, base64, re, shlex, signal
 from datetime import datetime, timezone
 
 # ⚡ Cloud Run IPv6 修复：DNS 返回 IPv6 地址但容器无 IPv6 出站能力，
-# 导致 urllib 尝试多个 IPv6 后才 fallback 到 IPv4（浪费 45-100 秒）。
-# 强制所有 DNS 解析只返回 IPv4 地址。
+# 导致 getaddrinfo(AF_UNSPEC) 发送 A + AAAA 两个 DNS 查询。
+# Cloud Run 上 AAAA 查询可能耗时 4-5 秒才返回/超时。
+# 旧的 patch 只过滤结果，但不阻止慢速 AAAA 查询。
+# 新 patch 直接在 syscall 级别强制 AF_INET，跳过 AAAA 查询。
 import socket as _sock
 _orig_getaddrinfo = _sock.getaddrinfo
-def _ipv4_only_getaddrinfo(*args, **kwargs):
-    results = _orig_getaddrinfo(*args, **kwargs)
-    ipv4 = [r for r in results if r[0] == _sock.AF_INET]
-    return ipv4 if ipv4 else results  # fallback 到原始结果如果没有 IPv4
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    # 强制 IPv4：如果调用者没指定 family（AF_UNSPEC=0），改为 AF_INET
+    if family == 0:
+        family = _sock.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
 _sock.getaddrinfo = _ipv4_only_getaddrinfo
 
 # ⚡ 预创建 SSL context（只执行一次）。ssl.create_default_context() 加载 CA 证书包，
