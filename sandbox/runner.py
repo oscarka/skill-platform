@@ -1072,8 +1072,11 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             t_connect_start = _t2.time()
             with urllib.request.urlopen(req, timeout=first_token_timeout, context=_SSL_CTX) as r:
                 t_connected = _t2.time()
-                print(f"[llm] connected in {round((t_connected-t_connect_start)*1000)}ms "
+                connect_ms = round((t_connected-t_connect_start)*1000)
+                print(f"[llm] connected in {connect_ms}ms "
                       f"status={r.status}", flush=True)
+                _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+                    "step": "AI连接", "detail": f"模型已响应（{connect_ms}ms）"})
                 # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
                 try:
                     r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
@@ -1089,12 +1092,16 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             err_str = str(e)
             elapsed_ms = round((_t2.time() - t_attempt_start) * 1000)
             print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
+            _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+                "step": "网络重试", "detail": f"attempt {attempt+1} 失败（{elapsed_ms}ms）: {err_str[:80]}"})
             # SSL EOF / ConnectionReset / RemoteDisconnected / timeout → 可重试
             if attempt < 2 and ('EOF' in err_str or 'ssl' in err_str.lower()
                                 or 'reset' in err_str.lower() or 'ConnectionReset' in err_str
                                 or 'closed' in err_str.lower() or 'Remote end' in err_str):
                 import time
-                wait = (attempt + 1) * 2  # 2s, 4s
+                # SSL EOF = 对端已关闭连接，不需要长 backoff，快速重试即可
+                wait = 0.5 if ('EOF' in err_str or 'closed' in err_str.lower()
+                               or 'Remote end' in err_str) else (attempt + 1) * 2
                 print(f"[llm] retry in {wait}s...", flush=True)
                 time.sleep(wait)
                 # 重建 Request（urllib.request.Request 被消费后不可重用）
@@ -1636,7 +1643,12 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
 
         ctx_k = estimate_chars(messages) // 1000
         progress(f"turn_{turn+1}", f"AI 思考中（上下文约 {ctx_k}k 字符）")
+        _t_llm_start = time.time()
         resp = call_ai(messages, tools=tools_this_turn)
+        _t_llm_dur = round(time.time() - _t_llm_start, 1)
+        _finish = resp['choices'][0].get('finish_reason', '?')
+        _has_tools = bool(resp['choices'][0]['message'].get('tool_calls'))
+        progress(f"turn_{turn+1}_done", f"AI 回复完成（{_t_llm_dur}s），{'调用工具' if _has_tools else '最终输出'}")
         choice = resp["choices"][0]
         msg = choice["message"]
         messages.append(msg)
@@ -1678,6 +1690,7 @@ def react_loop(system_prompt: str, user_msg: str) -> dict:
             # 把工具执行结果也发回进度（让前端能看到完整输出）
             if name == "exec" and len(result_str) > 10:
                 progress(f"输出:{tool_label}", result_str[:4000])
+                progress(f"工具完成", f"{tool_label} 执行完毕（{len(result_str)}字输出）")
 
             # OpenClaw 风格智能截断 — 保留头+尾，不丢错误信息
             max_chars = calculate_max_chars(CONTEXT_WINDOW_TOKENS)
