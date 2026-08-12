@@ -645,9 +645,11 @@ def _post_progress(msg: dict):
     def _send():
         try:
             import urllib.request as _ur
-            data = json.dumps({"type": "progress", "event": msg, "secret": SANDBOX_SECRET}).encode()
+            data = json.dumps({"type": "progress", "event": msg}).encode()
             req = _ur.Request(CALLBACK_URL, data=data,
-                              headers={"Content-Type": "application/json"}, method="POST")
+                              headers={"Content-Type": "application/json",
+                                       "X-Sandbox-Secret": SANDBOX_SECRET},
+                              method="POST")
             _ur.urlopen(req, timeout=5)
         except Exception:
             pass  # 进度上报失败不影响主流程
