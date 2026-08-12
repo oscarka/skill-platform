@@ -53,11 +53,13 @@ def _fetch_skill_md_from_db() -> str:
         print(f"[runner] DB fetch failed ({type(e).__name__}): {e}", flush=True)
     return ""
 
-# OpenClaw 模式：从 DB 读 Skill 内容，无大小限制；回退到 base64 env var（向后兼容）
-SKILL_MD = _fetch_skill_md_from_db()
-if not SKILL_MD and SKILL_MD_B64:
+# 优先用 server.py 缓存注入的 SKILL_MD（base64 env var），省去 DB fetch 7-12s
+# 仅当 env var 为空时才连 DB（兜底/向后兼容）
+if SKILL_MD_B64:
     SKILL_MD = base64.b64decode(SKILL_MD_B64).decode("utf-8")
-    print(f"[runner] SKILL_MD fallback from env var: {len(SKILL_MD)} chars", flush=True)
+    print(f"[runner] SKILL_MD from cache (env): {len(SKILL_MD)} chars", flush=True)
+else:
+    SKILL_MD = _fetch_skill_md_from_db()
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
