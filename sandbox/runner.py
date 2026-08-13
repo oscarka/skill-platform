@@ -59,8 +59,9 @@ def _get_persistent_conn(host: str, port: int = 443) -> _http_client.HTTPSConnec
     print(f"[conn-pool] new connection to {key}", flush=True)
     return conn
 
-# 预热：在进程启动时建立到 Gemini API 的 TLS 连接
-if _dns_warm_host:
+# 预热：仅对 Gemini 模型建立持久 TLS 连接（ARK 用 urlopen，持久连接无效且浪费 ~600ms）
+_is_gemini_model = os.environ.get("AI_MODEL", "").lower().startswith("gemini")
+if _dns_warm_host and _is_gemini_model:
     try:
         _t_conn0 = _init_time.time()
         _warm_conn = _get_persistent_conn(_dns_warm_host, 443)
@@ -69,6 +70,8 @@ if _dns_warm_host:
               f"({round((_t_conn1-_t_conn0)*1000)}ms)", flush=True)
     except Exception as _ce:
         print(f"[init] TLS pre-warm failed: {_ce}", flush=True)
+elif _dns_warm_host:
+    print(f"[init] TLS pre-warm: skipped (non-Gemini model, using urlopen)", flush=True)
 # 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
 _home = os.path.expanduser("~")
 if os.getcwd() == "/" and os.path.isdir(_home):
