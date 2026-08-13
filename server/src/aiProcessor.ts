@@ -341,17 +341,17 @@ async function getGeminiKey(): Promise<string> {
  *  - 其他    → Doubao key + ARK endpoint；fallback = Gemini（防止 ARK 故障时幼炴）
  */
 async function resolveApiCreds(effectiveModel: string): Promise<{
-  aiKey: string; aiBase: string; fallbackKey: string; fallbackBase: string;
+  aiKey: string; aiBase: string; fallbackKey: string; fallbackBase: string; fallbackModel: string;
 }> {
   const isGemini = effectiveModel.toLowerCase().startsWith('gemini');
   if (isGemini) {
-    // Gemini primary，fallback = doubao/deepseek key
+    // Gemini primary，fallback = doubao/deepseek key + deepseek-v4-flash 模型名
     const geminiKey = await getGeminiKey();
     const [fallbackKey, fallbackBase] = await Promise.all([
       getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
       getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
     ]);
-    return { aiKey: geminiKey, aiBase: GEMINI_BASE_URL, fallbackKey, fallbackBase };
+    return { aiKey: geminiKey, aiBase: GEMINI_BASE_URL, fallbackKey, fallbackBase, fallbackModel: 'deepseek-v4-flash-ga-260731' };
   } else {
     // ARK/Doubao primary，fallback = Gemini（避免 ARK 故障时无法使用）
     const [aiKey, aiBase, geminiKey] = await Promise.all([
@@ -359,7 +359,8 @@ async function resolveApiCreds(effectiveModel: string): Promise<{
       getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
       getGeminiKey(),
     ]);
-    return { aiKey, aiBase, fallbackKey: geminiKey, fallbackBase: GEMINI_BASE_URL };
+    // fallback 模型名必须是 Gemini 模型名，否则 Gemini API 会拒绝请求
+    return { aiKey, aiBase, fallbackKey: geminiKey, fallbackBase: GEMINI_BASE_URL, fallbackModel: 'gemini-3.6-flash' };
   }
 }
 
@@ -434,8 +435,8 @@ async function submitTicketToSandboxService(
 
   // model: overrideModel > skill.preferred_model > 默认 deepseek-v4-flash-ga-260731（主模型 ARK，fallback Gemini）
   const effectiveModel = overrideModel || skill.preferred_model || 'deepseek-v4-flash-ga-260731';
-  const { aiKey, aiBase, fallbackKey, fallbackBase } = await resolveApiCreds(effectiveModel);
-  console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'}`);
+  const { aiKey, aiBase, fallbackKey, fallbackBase, fallbackModel } = await resolveApiCreds(effectiveModel);
+  console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'} fallbackModel=${fallbackModel}`);
 
   const { jobId } = await submitToSandboxService(serviceUrl, {
     skillId,
@@ -445,6 +446,7 @@ async function submitTicketToSandboxService(
     aiBaseUrl:      aiBase,
     fallbackAiKey:  fallbackKey,
     fallbackAiBase: fallbackBase,
+    fallbackModel,
     callbackUrl,
     sandboxSecret,
     mcpConfigs:     mcpConfigsJson,
