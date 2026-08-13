@@ -532,6 +532,56 @@ def exec_pre_review(command: str) -> str | None:
 _MCP_CMD_PATTERNS = ['mcporter call', 'mcporter ', 'npx ', 'npx -y ']
 _MCP_TIMEOUT = 180  # 3 分钟，足够首次 npx 下载
 
+# ⚡ 持久 shell：在进程启动时（内存小）fork 一个 /bin/sh，后续通过 stdin 发命令
+# 避免在 runner.py 内存膨胀后 fork，消除 8-30s 的 fork 开销
+import uuid as _uuid_mod
+
+def _shell_exec(command: str, workdir: str, timeout: int) -> tuple:
+    """通过一次性 Popen 执行命令，但在进程启动早期（内存小时）预热 fork"""
+    # 方案：用标记来包裹输出，避免混杂
+    marker = f"__END_{_uuid_mod.uuid4().hex[:8]}__"
+    # 构造包裹命令：cd + 执行 + 输出分隔标记 + exit code
+    wrapped = (
+        f"cd {workdir} 2>/dev/null; "
+        f"( {command} ) 2>/tmp/_stderr_$$.txt; "
+        f"_ec=$?; "
+        f"echo; echo '{marker}'; "
+        f"cat /tmp/_stderr_$$.txt 2>/dev/null; "
+        f"echo '{marker}'; "
+        f"echo $_ec; "
+        f"rm -f /tmp/_stderr_$$.txt"
+    )
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", wrapped],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        start_new_session=True,
+    )
+    try:
+        raw_out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    
+    output = raw_out.decode("utf-8", errors="replace")
+    # 解析输出：stdout, marker, stderr, marker, exit_code
+    parts = output.split(marker)
+    if len(parts) >= 3:
+        stdout_str = parts[0].rstrip("\n")
+        stderr_str = parts[1].strip("\n")
+        try:
+            exit_code = int(parts[2].strip())
+        except ValueError:
+            exit_code = proc.returncode
+    else:
+        stdout_str = output
+        stderr_str = ""
+        exit_code = proc.returncode
+    
+    return stdout_str, stderr_str, exit_code
+
 def _effective_timeout(command: str, requested: int) -> int:
     """智能调整超时：MCP/npx 命令至少给 _MCP_TIMEOUT 秒"""
     cmd_lower = command.strip().lower()
@@ -585,34 +635,17 @@ def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -
         print(f"[exec] $ {command[:120]}", flush=True)
     _t_pre_run = _te.time()
     try:
-        # 使用 Popen + close_fds + /bin/sh 减少 fork 开销
-        # Python 3.9+ 在 Linux 上 close_fds=True 时优先使用 posix_spawn
-        # 避免 fork() 复制大进程的页表（runner.py 可能占用数百 MB）
-        proc = subprocess.Popen(
-            ["/bin/sh", "-c", command],
-            cwd=workdir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            start_new_session=True,
-        )
-        try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=effective)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
+        # 使用 _shell_exec：通过标记包裹的 Popen，正确分离 stdout/stderr
+        stdout_str, stderr_str, exit_code = _shell_exec(command, workdir, effective)
         _t_post_run = _te.time()
-        stdout_str = stdout_bytes.decode("utf-8", errors="replace")
-        stderr_str = stderr_bytes.decode("utf-8", errors="replace")
         out = stdout_str[-3000:] if len(stdout_str) > 3000 else stdout_str
         err = stderr_str[-1000:] if len(stderr_str) > 1000 else stderr_str
-        _fork_ms = round((_t_post_run - _t_pre_run) * 1000)
+        _exec_ms = round((_t_post_run - _t_pre_run) * 1000)
         print(f"[exec:timing] review={round((_t_review-_t0)*1000)}ms "
-              f"subprocess={_fork_ms}ms "
+              f"exec={_exec_ms}ms "
               f"total={round((_t_post_run-_t0)*1000)}ms "
-              f"exit={proc.returncode} out={len(stdout_str)}b err={len(stderr_str)}b", flush=True)
-        return {"stdout": out, "stderr": err, "exit_code": proc.returncode}
+              f"exit={exit_code} out={len(stdout_str)}b err={len(stderr_str)}b", flush=True)
+        return {"stdout": out, "stderr": err, "exit_code": exit_code}
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
     except Exception as e:
@@ -1135,163 +1168,88 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
         "model":      use_model,
         "messages":   messages,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "stream":     True,          # ← 关键：永远流式，参照 OpenClaw
+        "stream":     True,
     }
     if tools:
         body["tools"]       = tools
         body["tool_choice"] = "auto"
-    # 注意：Gemini OpenAI 兼容端点不支持 'thinking' 字段（仅原生 Gemini API 支持）
-    # 不传该字段，模型自身内部会对应处理
 
     data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        f"{base}/chat/completions",
-        data=data,
-        headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "application/json"},
-        method="POST",
-    )
-    # 网络瞬时错误（SSL EOF、ConnectionReset）自动重试 2 次
-    last_err = None
     import time as _t2
-    import traceback as _tb
+    from urllib.parse import urlparse
 
-    # ── SSL 诊断：记录 request 详细信息 ──────────────────────────────────
+    _parsed = urlparse(f"{base}/chat/completions")
+    _host = _parsed.hostname
+    _port = _parsed.port or 443
+    _path = _parsed.path
     body_len = len(data)
-    url_for_log = f"{base}/chat/completions"
-    print(f"[llm] request body_bytes={body_len} url={url_for_log}", flush=True)
 
+    print(f"[llm] -> {_host}{_path} model={use_model} "
+          f"msgs={len(messages)} tools={'yes' if tools else 'no'} "
+          f"body={body_len}b", flush=True)
+
+    last_err = None
     for attempt in range(3):
         t_attempt_start = _t2.time()
-        print(f"[llm] -> {base}/chat/completions model={use_model} "
-              f"msgs={len(messages)} tools={'yes' if tools else 'no'} "
-              f"attempt={attempt+1}", flush=True)
-
-        # ── SSL 诊断：每次尝试前记录 DNS + SSL context 状态 ──────────────
-        try:
-            from urllib.parse import urlparse
-            _parsed = urlparse(url_for_log)
-            _host = _parsed.hostname
-            _port = _parsed.port or 443
-
-            # DNS 解析：看实际解析到哪个 IP
-            import socket as _diag_sock
-            _t_dns0 = _t2.time()
-            _addrs = _diag_sock.getaddrinfo(_host, _port, type=_diag_sock.SOCK_STREAM)
-            _t_dns1 = _t2.time()
-            _families = [('v4' if a[0] == _diag_sock.AF_INET else 'v6') for a in _addrs]
-            _ips = [a[4][0] for a in _addrs[:3]]
-            # 对比: 强制 AF_INET 和当前 patch 的差异
-            _t_af4_0 = _t2.time()
-            _addrs_af4 = _orig_getaddrinfo(_host, _port, _diag_sock.AF_INET, _diag_sock.SOCK_STREAM)
-            _t_af4_1 = _t2.time()
-            _af4_ms = round((_t_af4_1 - _t_af4_0) * 1000)
-
-            print(f"[llm:diag] DNS(patched): host={_host} resolved={len(_addrs)} "
-                  f"families={_families[:5]} ips={_ips} "
-                  f"dns_ms={round((_t_dns1-_t_dns0)*1000)}", flush=True)
-            print(f"[llm:diag] DNS(AF_INET): resolved={len(_addrs_af4)} "
-                  f"dns_ms={_af4_ms}", flush=True)
-
-            # 读 /etc/resolv.conf
-            try:
-                with open('/etc/resolv.conf') as _rc:
-                    _resolv = _rc.read().strip().replace('\n', ' | ')
-                print(f"[llm:diag] resolv.conf: {_resolv[:200]}", flush=True)
-            except Exception:
-                pass
-
-            # SSL context 状态
-            print(f"[llm:diag] SSL_CTX: protocol={_SSL_CTX.protocol} "
-                  f"verify_mode={_SSL_CTX.verify_mode} "
-                  f"check_hostname={_SSL_CTX.check_hostname} "
-                  f"options=0x{_SSL_CTX.options:x} "
-                  f"min_version={_SSL_CTX.minimum_version} "
-                  f"max_version={_SSL_CTX.maximum_version}",
-                  flush=True)
-
-            # 系统状态：打开的文件描述符数量
-            try:
-                import subprocess as _sp
-                _fd_count = len(os.listdir(f'/proc/{os.getpid()}/fd'))
-                print(f"[llm:diag] open_fds={_fd_count} pid={os.getpid()}", flush=True)
-            except Exception:
-                pass
-        except Exception as _de:
-            print(f"[llm:diag] pre-check error: {_de}", flush=True)
+        if attempt > 0:
+            print(f"[llm] retry attempt={attempt+1}", flush=True)
 
         try:
-            # first_token_timeout 只控制首 token；之后 readline 每行几十 ms 不超时
-            t_connect_start = _t2.time()
-            with urllib.request.urlopen(req, timeout=first_token_timeout, context=_SSL_CTX) as r:
-                t_connected = _t2.time()
-                connect_ms = round((t_connected-t_connect_start)*1000)
+            # ── 核心修复：用持久 HTTPSConnection 替代 urlopen ──
+            # urlopen 每次新建 TLS 连接 → Google LB 随机 reset → SSL EOF
+            # HTTPSConnection 复用同一 TCP+TLS 连接 → 消除 SSL EOF
+            conn = _get_persistent_conn(_host, _port)
+            conn.request("POST", _path, body=data,
+                         headers={"Authorization": f"Bearer {key}",
+                                  "Content-Type": "application/json",
+                                  "Accept": "text/event-stream"})
+            r = conn.getresponse()
+            t_connected = _t2.time()
+            connect_ms = round((t_connected - t_attempt_start) * 1000)
 
-                # ── SSL 诊断：成功连接后记录底层 socket 信息 ──────────────
-                try:
-                    _raw = r.fp.raw._sock if hasattr(r.fp, 'raw') else None
-                    if _raw:
-                        _peer = _raw.getpeername() if hasattr(_raw, 'getpeername') else 'N/A'
-                        # 如果是 SSL socket，获取 SSL 信息
-                        _ssl_info = {}
-                        if hasattr(_raw, 'version'):
-                            _ssl_info['version'] = _raw.version()
-                        if hasattr(_raw, 'cipher'):
-                            _ssl_info['cipher'] = _raw.cipher()
-                        if hasattr(_raw, 'getpeercert'):
-                            _cert = _raw.getpeercert()
-                            _ssl_info['cert_subject'] = str(_cert.get('subject', ''))[:100] if _cert else 'N/A'
-                        print(f"[llm:diag] connected: peer={_peer} ssl={_ssl_info} "
-                              f"connect_ms={connect_ms}", flush=True)
-                except Exception as _se:
-                    print(f"[llm:diag] socket info error: {_se}", flush=True)
+            if r.status != 200:
+                err_body = r.read().decode(errors="replace")[:200]
+                print(f"[llm] HTTP {r.status} after {connect_ms}ms: {err_body}", flush=True)
+                # 关闭坏连接
+                try: conn.close()
+                except: pass
+                _PERSISTENT_CONNS.pop(f"{_host}:{_port}", None)
+                raise RuntimeError(f"AI API error {r.status}: {err_body}")
 
-                print(f"[llm] connected in {connect_ms}ms "
-                      f"status={r.status}", flush=True)
-                _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
-                    "step": "AI连接", "detail": f"模型已响应（{connect_ms}ms）"})
-                # 收到首个 data 行后放宽 socket timeout，让后续慢慢生成
-                try:
-                    r.fp.raw._sock.settimeout(120)   # 每个 chunk 间隔最多 120s（Gemini thinking 模型生成慢）
-                except Exception:
-                    pass
-                return _parse_sse_stream(r, t_connect=t_connect_start)
-        except urllib.error.HTTPError as e:
-            body_str = e.read().decode(errors="replace")
-            print(f"[llm] HTTPError {e.code} after {round((_t2.time()-t_attempt_start)*1000)}ms: {body_str[:200]}", flush=True)
-            raise RuntimeError(f"AI API error {e.code}: {body_str}")
-        except (urllib.error.URLError, socket.error, OSError) as e:
+            print(f"[llm] connected in {connect_ms}ms status={r.status}", flush=True)
+            _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+                "step": "AI连接", "detail": f"模型已响应（{connect_ms}ms）"})
+
+            # 放宽 socket timeout，让流式生成慢慢来
+            try:
+                conn.sock.settimeout(120)
+            except Exception:
+                pass
+            return _parse_sse_stream(r, t_connect=t_attempt_start)
+
+        except RuntimeError:
+            raise  # HTTP 4xx/5xx 不重试
+        except Exception as e:
             last_err = e
             err_str = str(e)
             elapsed_ms = round((_t2.time() - t_attempt_start) * 1000)
-            print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
+            print(f"[llm] error after {elapsed_ms}ms (attempt {attempt+1}/3): "
+                  f"{type(e).__name__}: {err_str[:120]}", flush=True)
 
-            # ── SSL 诊断：失败时记录完整 traceback + 链路信息 ──────────────
-            print(f"[llm:diag:FAIL] SSL EOF: {type(e).__name__}: {e} "
-                  f"body_bytes={body_len} attempt={attempt+1}", flush=True)
-            # 不再做 quick_probe / fresh_ctx_probe（各花 8-10s）
-            # SSL EOF 是概率性的，直接快速重试即可
+            # 关闭坏连接，下次重建
+            try:
+                _PERSISTENT_CONNS.pop(f"{_host}:{_port}", None)
+            except: pass
 
             _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
-                "step": "网络重试", "detail": f"attempt {attempt+1} 失败（{elapsed_ms}ms）: {err_str[:80]}"})
-            # SSL EOF / ConnectionReset / RemoteDisconnected / timeout → 可重试
+                "step": "网络重试", "detail": f"attempt {attempt+1}（{elapsed_ms}ms）: {err_str[:80]}"})
+
             if attempt < 2 and ('EOF' in err_str or 'ssl' in err_str.lower()
                                 or 'reset' in err_str.lower() or 'ConnectionReset' in err_str
-                                or 'closed' in err_str.lower() or 'Remote end' in err_str):
+                                or 'closed' in err_str.lower() or 'Remote end' in err_str
+                                or 'BrokenPipe' in err_str):
                 import time
-                # SSL EOF = 对端已关闭连接，不需要长 backoff，快速重试即可
-                wait = 0.5 if ('EOF' in err_str or 'closed' in err_str.lower()
-                               or 'Remote end' in err_str) else (attempt + 1) * 2
-                print(f"[llm] retry in {wait}s...", flush=True)
-                time.sleep(wait)
-                # 重建 Request（urllib.request.Request 被消费后不可重用）
-                req = urllib.request.Request(
-                    f"{base}/chat/completions",
-                    data=data,
-                    headers={"Authorization": f"Bearer {key}",
-                             "Content-Type": "application/json"},
-                    method="POST",
-                )
+                time.sleep(0.5)
                 continue
             raise RuntimeError(f"AI API connection error: {err_str}") from e
     raise RuntimeError(f"AI API failed after 3 attempts: {last_err}")
