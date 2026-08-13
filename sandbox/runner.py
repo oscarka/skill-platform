@@ -544,18 +544,34 @@ def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -
         print(f"[exec] $ {command[:120]}", flush=True)
     _t_pre_run = _te.time()
     try:
-        result = subprocess.run(
-            command, shell=True, cwd=workdir,
-            capture_output=True, text=True, timeout=effective,
+        # 使用 Popen + close_fds + /bin/sh 减少 fork 开销
+        # Python 3.9+ 在 Linux 上 close_fds=True 时优先使用 posix_spawn
+        # 避免 fork() 复制大进程的页表（runner.py 可能占用数百 MB）
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", command],
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
         )
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=effective)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
         _t_post_run = _te.time()
-        out = result.stdout[-3000:] if len(result.stdout) > 3000 else result.stdout
-        err = result.stderr[-1000:] if len(result.stderr) > 1000 else result.stderr
+        stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+        stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+        out = stdout_str[-3000:] if len(stdout_str) > 3000 else stdout_str
+        err = stderr_str[-1000:] if len(stderr_str) > 1000 else stderr_str
+        _fork_ms = round((_t_post_run - _t_pre_run) * 1000)
         print(f"[exec:timing] review={round((_t_review-_t0)*1000)}ms "
-              f"subprocess={round((_t_post_run-_t_pre_run)*1000)}ms "
+              f"subprocess={_fork_ms}ms "
               f"total={round((_t_post_run-_t0)*1000)}ms "
-              f"exit={result.returncode} out={len(result.stdout)}b err={len(result.stderr)}b", flush=True)
-        return {"stdout": out, "stderr": err, "exit_code": result.returncode}
+              f"exit={proc.returncode} out={len(stdout_str)}b err={len(stderr_str)}b", flush=True)
+        return {"stdout": out, "stderr": err, "exit_code": proc.returncode}
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
     except Exception as e:
@@ -1564,6 +1580,8 @@ def executor_react_loop(
         _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
             "step": f"Turn {turn}",
             "detail": f"LLM耗时 {_llm_elapsed}s | 总计 {_total_elapsed}s | context={pressure['pressure_pct']}%"})
+        _t_post_progress = time.time()
+
         choice0 = resp["choices"][0]
         msg = choice0["message"]
         msg.pop("_thinking", None)  # 清除内部字段，不影响消息历史
@@ -1580,6 +1598,8 @@ def executor_react_loop(
         _p = usage.get("prompt_tokens", "?")
         _c = usage.get("completion_tokens", "?")
         _tc_names = [tc["function"]["name"] for tc in tc_list] if tc_list else []
+
+        _t_pre_transcript = time.time()
         print(f"[executor] turn={turn} llm_done {_llm_elapsed}s "
               f"prompt={_p} completion={_c} finish={finish_reason} "
               f"tool_calls={_tc_names or 'none'} content_len={len(content)}", flush=True)
@@ -1602,6 +1622,13 @@ def executor_react_loop(
             finish_reason=finish_reason,
             request_meta=req_meta,
         )
+        _t_post_transcript = time.time()
+        _gap_progress_ms = round((_t_post_progress - _t_llm_end) * 1000)
+        _gap_parse_ms = round((_t_pre_transcript - _t_post_progress) * 1000)
+        _gap_transcript_ms = round((_t_post_transcript - _t_pre_transcript) * 1000)
+        print(f"[executor:gap] progress={_gap_progress_ms}ms parse={_gap_parse_ms}ms "
+              f"transcript={_gap_transcript_ms}ms "
+              f"total_gap={round((_t_post_transcript - _t_llm_end)*1000)}ms", flush=True)
 
         if not tc_list:
             # 参照 OpenClaw incomplete-turn.ts：
