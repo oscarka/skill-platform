@@ -38,7 +38,10 @@ export interface TicketRecord {
   expires_at: number;
   created_at: number;
   updated_at: number;
+  request_id?: string | null;   // 关联 agent_tasks.id，供 AgentLogs 回写事件
+  delivery_info?: string | null; // JSON: {callback_url, app, recipient, action}
 }
+
 
 const STATUS_LABEL: Record<string, string> = {
   created: '待发送', waiting_input: '等待提交', submitted: '已提交',
