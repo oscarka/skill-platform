@@ -493,18 +493,25 @@ function defaultProfile(): AgentProfile {
 
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
+// AI 凭证环境变量优先映射（避免 DB 查询，防止连接池耗尽）
+const _settingEnvMap: Record<string, string> = {
+  'doubao_api_key':    process.env.DOUBAO_API_KEY    || '',
+  'doubao_base_url':   process.env.DOUBAO_BASE_URL   || 'https://ark.cn-beijing.volces.com/api/v3',
+  'deepseek_api_key':  process.env.DEEPSEEK_API_KEY  || '',
+  'deepseek_base_url': process.env.DEEPSEEK_BASE_URL || '',
+  'gemini_api_key':    process.env.GEMINI_API_KEY    || '',
+};
+
+// 凭证结果缓存（60s TTL），避免每次 AI 调用都查 DB
+let _credCache: { apiKey: string; baseUrl: string; model: string; provider: string } | null = null;
+let _credCacheExpire = 0;
+
 async function getSetting(key: string): Promise<string> {
+  // 高频凭证 key 优先从环境变量读，完全跳过 DB 查询
+  if (key in _settingEnvMap && _settingEnvMap[key]) return _settingEnvMap[key];
+  // 其他 key 正常走 DB
   const row = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', [key]);
-  if (row?.value) return row.value;
-  // DB未配置时，自动从环境变量读取（运行时注入的 Secret）
-  const envMap: Record<string, string> = {
-    'doubao_api_key':    process.env.DOUBAO_API_KEY    || '',
-    'doubao_base_url':  process.env.DOUBAO_BASE_URL   || 'https://ark.cn-beijing.volces.com/api/v3',
-    'deepseek_api_key': process.env.DEEPSEEK_API_KEY  || '',
-    'deepseek_base_url':process.env.DEEPSEEK_BASE_URL || '',
-    'gemini_api_key':   process.env.GEMINI_API_KEY    || '',
-  };
-  return envMap[key] || '';
+  return row?.value || _settingEnvMap[key] || '';
 }
 
 
@@ -513,27 +520,22 @@ async function getGeminiKey(): Promise<string> {
 }
 
 async function getAICredentials(): Promise<{ apiKey: string; baseUrl: string; model: string; provider: string }> {
+  // 60s 缓存，避免每次 AI 调用都触发多个 DB 查询（连接池耗尽的根本原因）
+  if (_credCache && Date.now() < _credCacheExpire) return _credCache;
+
   // ARK (DeepSeek) 为默认，Gemini 为 fallback
   const [doubaoKey, doubaoBase, geminiKey] = await Promise.all([
     getSetting('doubao_api_key').then((k: string) => k || getSetting('deepseek_api_key')),
     getSetting('doubao_base_url').then((u: string) => u || getSetting('deepseek_base_url')),
     getGeminiKey(),
   ]);
-  if (doubaoKey && doubaoBase) {
-    return {
-      apiKey:  doubaoKey,
-      baseUrl: doubaoBase.replace(/\/$/, ''),
-      model:   'deepseek-v4-flash-ga-260731',
-      provider: 'ark',
-    };
-  }
-  // fallback to Gemini
-  return {
-    apiKey:  geminiKey,
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    model:   'gemini-3.6-flash',
-    provider: 'gemini',
-  };
+  const result = doubaoKey && doubaoBase
+    ? { apiKey: doubaoKey, baseUrl: doubaoBase.replace(/\/$/, ''), model: 'deepseek-v4-flash-ga-260731', provider: 'ark' }
+    : { apiKey: geminiKey, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.6-flash', provider: 'gemini' };
+  _credCache = result;
+  _credCacheExpire = Date.now() + 60_000;
+  console.log(`[AI] credentials resolved: provider=${result.provider} model=${result.model}`);
+  return result;
 }
 
 async function getSandboxSettings() {
