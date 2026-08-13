@@ -329,6 +329,11 @@ class TranscriptManager:
             print(f"[transcript] file write error: {e}", flush=True)
 
         # ─── 实时上报到平台 DB (fire-and-forget，不等待结果) ─────────
+        # 默认关闭：daemon thread 的 urlopen SSL 握手会争夺 GIL，
+        # 导致主线程 readline() 阻塞 10+ 秒。进度由 runner._post_progress 负责。
+        # 需要时设 TRANSCRIPT_REALTIME=1 恢复。
+        if not os.getenv("TRANSCRIPT_REALTIME"):
+            return
         try:
             callback_url = os.getenv("CALLBACK_URL", "")
             secret = os.getenv("SANDBOX_SECRET", "sandbox-secret-2024")
