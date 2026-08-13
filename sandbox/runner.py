@@ -627,8 +627,8 @@ _SHELL_WORKER = _PersistentShell()
 # ── 启动时 benchmark：fork vs 持久 shell（结果打到 Cloud Logging）──
 def _fork_benchmark():
     import time as _bt
-    cmds = ["echo hello", "ls /tmp", "cat /etc/hostname"]
-    results = []
+    # 包含 shell built-in (echo) 和外部命令 (ls, cat, python3)
+    cmds = ["echo hello", "ls /tmp", "cat /etc/hostname", "python3 -c 'print(1)'"]
     for cmd in cmds:
         # fork 方式
         t0 = _bt.time()
@@ -638,10 +638,9 @@ def _fork_benchmark():
         fork_ms = round((_bt.time() - t0) * 1000)
         # 持久 shell 方式
         t0 = _bt.time()
-        _SHELL_WORKER.exec(cmd, "/tmp", 10)
+        _SHELL_WORKER.exec(cmd, "/tmp", 30)
         shell_ms = round((_bt.time() - t0) * 1000)
-        results.append(f"  {cmd:<30} fork={fork_ms}ms  shell={shell_ms}ms")
-    print(f"[benchmark] fork vs persistent shell:\n" + "\n".join(results), flush=True)
+        print(f"[benchmark] cmd={cmd:<35} fork={fork_ms}ms shell={shell_ms}ms", flush=True)
 
 _fork_benchmark()
 
