@@ -522,55 +522,132 @@ def exec_pre_review(command: str) -> str | None:
 _MCP_CMD_PATTERNS = ['mcporter call', 'mcporter ', 'npx ', 'npx -y ']
 _MCP_TIMEOUT = 180  # 3 分钟，足够首次 npx 下载
 
-# ⚡ 持久 shell：在进程启动时（内存小）fork 一个 /bin/sh，后续通过 stdin 发命令
-# 避免在 runner.py 内存膨胀后 fork，消除 8-30s 的 fork 开销
+# ⚡ 持久 shell worker：在模块加载时预 fork（gVisor 状态轻量时 fork 快）
+# 之后所有 exec 命令通过 stdin 发给这个 shell，避免运行期 fork
 import uuid as _uuid_mod
+import threading as _threading
+
+class _PersistentShell:
+    """预 fork 的 /bin/sh 进程，通过 stdin/stdout 通信"""
+    def __init__(self):
+        self._proc = None
+        self._lock = _threading.Lock()
+        self._start()
+    
+    def _start(self):
+        """启动或重启 shell 进程"""
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.kill()
+        except: pass
+        self._proc = subprocess.Popen(
+            ["/bin/sh"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+        )
+        print(f"[shell-worker] started pid={self._proc.pid}", flush=True)
+    
+    def exec(self, command: str, workdir: str, timeout: int) -> tuple:
+        """通过 stdin 发命令给 shell，用 marker 分隔输出"""
+        marker = f"__DONE_{_uuid_mod.uuid4().hex[:8]}__"
+        # 构造脚本：cd + 执行 + 标记分隔 stdout/stderr/exit_code
+        script = (
+            f"cd {workdir} 2>/dev/null\n"
+            f"( {command} ) 2>/tmp/_se$$.txt\n"
+            f"_x=$?\n"
+            f"echo '{marker}'\n"
+            f"cat /tmp/_se$$.txt 2>/dev/null\n"
+            f"echo '{marker}'\n"
+            f"echo $_x\n"
+            f"echo '{marker}_END'\n"
+            f"rm -f /tmp/_se$$.txt\n"
+        )
+        
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                print("[shell-worker] restarting dead shell", flush=True)
+                self._start()
+            
+            try:
+                self._proc.stdin.write(script.encode())
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                print("[shell-worker] broken pipe, restarting", flush=True)
+                self._start()
+                self._proc.stdin.write(script.encode())
+                self._proc.stdin.flush()
+            
+            # 读取输出直到 end marker
+            output_lines = []
+            import time as _tw
+            _deadline = _tw.time() + timeout
+            
+            while _tw.time() < _deadline:
+                try:
+                    self._proc.stdout.flush() if hasattr(self._proc.stdout, 'flush') else None
+                    line = self._proc.stdout.readline()
+                    if not line:
+                        break
+                    decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+                    if decoded == f"{marker}_END":
+                        break
+                    output_lines.append(decoded)
+                except Exception as e:
+                    print(f"[shell-worker] read error: {e}", flush=True)
+                    break
+            else:
+                # 超时 - kill 并重启
+                print(f"[shell-worker] timeout after {timeout}s", flush=True)
+                self._start()
+                raise subprocess.TimeoutExpired(command, timeout)
+        
+        # 解析：stdout lines + marker + stderr lines + marker + exit_code
+        full = "\n".join(output_lines)
+        parts = full.split(marker)
+        if len(parts) >= 3:
+            stdout_str = parts[0].rstrip("\n")
+            stderr_str = parts[1].strip("\n")
+            try:
+                exit_code = int(parts[2].strip())
+            except ValueError:
+                exit_code = -1
+        else:
+            stdout_str = full
+            stderr_str = ""
+            exit_code = -1
+        
+        return stdout_str, stderr_str, exit_code
+
+# 在模块加载时预 fork（此时 gVisor 状态最轻量，fork < 100ms）
+_SHELL_WORKER = _PersistentShell()
+
+# ── 启动时 benchmark：fork vs 持久 shell（结果打到 Cloud Logging）──
+def _fork_benchmark():
+    import time as _bt
+    cmds = ["echo hello", "ls /tmp", "cat /etc/hostname"]
+    results = []
+    for cmd in cmds:
+        # fork 方式
+        t0 = _bt.time()
+        p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, close_fds=True)
+        p.communicate()
+        fork_ms = round((_bt.time() - t0) * 1000)
+        # 持久 shell 方式
+        t0 = _bt.time()
+        _SHELL_WORKER.exec(cmd, "/tmp", 10)
+        shell_ms = round((_bt.time() - t0) * 1000)
+        results.append(f"  {cmd:<30} fork={fork_ms}ms  shell={shell_ms}ms")
+    print(f"[benchmark] fork vs persistent shell:\n" + "\n".join(results), flush=True)
+
+_fork_benchmark()
 
 def _shell_exec(command: str, workdir: str, timeout: int) -> tuple:
-    """通过一次性 Popen 执行命令，但在进程启动早期（内存小时）预热 fork"""
-    # 方案：用标记来包裹输出，避免混杂
-    marker = f"__END_{_uuid_mod.uuid4().hex[:8]}__"
-    # 构造包裹命令：cd + 执行 + 输出分隔标记 + exit code
-    wrapped = (
-        f"cd {workdir} 2>/dev/null; "
-        f"( {command} ) 2>/tmp/_stderr_$$.txt; "
-        f"_ec=$?; "
-        f"echo; echo '{marker}'; "
-        f"cat /tmp/_stderr_$$.txt 2>/dev/null; "
-        f"echo '{marker}'; "
-        f"echo $_ec; "
-        f"rm -f /tmp/_stderr_$$.txt"
-    )
-    proc = subprocess.Popen(
-        ["/bin/sh", "-c", wrapped],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        start_new_session=True,
-    )
-    try:
-        raw_out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        raise
-    
-    output = raw_out.decode("utf-8", errors="replace")
-    # 解析输出：stdout, marker, stderr, marker, exit_code
-    parts = output.split(marker)
-    if len(parts) >= 3:
-        stdout_str = parts[0].rstrip("\n")
-        stderr_str = parts[1].strip("\n")
-        try:
-            exit_code = int(parts[2].strip())
-        except ValueError:
-            exit_code = proc.returncode
-    else:
-        stdout_str = output
-        stderr_str = ""
-        exit_code = proc.returncode
-    
-    return stdout_str, stderr_str, exit_code
+    """通过持久 shell 执行命令，避免 fork"""
+    return _SHELL_WORKER.exec(command, workdir, timeout)
 
 def _effective_timeout(command: str, requested: int) -> int:
     """智能调整超时：MCP/npx 命令至少给 _MCP_TIMEOUT 秒"""
@@ -728,26 +805,29 @@ def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dic
         print(f"[invoke_skill] error: {e}", flush=True)
         return {"ok": False, "error": str(e)}
 
-# ─── 进度上报（stdout + HTTP POST 到平台，线程异步不阻塞主流程）──────────────
 def _post_progress(msg: dict):
     if not CALLBACK_URL:
-        print(f"[progress:skip] CALLBACK_URL is empty, skipping: {msg.get('step','?')}", flush=True)
         return
     import threading
     def _send():
         try:
-            import urllib.request as _ur
+            from urllib.parse import urlparse
+            parsed = urlparse(CALLBACK_URL)
+            host = parsed.hostname
+            port = parsed.port or 443
+            path = parsed.path
             data = json.dumps({"type": "progress", "event": msg}).encode()
-            req = _ur.Request(CALLBACK_URL, data=data,
-                              headers={"Content-Type": "application/json",
-                                       "X-Sandbox-Secret": SANDBOX_SECRET},
-                              method="POST")
-            resp = _ur.urlopen(req, timeout=5)
-            status = resp.status
-            body = resp.read().decode()[:100]
-            print(f"[progress:ok] step={msg.get('step','?')} → {status} {body}", flush=True)
+            # 用独立的 http.client 连接（不走连接池，避免和 LLM 连接冲突）
+            conn = _http_client.HTTPSConnection(host, port, context=_SSL_CTX, timeout=5)
+            conn.request("POST", path, body=data,
+                         headers={"Content-Type": "application/json",
+                                  "X-Sandbox-Secret": SANDBOX_SECRET})
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            print(f"[progress:ok] step={msg.get('step','?')} → {resp.status}", flush=True)
         except Exception as e:
-            print(f"[progress:FAIL] step={msg.get('step','?')} url={CALLBACK_URL[:80]} "
+            print(f"[progress:FAIL] step={msg.get('step','?')} "
                   f"error={type(e).__name__}: {e}", flush=True)
     threading.Thread(target=_send, daemon=True).start()
 
