@@ -209,10 +209,25 @@ function triggerWikiSync(userId: string, reason: string): void {
  * 
  * 当用户不存在时（404），自动在 LLMWiki 创建档案，确保每个聊天用户都有 wiki
  */
+// Wiki 上下文内存缓存（60s TTL）
+// 用户 wiki 内容变化很慢，相邻消息命中缓存可避免 6s HTTP 延迟
+interface WikiCacheEntry { result: { user_profile: string; health_wiki: string; mode: string }; expireAt: number; }
+const _wikiCache = new Map<string, WikiCacheEntry>();
+const WIKI_CACHE_TTL_MS = 60_000;
+
 async function fetchWikiContext(userId: string, query: string, fromName?: string): Promise<{ user_profile: string; health_wiki: string; mode: string }> {
   if (!LLMWIKI_BASE || !userId) {
     return { user_profile: '', health_wiki: '', mode: 'none' };
   }
+
+  // 缓存命中
+  const cacheKey = userId;
+  const cached = _wikiCache.get(cacheKey);
+  if (cached && Date.now() < cached.expireAt) {
+    console.log(`[WikiContext] cache hit userId=${userId} (${Math.round((cached.expireAt - Date.now())/1000)}s left)`);
+    return cached.result;
+  }
+
   try {
     const url = `${LLMWIKI_BASE}/api/clients/${userId}/context-inject?query=${encodeURIComponent(query)}`;
     console.log(`[WikiContext] GET ${url}`);
@@ -256,7 +271,9 @@ async function fetchWikiContext(userId: string, query: string, fromName?: string
     }
     const data = await res.json() as any;
     console.log(`[WikiContext] ✓ mode=${data.mode} wiki=${(data.health_wiki || '').length}字 profile=${(data.user_profile || '').length}字`);
-    return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+    const wikiResult = { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+    _wikiCache.set(cacheKey, { result: wikiResult, expireAt: Date.now() + WIKI_CACHE_TTL_MS });
+    return wikiResult;
   } catch (err: any) {
     console.warn(`[WikiContext] ✗ 拉取失败（不影响主流程）:`, err.message);
     return { user_profile: '', health_wiki: '', mode: 'error' };
@@ -730,7 +747,7 @@ async function routeMessage(content: string, notes: string, history: { role: str
     const match = result.match(/"type"\s*:\s*"(chat|health)"/);
     const type = match?.[1] as 'chat' | 'health' | undefined;
     console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'} (${durationMs}ms)`);
-    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731';  // ARK 기본 모델
     return { type: type || 'chat', durationMs, systemPrompt, userMsg, rawResult: result.trim(), model };
   } catch (err) {
     const durationMs = Date.now() - t0;
