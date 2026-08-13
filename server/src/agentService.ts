@@ -495,8 +495,18 @@ function defaultProfile(): AgentProfile {
 
 async function getSetting(key: string): Promise<string> {
   const row = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', [key]);
-  return row?.value || '';
+  if (row?.value) return row.value;
+  // DB未配置时，自动从环境变量读取（运行时注入的 Secret）
+  const envMap: Record<string, string> = {
+    'doubao_api_key':    process.env.DOUBAO_API_KEY    || '',
+    'doubao_base_url':  process.env.DOUBAO_BASE_URL   || 'https://ark.cn-beijing.volces.com/api/v3',
+    'deepseek_api_key': process.env.DEEPSEEK_API_KEY  || '',
+    'deepseek_base_url':process.env.DEEPSEEK_BASE_URL || '',
+    'gemini_api_key':   process.env.GEMINI_API_KEY    || '',
+  };
+  return envMap[key] || '';
 }
+
 
 async function getGeminiKey(): Promise<string> {
   return (await getSetting('gemini_api_key')) || process.env.GEMINI_API_KEY || '';
