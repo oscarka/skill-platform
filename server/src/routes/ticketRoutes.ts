@@ -49,13 +49,20 @@ const STATUS_LABEL: Record<string, string> = {
   expired: '已过期', error: '处理出错', patient_confirmed: '患者已确认', patient_rejected: '患者不认可',
 };
 
+let _h5BaseCache = '';
+let _h5BaseCacheExpire = 0;
+
 async function h5BaseUrl(): Promise<string> {
+  if (_h5BaseCache && Date.now() < _h5BaseCacheExpire) return _h5BaseCache;
   const row = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
-  return row?.value || `http://localhost:3100/h5`;
+  _h5BaseCache = row?.value || `http://localhost:3100/h5`;
+  _h5BaseCacheExpire = Date.now() + 60_000;  // 60s cache
+  return _h5BaseCache;
 }
 
 async function ticketToResponse(t: TicketRecord, skill?: any) {
-  const base = (await h5BaseUrl()).replace(/\/h5$/, '');
+  const h5Base = await h5BaseUrl();  // 缓存命中，单次调用
+  const base = h5Base.replace(/\/h5$/, '');
   const reportUrl = t.status === 'done' ? `${base}/api/results/${t.id}/report` : null;
   return {
     id: t.id,
@@ -71,7 +78,7 @@ async function ticketToResponse(t: TicketRecord, skill?: any) {
     status_label: STATUS_LABEL[t.status] || t.status,
     return_reason: t.return_reason,
     return_count: t.return_count,
-    h5_url: `${await h5BaseUrl()}?token=${t.token}`,
+    h5_url: `${h5Base}?token=${t.token}`,
     h5_submitted_at: t.h5_submitted_at,
     ai_started_at: t.ai_started_at,
     ai_completed_at: t.ai_completed_at,
