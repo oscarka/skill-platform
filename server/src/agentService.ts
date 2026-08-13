@@ -404,14 +404,17 @@ interface AgentProfile {
   skill_ids:        string[];
 }
 
+let _profileCache: AgentProfile | null = null;
+let _profileCacheExpire = 0;
+
 async function loadAgentProfile(): Promise<AgentProfile> {
+  if (_profileCache && Date.now() < _profileCacheExpire) return _profileCache;
   try {
     const row = await db.getAsync<any>(
       'SELECT * FROM agent_profiles WHERE id = ?',
       [DEFAULT_PROFILE_ID]
     );
-    if (!row) return defaultProfile();
-    return {
+    const profile: AgentProfile = row ? {
       id:               row.id,
       name:             row.name || '服务助理',
       role_desc:        row.role_desc || '',
@@ -422,9 +425,12 @@ async function loadAgentProfile(): Promise<AgentProfile> {
       reassurance_tpl:  row.reassurance_tpl || '',
       skill_mode:       (row.skill_mode === 'manual' ? 'manual' : 'auto'),
       skill_ids:        safeParseJson(row.skill_ids, []),
-    };
+    } : defaultProfile();
+    _profileCache = profile;
+    _profileCacheExpire = Date.now() + 60_000;  // 60s cache
+    return profile;
   } catch {
-    return defaultProfile();
+    return _profileCache || defaultProfile();
   }
 }
 
@@ -770,7 +776,11 @@ async function routeMessage(content: string, notes: string, history: { role: str
 
 // ─── 2. 自动 Skill 路由（从可用 skill 中选最合适的一个）────────────────────────
 
+let _skillsCache: { id: string; name: string; description: string }[] | null = null;
+let _skillsCacheExpire = 0;
+
 async function getAvailableSkills(profile: AgentProfile): Promise<{ id: string; name: string; description: string }[]> {
+  if (_skillsCache && Date.now() < _skillsCacheExpire) return _skillsCache;
   let skills: any[];
   if (profile.skill_mode === 'auto') {
     skills = await db.allAsync<any>(
@@ -778,14 +788,17 @@ async function getAvailableSkills(profile: AgentProfile): Promise<{ id: string; 
       []
     );
   } else {
-    if (!profile.skill_ids.length) return [];
+    if (!profile.skill_ids.length) { _skillsCache = []; _skillsCacheExpire = Date.now() + 30_000; return []; }
     const placeholders = profile.skill_ids.map(() => '?').join(',');
     skills = await db.allAsync<any>(
       `SELECT id, name, description FROM skills WHERE status = 'published' AND id IN (${placeholders}) ORDER BY name`,
       profile.skill_ids
     );
   }
-  return skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
+  const result = skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
+  _skillsCache = result;
+  _skillsCacheExpire = Date.now() + 30_000;  // 30s cache
+  return result;
 }
 
 async function routeSkill(
@@ -883,7 +896,7 @@ async function routeDecision(
   availableSkills: { id: string; name: string; description: string }[],
   apiKey: string,
 ): Promise<RouteDecisionResult> {
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731';
 
   // 缓存命中时直接返回
   const cacheKey = _routeCacheKey(content, availableSkills.map(s => s.id));
