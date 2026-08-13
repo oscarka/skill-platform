@@ -434,7 +434,7 @@ async function main() {
   // ─── Step 5：工单结果 ───────────────────────────────────────────────────────
   section('Step 5：检查工单结果');
   const d      = finalDetailRes.data;
-  // report_url 可在 d.result 或 d.ticket 中，优先取 d.result（更新鲜）
+  // report_url 在 skill_done AgentLogs 事件 payload 里，或 d.result / d.ticket 中
   const result = d?.result || {};
   const ticket = d?.ticket || {};
   const reportUrl = result.report_url || ticket.report_url
@@ -457,7 +457,7 @@ async function main() {
   }
 
   if (finalStatus === 'done') {
-    ok('result.report_url 存在', !!reportUrl, reportUrl || '（无）');
+    ok('result.report_url 存在', !!reportUrl, reportUrl || '（无，skill_done 事件中未包含）');
     ok('result.raw_result 存在', !!rawRes, `${rawRes.length} 字`);
   } else {
     ok('result.raw_result 包含错误信息', !!rawRes, rawRes.slice(0,80));

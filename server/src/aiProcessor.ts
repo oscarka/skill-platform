@@ -235,7 +235,7 @@ export async function notifyUserTicketDone(ticketId: string): Promise<void> {
 }
 
 // ─── Main processor ───────────────────────────────────────────────────────────
-export async function processTicket(ticketId: string, opts?: { overrideModel?: string }): Promise<void> {
+export async function processTicket(ticketId: string, requestId?: string, opts?: { overrideModel?: string }): Promise<void> {
   const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
   if (!ticket) throw new Error('Ticket not found');
 
@@ -261,8 +261,8 @@ export async function processTicket(ticketId: string, opts?: { overrideModel?: s
       const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
       const isVerified = skill.status === 'approved' || skill.status === 'published';
       if (isVerified && sandboxServiceUrl) {
-        console.log(`[TicketAgent] skill=${skill.id} type=${skill.skill_type} status=${skill.status} → Sandbox Service (model=${opts?.overrideModel || 'default'})`);
-        await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl, opts?.overrideModel);
+        console.log(`[TicketAgent] skill=${skill.id} type=${skill.skill_type} status=${skill.status} → Sandbox Service (model=${opts?.overrideModel || 'default'}) requestId=${requestId || ticket.request_id || 'none'}`);
+        await submitTicketToSandboxService(ticketId, ticket.skill_id, skill, inputs, sandboxServiceUrl, opts?.overrideModel, requestId || ticket.request_id);
       } else {
         console.log(`[TicketAgent] skill=${skill.id} type=${skill.skill_type} status=${skill.status} → Cloud Run Job (model=${opts?.overrideModel || 'default'})`);
         await submitTicketAgentJob(ticketId, ticket.skill_id, skill, inputs, opts?.overrideModel);
@@ -370,7 +370,8 @@ async function submitTicketToSandboxService(
   skill: Skill,
   inputs: TicketInput[],
   serviceUrl: string,
-  overrideModel?: string
+  overrideModel?: string,
+  requestId?: string
 ): Promise<void> {
   // 按 skill 的 mcp_names 过滤：只加载该 skill 声明需要的 MCP
   // 空数组 [] 或 null = 不加载任何 MCP（runner.py 跳过 discover，省 60s 超时）
