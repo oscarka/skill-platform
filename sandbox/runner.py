@@ -498,8 +498,11 @@ def _effective_timeout(command: str, requested: int) -> int:
     return requested
 
 def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -> dict:
+    import time as _te
+    _t0 = _te.time()
     # OpenClaw exec-auto-reviewer 拦截
     review = exec_pre_review(command)
+    _t_review = _te.time()
     if review:
         print(f"[exec-blocked] {command[:80]}", flush=True)
         return {"stdout": review, "stderr": "", "exit_code": 0, "_blocked": True}
@@ -537,13 +540,19 @@ def tool_exec(command: str, workdir: str = "/home/sandbox", timeout: int = 60) -
         print(f"[exec] $ {command[:120]}  (timeout: {timeout}→{effective}s, MCP auto-extend)", flush=True)
     else:
         print(f"[exec] $ {command[:120]}", flush=True)
+    _t_pre_run = _te.time()
     try:
         result = subprocess.run(
             command, shell=True, cwd=workdir,
             capture_output=True, text=True, timeout=effective,
         )
+        _t_post_run = _te.time()
         out = result.stdout[-3000:] if len(result.stdout) > 3000 else result.stdout
         err = result.stderr[-1000:] if len(result.stderr) > 1000 else result.stderr
+        print(f"[exec:timing] review={round((_t_review-_t0)*1000)}ms "
+              f"subprocess={round((_t_post_run-_t_pre_run)*1000)}ms "
+              f"total={round((_t_post_run-_t0)*1000)}ms "
+              f"exit={result.returncode} out={len(result.stdout)}b err={len(result.stderr)}b", flush=True)
         return {"stdout": out, "stderr": err, "exit_code": result.returncode}
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": f"timeout after {effective}s", "exit_code": -1}
