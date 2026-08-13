@@ -172,9 +172,12 @@
       app.innerHTML = `<div class="state-screen"><div class="state-icon">⏰</div><div class="state-title">链接已过期</div><div class="state-desc">此链接已超过有效期，如需帮助请联系工作人员。</div></div>`;
     }
 
-    function showAlreadySubmitted(status) {
-      const labels = { processing: 'AI 处理中，请耐心等待', done: '已处理完成' };
-      app.innerHTML = `<div class="state-screen"><div class="state-icon">✅</div><div class="state-title">已成功提交</div><div class="state-desc">${labels[status] || '您已提交过信息，工作人员将尽快处理。'}</div></div>`;
+    function showAlreadySubmitted(status, reportUrl) {
+      const labels = { processing: 'AI 处理中，请耐心等待', done: '报告已生成！', patient_confirmed: '报告已确认', patient_rejected: '报告已标记有误' };
+      const reportBtn = (status === 'done' || status === 'patient_confirmed' || status === 'patient_rejected') && reportUrl
+        ? `<a href="${reportUrl}" style="display:inline-block;margin-top:18px;padding:12px 28px;background:#16a34a;color:#fff;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;">📋 查看报告</a>`
+        : '';
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">${status === 'done' ? '📋' : '✅'}</div><div class="state-title">已成功提交</div><div class="state-desc">${labels[status] || '您已提交过信息，工作人员将尽快处理。'}</div>${reportBtn}</div>`;
     }
 
     function showSuccess() {
@@ -329,7 +332,7 @@
         const data = await res.json();
         if (res.status === 410 || data.code === 'EXPIRED') { showExpired(); return; }
         if (!res.ok) { showError(data.error || '链接无效'); return; }
-        if (data.already_submitted) { showAlreadySubmitted(data.status); return; }
+        if (data.already_submitted) { showAlreadySubmitted(data.status, data.report_url); return; }
         h5Config = data.h5_config;
         ticketId = data.ticket_id;
         document.title = data.h5_config?.title || data.skill_name || '信息提交';

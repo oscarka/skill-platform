@@ -41,8 +41,14 @@ h5Router.get('/:token', async (req, res) => {
     if (Date.now() > ticket.expires_at && ticket.status === 'waiting_input')
       return res.status(410).json({ error: 'This link has expired. Please contact the staff.', code: 'EXPIRED' });
 
-    if (ticket.status === 'submitted' || ticket.status === 'processing' || ticket.status === 'done')
-      return res.json({ already_submitted: true, status: ticket.status, message: '您已成功提交，AI 正在处理或已完成，请耐心等待工作人员反馈。' });
+    if (ticket.status === 'submitted' || ticket.status === 'processing') {
+      return res.json({ already_submitted: true, status: ticket.status, message: '您已成功提交，AI 正在处理，请耐心等待工作人员反馈。' });
+    }
+    if (ticket.status === 'done' || ticket.status === 'patient_confirmed' || ticket.status === 'patient_rejected') {
+      const serviceBase = process.env.SERVICE_URL || process.env.PUBLIC_BASE_URL || '';
+      const report_url = `${serviceBase}/api/results/${ticket.id}/report`;
+      return res.json({ already_submitted: true, status: ticket.status, report_url, message: '报告已生成，点击查看' });
+    }
 
     if (ticket.status === 'created') {
       await db.runAsync(`UPDATE tickets SET status='waiting_input', updated_at=? WHERE id=?`, [Date.now(), ticket.id]);
