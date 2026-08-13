@@ -1280,7 +1280,26 @@ async function handleHealthSkill(
         }
 
         if (reply) {
+          // 把当前 requestId 写入票据，供后续回调写 AgentLogs 使用
+          void db.runAsync(
+            `UPDATE tickets SET request_id=?, updated_at=? WHERE id=?`,
+            [requestId, Date.now(), existing.id]
+          );
           void appendTaskEvent(requestId, 'ticket_reused', { ticketId: existing.id, status: existing.status });
+          // done 状态：立即写 skill_done + reply_sent（不等回调）
+          if (existing.status === 'done') {
+            void appendTaskEvent(requestId, 'skill_done', {
+              ticketId: existing.id, skillName,
+              outputLen: (existing.raw_result || reply).length,
+              output_preview: reply.slice(0, 200),
+              report_url: reportUrl,
+            });
+            void appendTaskEvent(requestId, 'reply_sent', {
+              reply: reply.slice(0, 300),
+              channel: delivery?.app, recipient: delivery?.recipient,
+              note: 'ticket_reused_done',
+            });
+          }
           const endMs = Date.now();
           void updateAgentTask(requestId, {
             status: 'done', routeType: 'ticket_reused', skillId,
