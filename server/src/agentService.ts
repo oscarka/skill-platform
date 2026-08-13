@@ -1624,6 +1624,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   // 凭证通过 getAICredentials() 缓存获取，不重复查 DB
   const creds = await getAICredentials();
   if (!creds.apiKey) throw new Error('AI credentials not configured. Set DOUBAO_API_KEY or GEMINI_API_KEY.');
+  const apiKey = creds.apiKey;  // 保持下方代码兼容
 
   const requestId  = `req_${uuidv4().replace(/-/g, '').slice(0, 10)}`;
   const serviceUrl = process.env.SERVICE_URL || '';
