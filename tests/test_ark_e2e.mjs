@@ -1,52 +1,40 @@
 #!/usr/bin/env node
 /**
- * 测试 DeepSeek V4 Flash (Volcano ARK) 路径
- * 用 PATCH /api/skills/:id/model 设置 preferred_model（支持 published skill）
+ * ARK 路径 E2E 测试
+ * 默认模型已是 deepseek-v4-flash-ga-260731（ARK 火山），无需手动设置 preferred_model
+ * 直接创建工单 → 提交 → 验证是否走 ARK 路径并完成
  */
 
 const BASE = 'https://skill-platform-yo5337ccva-de.a.run.app';
+const SKILL_NAME = 'AI营养师';
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function main() {
   console.log('═'.repeat(60));
-  console.log('  DeepSeek V4 Flash (ARK) 路径测试');
+  console.log('  DeepSeek V4 Flash (ARK) 默认路径 E2E 测试');
   console.log('═'.repeat(60));
 
-  // 1. 找到 AI营养师 skill
+  // 1. 找 skill
   const skillsData = await (await fetch(`${BASE}/api/skills`)).json();
-  const skill = (skillsData.skills || []).find(s => s.name === 'AI营养师');
-  if (!skill) { console.error('❌ 找不到 AI营养师 skill'); process.exit(1); }
-  console.log(`✅ skill: ${skill.name} (id=${skill.id}) status=${skill.status} preferred_model=${skill.preferred_model||'(none)'}`);
+  const skill = (skillsData.skills || []).find(s => s.name === SKILL_NAME);
+  if (!skill) { console.error(`❌ 找不到 ${SKILL_NAME}`); process.exit(1); }
+  console.log(`✅ skill: ${skill.name}  status=${skill.status}  preferred_model=${skill.preferred_model || '(none=默认ARK)'}`);
 
-  const origModel = skill.preferred_model || null;
-  const arkModel  = 'deepseek-v4-flash-ga-260731';
-
-  // 2. 用 PATCH /api/skills/:id/model 设置（支持 published skill）
-  console.log(`\n📝 PATCH preferred_model → ${arkModel}`);
-  const patchRes = await fetch(`${BASE}/api/skills/${skill.id}/model`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ preferred_model: arkModel }),
-  });
-  const patchData = await patchRes.json();
-  if (!patchRes.ok) { console.error('❌ PATCH 失败:', JSON.stringify(patchData)); process.exit(1); }
-  console.log(`✅ preferred_model 更新为: ${patchData.skill?.preferred_model}`);
-
-  // 3. 创建工单
+  // 2. 创建工单
   const ticketData = await (await fetch(`${BASE}/api/tickets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skill_id: skill.id, patient_name: 'ARK测试用户' }),
+    body: JSON.stringify({ skill_id: skill.id, patient_name: 'ARK默认模型测试' }),
   })).json();
   const ticketId = ticketData.ticket?.id;
   const token    = ticketData.ticket?.token;
   if (!ticketId) { console.error('❌ 创建工单失败:', JSON.stringify(ticketData)); process.exit(1); }
   console.log(`✅ 工单创建: ${ticketId}`);
 
-  // 4. 提交表单（正确路径: /api/h5/:token/submit）
+  // 3. 提交表单
   const fields = JSON.stringify({
-    name: 'ARK测试用户', age: '35', gender: '男', height: '175', weight: '75',
+    name: 'ARK默认模型测试', age: '35', gender: '男', height: '175', weight: '75',
     nutrition_goal: '控制血压，保持健康体重',
     diet_preference: '低盐清淡', activity_level: '轻度活动', allergies: '无',
   });
@@ -59,7 +47,7 @@ async function main() {
   if (!submitData.success) { console.error('❌ 提交失败:', JSON.stringify(submitData)); process.exit(1); }
   console.log(`✅ 表单提交成功`);
 
-  // 5. 轮询（最多 5 分钟）
+  // 4. 轮询（最多 5 分钟）
   console.log('\n⏳ 等待 AI 处理 (最多5分钟)...');
   const t0 = Date.now();
   let status = 'submitted';
@@ -76,25 +64,18 @@ async function main() {
 
   console.log('─'.repeat(60));
   if (status === 'done' && result?.raw_result) {
-    console.log(`✅ 成功！耗时: ${elapsed}s  model: ${arkModel}`);
-    console.log(`   输出: ${result.raw_result.length}字`);
-    console.log(`   预览: ${result.raw_result.slice(0,120)}...`);
+    const len = result.raw_result.length;
+    console.log(`✅ 成功！耗时: ${elapsed}s  输出: ${len}字`);
+    console.log(`   预览: ${result.raw_result.slice(0, 120)}...`);
     console.log(`   报告: ${BASE}/api/results/${ticketId}/report`);
+    if (len < 1000) console.warn(`⚠️  输出偏短（${len}字），可能 token 被截断`);
   } else {
     console.error(`❌ 失败 status=${status} elapsed=${elapsed}s`);
-    if (result?.raw_result) console.error('   错误:', result.raw_result.slice(0,300));
+    if (result?.raw_result) console.error('   错误:', result.raw_result.slice(0, 300));
+    process.exit(1);
   }
 
-  // 6. 恢复 preferred_model
-  await fetch(`${BASE}/api/skills/${skill.id}/model`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ preferred_model: origModel }),
-  });
-  console.log(`✅ 已恢复 preferred_model → ${origModel||'(none)'}`);
-
-  console.log(status === 'done' ? '\n✅ ARK 路径测试通过！' : '\n❌ ARK 路径测试失败');
-  process.exit(status === 'done' ? 0 : 1);
+  console.log('\n' + (status === 'done' ? '✅ ARK 默认路径测试通过！' : '❌ 测试失败'));
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

@@ -253,7 +253,8 @@ _MODEL_CONFIGS: dict = {
     "doubao-lite-32k":              {"context_window": 32_000,  "max_output": 4_096,   "max_input": 28_000,  "provider": "doubao"},
     # ── DeepSeek 系列 ────────────────────────────────────────────────────
     "deepseek-chat":                {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
-    "deepseek-v4-flash":           {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},  # DeepSeek V4 Flash 0731
+    "deepseek-v4-flash":            {"context_window": 64_000,  "max_output": 32_000,  "max_input": 56_000,  "provider": "doubao"},   # ARK 火山：DeepSeek V4 Flash，实际支持 32k 输出
+    "deepseek-v4-flash-ga-260731":  {"context_window": 64_000,  "max_output": 32_000,  "max_input": 56_000,  "provider": "doubao"},   # ARK 完整 endpoint model name（同上）
     "deepseek-coder":               {"context_window": 64_000,  "max_output": 8_192,   "max_input": 56_000,  "provider": "deepseek"},
     "deepseek-reasoner":            {"context_window": 64_000,  "max_output": 16_000,  "max_input": 56_000,  "provider": "deepseek"},
     # ── Gemini 系列 ─────────────────────────────────────────────────────────

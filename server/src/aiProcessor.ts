@@ -337,14 +337,15 @@ async function getGeminiKey(): Promise<string> {
 }
 
 /** 根据模型名称选择正确的 API key + base URL
- *  - gemini-* → Gemini key + generativelanguage endpoint
- *  - 其他     → Doubao/DeepSeek key + base
+ *  - gemini-* → Gemini key + generativelanguage endpoint；fallback = doubao/deepseek key
+ *  - 其他    → Doubao key + ARK endpoint；fallback = Gemini（防止 ARK 故障时幼炴）
  */
 async function resolveApiCreds(effectiveModel: string): Promise<{
   aiKey: string; aiBase: string; fallbackKey: string; fallbackBase: string;
 }> {
   const isGemini = effectiveModel.toLowerCase().startsWith('gemini');
   if (isGemini) {
+    // Gemini primary，fallback = doubao/deepseek key
     const geminiKey = await getGeminiKey();
     const [fallbackKey, fallbackBase] = await Promise.all([
       getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
@@ -352,13 +353,13 @@ async function resolveApiCreds(effectiveModel: string): Promise<{
     ]);
     return { aiKey: geminiKey, aiBase: GEMINI_BASE_URL, fallbackKey, fallbackBase };
   } else {
-    const [aiKey, aiBase, fallbackKey, fallbackBase] = await Promise.all([
+    // ARK/Doubao primary，fallback = Gemini（避免 ARK 故障时无法使用）
+    const [aiKey, aiBase, geminiKey] = await Promise.all([
       getSetting('doubao_api_key').then(k => k || getSetting('deepseek_api_key')),
       getSetting('doubao_base_url').then(u => u || getSetting('deepseek_base_url')),
-      getSetting('doubao_api_key').then(k => k ? getSetting('deepseek_api_key') : getSetting('doubao_api_key')),
-      getSetting('doubao_base_url').then(u => u ? getSetting('deepseek_base_url') : getSetting('doubao_base_url')),
+      getGeminiKey(),
     ]);
-    return { aiKey, aiBase, fallbackKey, fallbackBase };
+    return { aiKey, aiBase, fallbackKey: geminiKey, fallbackBase: GEMINI_BASE_URL };
   }
 }
 
@@ -431,8 +432,8 @@ async function submitTicketToSandboxService(
   const callbackUrl = svcUrl ? `${svcUrl}/api/tickets/${ticketId}/agent-callback` : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  // model: overrideModel > skill.preferred_model > 默认 gemini-3.6-flash（与渠道保持一致）
-  const effectiveModel = overrideModel || skill.preferred_model || 'gemini-3.6-flash';
+  // model: overrideModel > skill.preferred_model > 默认 deepseek-v4-flash-ga-260731（主模型 ARK，fallback Gemini）
+  const effectiveModel = overrideModel || skill.preferred_model || 'deepseek-v4-flash-ga-260731';
   const { aiKey, aiBase, fallbackKey, fallbackBase } = await resolveApiCreds(effectiveModel);
   console.log(`[SandboxService] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'}`);
 
@@ -530,8 +531,8 @@ async function submitTicketAgentJob(
     : '';
   const sandboxSecret = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
 
-  // model: overrideModel > skill.preferred_model > 默认 gemini-3.6-flash（与渠道保持一致）
-  const effectiveModel = overrideModel || skill.preferred_model || 'gemini-3.6-flash';
+  // model: overrideModel > skill.preferred_model > 默认 deepseek-v4-flash-ga-260731（主模型 ARK，fallback Gemini）
+  const effectiveModel = overrideModel || skill.preferred_model || 'deepseek-v4-flash-ga-260731';
   const { aiKey, aiBase, fallbackKey, fallbackBase } = await resolveApiCreds(effectiveModel);
   console.log(`[TicketAgent] model resolution: override=${overrideModel} preferred=${skill.preferred_model} → effective=${effectiveModel} key=${aiKey ? 'SET' : 'MISSING'}`);
 
