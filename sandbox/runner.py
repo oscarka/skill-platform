@@ -38,6 +38,47 @@ if _dns_warm_host:
               f"({round((_t_warm1-_t_warm0)*1000)}ms)", flush=True)
     except Exception as _we:
         print(f"[init] DNS pre-warm failed: {_we}", flush=True)
+
+# ⚡ 持久 HTTPS 连接池：避免每次 LLM 调用都新建 TLS 连接
+# SSL EOF 的根因是频繁新建连接被 Google LB reset
+# 用 http.client.HTTPSConnection 复用 TCP+TLS 连接
+import http.client as _http_client
+_PERSISTENT_CONNS: dict = {}  # host -> HTTPSConnection
+
+def _get_persistent_conn(host: str, port: int = 443) -> _http_client.HTTPSConnection:
+    """获取或创建持久 HTTPS 连接"""
+    key = f"{host}:{port}"
+    conn = _PERSISTENT_CONNS.get(key)
+    if conn:
+        # 检查连接是否还活着
+        try:
+            conn.request("HEAD", "/", headers={"Host": host})
+            resp = conn.getresponse()
+            resp.read()  # drain
+            return conn
+        except Exception:
+            # 连接已断开，重新创建
+            try: conn.close()
+            except: pass
+            del _PERSISTENT_CONNS[key]
+    
+    # 创建新连接
+    conn = _http_client.HTTPSConnection(host, port, context=_SSL_CTX, timeout=120)
+    conn.connect()
+    _PERSISTENT_CONNS[key] = conn
+    print(f"[conn-pool] new connection to {key}", flush=True)
+    return conn
+
+# 预热：在进程启动时建立到 Gemini API 的 TLS 连接
+if _dns_warm_host:
+    try:
+        _t_conn0 = _init_time.time()
+        _warm_conn = _get_persistent_conn(_dns_warm_host, 443)
+        _t_conn1 = _init_time.time()
+        print(f"[init] TLS pre-warm: {_dns_warm_host} connected "
+              f"({round((_t_conn1-_t_conn0)*1000)}ms)", flush=True)
+    except Exception as _ce:
+        print(f"[init] TLS pre-warm failed: {_ce}", flush=True)
 # 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
 _home = os.path.expanduser("~")
 if os.getcwd() == "/" and os.path.isdir(_home):
@@ -1226,57 +1267,10 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             print(f"[llm] network error after {elapsed_ms}ms (attempt {attempt+1}/3): {err_str[:120]}", flush=True)
 
             # ── SSL 诊断：失败时记录完整 traceback + 链路信息 ──────────────
-            print(f"[llm:diag:FAIL] === SSL EOF 详细诊断 ===", flush=True)
-            print(f"[llm:diag:FAIL] full_error: {type(e).__name__}: {e}", flush=True)
-            print(f"[llm:diag:FAIL] error_chain: {type(e).__name__}", flush=True)
-            _cause = e
-            while _cause.__cause__ or _cause.__context__:
-                _cause = _cause.__cause__ or _cause.__context__
-                print(f"[llm:diag:FAIL]   <- {type(_cause).__name__}: {_cause}", flush=True)
-            print(f"[llm:diag:FAIL] traceback:\n{_tb.format_exc()}", flush=True)
-            print(f"[llm:diag:FAIL] body_bytes={body_len} model={use_model} "
-                  f"timeout={first_token_timeout} attempt={attempt+1}", flush=True)
-
-            # 尝试直接用 http.client 做一次快速诊断连接
-            try:
-                import http.client as _hc
-                _t_diag0 = _t2.time()
-                _diag_conn = _hc.HTTPSConnection(_host, _port, timeout=10, context=_SSL_CTX)
-                _diag_conn.request("POST", "/v1beta/openai/chat/completions",
-                                   body=b'{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":5}',
-                                   headers={"Authorization": f"Bearer {key}",
-                                            "Content-Type": "application/json"})
-                _diag_resp = _diag_conn.getresponse()
-                _diag_body = _diag_resp.read()
-                _t_diag1 = _t2.time()
-                print(f"[llm:diag:FAIL] quick_probe: status={_diag_resp.status} "
-                      f"ms={round((_t_diag1-_t_diag0)*1000)} body={len(_diag_body)}b", flush=True)
-                _diag_conn.close()
-            except Exception as _pe:
-                print(f"[llm:diag:FAIL] quick_probe ALSO FAILED: {type(_pe).__name__}: {_pe}", flush=True)
-
-            # 再用全新 SSL context 试一次
-            try:
-                import ssl as _ssl2
-                _fresh_ctx = _ssl2.create_default_context()
-                _t_diag2 = _t2.time()
-                _diag_conn2 = _hc.HTTPSConnection(_host, _port, timeout=10, context=_fresh_ctx)
-                _diag_conn2.request("POST", "/v1beta/openai/chat/completions",
-                                    body=b'{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":5}',
-                                    headers={"Authorization": f"Bearer {key}",
-                                             "Content-Type": "application/json"})
-                _diag_resp2 = _diag_conn2.getresponse()
-                _diag_body2 = _diag_resp2.read()
-                _t_diag3 = _t2.time()
-                print(f"[llm:diag:FAIL] fresh_ctx_probe: status={_diag_resp2.status} "
-                      f"ms={round((_t_diag3-_t_diag2)*1000)} body={len(_diag_body2)}b", flush=True)
-                _diag_conn2.close()
-                if _diag_resp2.status == 200:
-                    print(f"[llm:diag:FAIL] ⚠️ FRESH SSL CTX WORKS! _SSL_CTX may be corrupted!", flush=True)
-            except Exception as _pe2:
-                print(f"[llm:diag:FAIL] fresh_ctx_probe ALSO FAILED: {type(_pe2).__name__}: {_pe2}", flush=True)
-
-            print(f"[llm:diag:FAIL] === 诊断结束 ===", flush=True)
+            print(f"[llm:diag:FAIL] SSL EOF: {type(e).__name__}: {e} "
+                  f"body_bytes={body_len} attempt={attempt+1}", flush=True)
+            # 不再做 quick_probe / fresh_ctx_probe（各花 8-10s）
+            # SSL EOF 是概率性的，直接快速重试即可
 
             _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
                 "step": "网络重试", "detail": f"attempt {attempt+1} 失败（{elapsed_ms}ms）: {err_str[:80]}"})
