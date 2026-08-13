@@ -552,8 +552,9 @@ class _PersistentShell:
     
     def exec(self, command: str, workdir: str, timeout: int) -> tuple:
         """通过 stdin 发命令给 shell，用 marker 分隔输出"""
+        import time as _tw
+        _t0 = _tw.time()
         marker = f"__DONE_{_uuid_mod.uuid4().hex[:8]}__"
-        # 构造脚本：cd + 执行 + 标记分隔 stdout/stderr/exit_code
         script = (
             f"cd {workdir} 2>/dev/null\n"
             f"( {command} ) 2>/tmp/_se$$.txt\n"
@@ -565,8 +566,10 @@ class _PersistentShell:
             f"echo '{marker}_END'\n"
             f"rm -f /tmp/_se$$.txt\n"
         )
+        _t_script = _tw.time()
         
         with self._lock:
+            _t_lock = _tw.time()
             if self._proc is None or self._proc.poll() is not None:
                 print("[shell-worker] restarting dead shell", flush=True)
                 self._start()
@@ -579,18 +582,22 @@ class _PersistentShell:
                 self._start()
                 self._proc.stdin.write(script.encode())
                 self._proc.stdin.flush()
+            _t_write = _tw.time()
             
             # 读取输出直到 end marker
             output_lines = []
-            import time as _tw
             _deadline = _tw.time() + timeout
+            _t_first_line = None
+            _line_count = 0
             
             while _tw.time() < _deadline:
                 try:
-                    self._proc.stdout.flush() if hasattr(self._proc.stdout, 'flush') else None
                     line = self._proc.stdout.readline()
                     if not line:
                         break
+                    _line_count += 1
+                    if _t_first_line is None:
+                        _t_first_line = _tw.time()
                     decoded = line.decode("utf-8", errors="replace").rstrip("\n")
                     if decoded == f"{marker}_END":
                         break
@@ -599,12 +606,13 @@ class _PersistentShell:
                     print(f"[shell-worker] read error: {e}", flush=True)
                     break
             else:
-                # 超时 - kill 并重启
                 print(f"[shell-worker] timeout after {timeout}s", flush=True)
                 self._start()
                 raise subprocess.TimeoutExpired(command, timeout)
         
-        # 解析：stdout lines + marker + stderr lines + marker + exit_code
+        _t_read_done = _tw.time()
+        
+        # 解析
         full = "\n".join(output_lines)
         parts = full.split(marker)
         if len(parts) >= 3:
@@ -618,6 +626,17 @@ class _PersistentShell:
             stdout_str = full
             stderr_str = ""
             exit_code = -1
+        
+        _t_end = _tw.time()
+        # 详细计时日志
+        _lock_ms = round((_t_lock - _t_script) * 1000)
+        _write_ms = round((_t_write - _t_lock) * 1000)
+        _first_ms = round(((_t_first_line or _t_read_done) - _t_write) * 1000)
+        _read_ms = round((_t_read_done - (_t_first_line or _t_write)) * 1000)
+        _total_ms = round((_t_end - _t0) * 1000)
+        print(f"[shell:detail] cmd={command[:60]} lock={_lock_ms}ms write={_write_ms}ms "
+              f"first_line={_first_ms}ms read={_read_ms}ms lines={_line_count} "
+              f"total={_total_ms}ms", flush=True)
         
         return stdout_str, stderr_str, exit_code
 
