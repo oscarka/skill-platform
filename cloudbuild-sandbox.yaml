@@ -69,6 +69,8 @@ steps:
       - --image=asia-east1-docker.pkg.dev/gen-lang-client-0884226164/skill-platform/sandbox:latest
       - --region=asia-east1
       - --task-timeout=2000
+      - --cpu=2
+      - --memory=2Gi
       - --command=python3
       - --args=/runner.py
     waitFor: [push-sandbox]

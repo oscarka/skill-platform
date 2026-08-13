@@ -46,21 +46,11 @@ import http.client as _http_client
 _PERSISTENT_CONNS: dict = {}  # host -> HTTPSConnection
 
 def _get_persistent_conn(host: str, port: int = 443) -> _http_client.HTTPSConnection:
-    """获取或创建持久 HTTPS 连接"""
+    """获取或创建持久 HTTPS 连接（不做健康检查，失败时在调用侧重试）"""
     key = f"{host}:{port}"
     conn = _PERSISTENT_CONNS.get(key)
     if conn:
-        # 检查连接是否还活着
-        try:
-            conn.request("HEAD", "/", headers={"Host": host})
-            resp = conn.getresponse()
-            resp.read()  # drain
-            return conn
-        except Exception:
-            # 连接已断开，重新创建
-            try: conn.close()
-            except: pass
-            del _PERSISTENT_CONNS[key]
+        return conn
     
     # 创建新连接
     conn = _http_client.HTTPSConnection(host, port, context=_SSL_CTX, timeout=120)
@@ -1138,6 +1128,13 @@ def _parse_sse_stream(r, t_connect: float = None) -> dict:
     for c in choices.values():
         if not c["message"].get("tool_calls"):
             c["message"].pop("tool_calls", None)
+
+    # 确保 response 被完全读完+关闭，让 HTTPSConnection 可以复用
+    try:
+        r.read()  # drain any remaining bytes
+        r.close()
+    except Exception:
+        pass
 
     _total_s = round(_t.time() - _t_start, 1)
     _p_tok = usage.get("prompt_tokens", "?") if usage else "?"
