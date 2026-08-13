@@ -462,6 +462,30 @@ async function getGeminiKey(): Promise<string> {
   return (await getSetting('gemini_api_key')) || process.env.GEMINI_API_KEY || '';
 }
 
+async function getAICredentials(): Promise<{ apiKey: string; baseUrl: string; model: string; provider: string }> {
+  // ARK (DeepSeek) 为默认，Gemini 为 fallback
+  const [doubaoKey, doubaoBase, geminiKey] = await Promise.all([
+    getSetting('doubao_api_key').then((k: string) => k || getSetting('deepseek_api_key')),
+    getSetting('doubao_base_url').then((u: string) => u || getSetting('deepseek_base_url')),
+    getGeminiKey(),
+  ]);
+  if (doubaoKey && doubaoBase) {
+    return {
+      apiKey:  doubaoKey,
+      baseUrl: doubaoBase.replace(/\/$/, ''),
+      model:   'deepseek-v4-flash-ga-260731',
+      provider: 'ark',
+    };
+  }
+  // fallback to Gemini
+  return {
+    apiKey:  geminiKey,
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model:   'gemini-3.6-flash',
+    provider: 'gemini',
+  };
+}
+
 async function getSandboxSettings() {
   const [model, doubaoKey, doubaoBase, deepseekKey, deepseekBase] = await Promise.all([
     getSetting('ai_model'),
@@ -473,7 +497,8 @@ async function getSandboxSettings() {
   return { model, doubaoKey, doubaoBase, deepseekKey, deepseekBase };
 }
 
-// ─── Gemini 3.6 Flash multi-turn call (OpenAI-compat endpoint) ───────────────
+// ─── AI multi-turn call (ARK/DeepSeek 默认，Gemini fallback) ────────────────────
+// 保留 callGeminiMessages 名称硬兼容，内部动态选择 ARK 或 Gemini
 
 async function callGeminiMessages(
   systemPrompt: string,
@@ -483,23 +508,25 @@ async function callGeminiMessages(
   options?: {
     tools?: any[];
     userId?: string;
-    onToolCall?: (name: string, args: any, result: string) => void;  // Step 6: tool call 事件回调
+    onToolCall?: (name: string, args: any, result: string) => void;
   },
 ): Promise<string> {
-  const BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+  // 动态获取凭证（忽略外部传入的 apiKey，统一走 settings DB）
+  const creds = await getAICredentials();
+  const BASE  = creds.baseUrl;
   const tools = options?.tools;
   const userId = options?.userId || '';
 
-  // 构造初始消息列表（可变，tool call 循环中会追加）
+  // 构造初始消息列表
   const allMessages: any[] = [
     { role: 'system', content: systemPrompt },
     ...messages,
   ];
 
-  // 最多允许 3 轮 tool call（防止死循环）
+  // 最多 4 轮 tool call
   for (let round = 0; round < 4; round++) {
     const reqBody: any = {
-      model:      'gemini-3.6-flash',
+      model:      creds.model,
       messages:   allMessages,
       max_tokens: maxTokens,
       stream:     false,
@@ -511,7 +538,7 @@ async function callGeminiMessages(
     const res = await fetch(`${BASE}/chat/completions`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${creds.apiKey}`,
         'Content-Type':  'application/json',
       },
       body: JSON.stringify(reqBody),
@@ -520,7 +547,7 @@ async function callGeminiMessages(
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
+      throw new Error(`AI API error ${res.status} [${creds.provider}]: ${errText.slice(0, 200)}`);
     }
 
     const data = await res.json() as any;
@@ -1322,7 +1349,7 @@ async function handleHealthSkill(
     : '';
 
   const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
-  const effectiveModel = skillRow?.preferred_model || 'gemini-3.6-flash';
+  const effectiveModel = skillRow?.preferred_model || 'deepseek-v4-flash-ga-260731';
   const isApproved = skillRow?.status === 'approved' || skillRow?.status === 'published';
 
   try {
