@@ -52,6 +52,8 @@ async function h5BaseUrl(): Promise<string> {
 }
 
 async function ticketToResponse(t: TicketRecord, skill?: any) {
+  const base = (await h5BaseUrl()).replace(/\/h5$/, '');
+  const reportUrl = t.status === 'done' ? `${base}/api/results/${t.id}/report` : null;
   return {
     id: t.id,
     skill_id: t.skill_id,
@@ -73,8 +75,11 @@ async function ticketToResponse(t: TicketRecord, skill?: any) {
     expires_at: t.expires_at,
     created_at: t.created_at,
     updated_at: t.updated_at,
+    report_url: reportUrl,  // done 状态才有值，供前端和测试直接读取
+    request_id: t.request_id || null,
   };
 }
+
 
 // ─── POST /api/tickets — Create ticket ────────────────────────────────────────
 ticketRouter.post('/', async (req, res) => {
