@@ -46,31 +46,103 @@ pool.on('error', (err) => {
 console.log(`[DB] PostgreSQL pool initialized → schema: ${DB_SCHEMA}`);
 
 
-// ─── Async helpers ─────────────────────────────────────────────────────────────
+// ─── Async helpers (with split-phase timing + slow query log) ────────────────
+
+const SLOW_QUERY_MS = 500;
+
+function logQueryTiming(op: string, sql: string, connectMs: number, queryMs: number) {
+  const totalMs = connectMs + queryMs;
+  const sqlPreview = sql.replace(/\s+/g, ' ').slice(0, 80);
+  if (totalMs > SLOW_QUERY_MS) {
+    const poolStats = `pool(total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount})`;
+    console.warn(`[DB][SLOW] ${op} connect=${connectMs}ms query=${queryMs}ms total=${totalMs}ms ${poolStats} SQL: ${sqlPreview}`);
+  }
+}
 
 /** Execute INSERT/UPDATE/DELETE */
 export async function runAsync(sql: string, params: any[] = []): Promise<void> {
+  const t0 = Date.now();
   const pgSql = toPostgresSql(sql, params);
+  const t1 = Date.now();
   await pool.query(pgSql.sql, pgSql.params);
+  logQueryTiming('RUN', sql, t1 - t0, Date.now() - t1);
 }
 
 /** Fetch single row */
 export async function getAsync<T>(sql: string, params: any[] = []): Promise<T | undefined> {
+  const t0 = Date.now();
   const pgSql = toPostgresSql(sql, params);
+  const t1 = Date.now();
   const result = await pool.query(pgSql.sql, pgSql.params);
+  logQueryTiming('GET', sql, t1 - t0, Date.now() - t1);
   return result.rows[0] as T | undefined;
 }
 
 /** Fetch all rows */
 export async function allAsync<T>(sql: string, params: any[] = []): Promise<T[]> {
+  const t0 = Date.now();
   const pgSql = toPostgresSql(sql, params);
+  const t1 = Date.now();
   const result = await pool.query(pgSql.sql, pgSql.params);
+  logQueryTiming('ALL', sql, t1 - t0, Date.now() - t1);
   return result.rows as T[];
 }
 
 /** Execute raw SQL (for schema creation) */
 export async function execAsync(sql: string): Promise<void> {
   await pool.query(sql);
+}
+
+/**
+ * withClient: 多个 DB 操作共享同一个连接，只占用 1 个 pool slot。
+ * 解决 ticketRoutes callback 里 N 次串行 runAsync/getAsync 各占 1 个连接导致 pool 打满的问题。
+ * 用法：
+ *   await withClient(async (q) => {
+ *     const row = await q.get<any>('SELECT ...', [id]);
+ *     await q.run('UPDATE ...', [...]);
+ *   });
+ */
+export async function withClient<T>(
+  fn: (q: {
+    run: (sql: string, params?: any[]) => Promise<void>;
+    get: <R>(sql: string, params?: any[]) => Promise<R | undefined>;
+    all: <R>(sql: string, params?: any[]) => Promise<R[]>;
+  }) => Promise<T>
+): Promise<T> {
+  const t0 = Date.now();
+  const client = await pool.connect();
+  const connectMs = Date.now() - t0;
+  if (connectMs > SLOW_QUERY_MS) {
+    const poolStats = `pool(total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount})`;
+    console.warn(`[DB][SLOW] withClient connect=${connectMs}ms ${poolStats}`);
+  }
+  try {
+    const q = {
+      run: async (sql: string, params: any[] = []) => {
+        const pgSql = toPostgresSql(sql, params);
+        const t1 = Date.now();
+        await client.query(pgSql.sql, pgSql.params);
+        logQueryTiming('RUN', sql, 0, Date.now() - t1);
+      },
+      get: async <R>(sql: string, params: any[] = []): Promise<R | undefined> => {
+        const pgSql = toPostgresSql(sql, params);
+        const t1 = Date.now();
+        const result = await client.query(pgSql.sql, pgSql.params);
+        logQueryTiming('GET', sql, 0, Date.now() - t1);
+        return result.rows[0] as R | undefined;
+      },
+      all: async <R>(sql: string, params: any[] = []): Promise<R[]> => {
+        const pgSql = toPostgresSql(sql, params);
+        const t1 = Date.now();
+        const result = await client.query(pgSql.sql, pgSql.params);
+        logQueryTiming('ALL', sql, 0, Date.now() - t1);
+        return result.rows as R[];
+      },
+    };
+    return await fn(q);
+  } finally {
+    client.release();
+  }
 }
 
 // ─── SQLite → PostgreSQL SQL 转换 ──────────────────────────────────────────────

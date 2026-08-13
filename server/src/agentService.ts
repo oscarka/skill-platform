@@ -20,11 +20,33 @@ import { submitToSandboxService } from './sandboxServiceClient';
 
 import { EventEmitter } from 'events';
 
-// ─── Agent Task Tracking ─────────────────────────────────────────────────────
+// ─── Agent Task Tracking ──────────────────────────────────────────────────────────
 // 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
 // SSE real-time push via EventEmitter
 export const taskEventBus = new EventEmitter();
 taskEventBus.setMaxListeners(50); // allow many SSE connections
+
+// ─── Fire-and-forget 写入队列 ─────────────────────────────────────────────
+// 核心问题：每次 void appendTaskEvent/updateAgentTask 都 await db.runAsync(),
+// 占用 pool 连接 1-3s（跨太平洋延迟）。并发写入会耗尽连接池，导致主流程的关键查询 timeout。
+// 解决：串行队列，同一时间只用 1 个连接处理非关键写入。
+const _writeQueue: Array<() => Promise<void>> = [];
+let _writeQueueRunning = false;
+
+function enqueueWrite(fn: () => Promise<void>) {
+  _writeQueue.push(fn);
+  if (!_writeQueueRunning) _drainWriteQueue();
+}
+
+async function _drainWriteQueue() {
+  _writeQueueRunning = true;
+  while (_writeQueue.length > 0) {
+    const fn = _writeQueue.shift()!;
+    try { await fn(); }
+    catch (err: any) { console.warn('[AgentTask][Queue] write failed:', err.message); }
+  }
+  _writeQueueRunning = false;
+}
 
 export async function createAgentTask(opts: {
   id: string; sessionId: string; userId: string;
@@ -40,12 +62,12 @@ export async function createAgentTask(opts: {
   } catch (err: any) { console.warn('[AgentTask] createAgentTask failed:', err.message); }
 }
 
-export async function updateAgentTask(id: string, fields: {
+export function updateAgentTask(id: string, fields: {
   status?: string; routeType?: string; skillId?: string;
   replyContent?: string; errorMessage?: string; endedAt?: number; durationMs?: number;
   jobTranscript?: string; contextSnapshot?: string; cuaEvents?: string;
-}): Promise<void> {
-  try {
+}): void {
+  enqueueWrite(async () => {
     const sets: string[] = []; const vals: any[] = [];
     if (fields.status       !== undefined) { sets.push('status=?');        vals.push(fields.status); }
     if (fields.routeType    !== undefined) { sets.push('route_type=?');    vals.push(fields.routeType); }
@@ -60,20 +82,21 @@ export async function updateAgentTask(id: string, fields: {
     if (!sets.length) return;
     vals.push(id);
     await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);
-  } catch (err: any) { console.warn('[AgentTask] updateAgentTask failed:', err.message); }
+  });
 }
 
-export async function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): Promise<void> {
-  try {
-    const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const ts = Date.now();
+export function appendTaskEvent(taskId: string, eventType: string, payload?: Record<string, any>): void {
+  const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+  // SSE 推送立即执行（不等 DB 写入），保证前端实时更新
+  taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
+  // DB 写入排队
+  enqueueWrite(async () => {
     await db.runAsync(
       `INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`,
       [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, ts]
     );
-    // Push to SSE subscribers in real-time
-    taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
-  } catch (err: any) { console.warn('[AgentTask] appendTaskEvent failed:', err.message); }
+  });
 }
 
 
@@ -814,6 +837,16 @@ export interface RouteDecisionResult {
  *   confidence=low   → 健康问题但无明确 skill 意图，agent 直接回复（带健康知识）
  *   confidence=high  → 用户明确要用某个 skill，进入守卫流程
  */
+// 路由决策缓存（TTL=30s）——相同内容的相邻请求直接复用，避免首次调用 ~5s 延迟
+interface RouteCacheEntry { result: RouteDecisionResult; expireAt: number; }
+const _routeCache = new Map<string, RouteCacheEntry>();
+const ROUTE_CACHE_TTL_MS = 30_000;
+
+function _routeCacheKey(content: string, skillIds: string[]): string {
+  const contentSnip = content.trim().slice(0, 80);
+  return `${contentSnip}||${skillIds.sort().join(',')}`;
+}
+
 async function routeDecision(
   content: string,
   history: { role: string; content: string }[],
@@ -822,6 +855,14 @@ async function routeDecision(
   apiKey: string,
 ): Promise<RouteDecisionResult> {
   const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+  // 缓存命中时直接返回
+  const cacheKey = _routeCacheKey(content, availableSkills.map(s => s.id));
+  const cached = _routeCache.get(cacheKey);
+  if (cached && Date.now() < cached.expireAt) {
+    console.log(`[RouteDecision] cache hit (${Math.round((cached.expireAt - Date.now()) / 1000)}s left): confidence=${cached.result.confidence}`);
+    return cached.result;
+  }
 
   // 无可用 skill 时降级
   if (!availableSkills.length) {
@@ -884,8 +925,11 @@ ${skillList}
     }
 
     console.log(`[RouteDecision] skill=${finalSkillName || 'none'} confidence=${confidence} reason=${parsed.reason} (${durationMs}ms)`);
-    return { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
+    const rdResult = { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
              confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim() };
+    // 写入缓存
+    _routeCache.set(cacheKey, { result: rdResult, expireAt: Date.now() + ROUTE_CACHE_TTL_MS });
+    return rdResult;
 
   } catch (err) {
     const durationMs = Date.now() - t0;
