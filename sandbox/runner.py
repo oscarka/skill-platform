@@ -95,6 +95,8 @@ else:
     SKILL_MD = _fetch_skill_md_from_db()
 CALLBACK_URL  = os.environ.get("CALLBACK_URL", "")      # 进度回调 URL（存入 DB 供前端实时展示）
 SANDBOX_SECRET = os.environ.get("SANDBOX_SECRET", "")
+print(f"[init] CALLBACK_URL={'SET:'+CALLBACK_URL[:60] if CALLBACK_URL else 'EMPTY'} "
+      f"SANDBOX_SECRET={'SET('+str(len(SANDBOX_SECRET))+'chars)' if SANDBOX_SECRET else 'EMPTY'}", flush=True)
 MCP_CONFIGS   = os.environ.get("MCP_CONFIGS", "[]")      # JSON array: [{name, command, args}]
 OAUTH_TOKENS  = os.environ.get("OAUTH_TOKENS", "")       # JSON: {provider/mcp_name: {access_token, ...}}
 CASE_COUNT    = max(1, min(3, int(os.environ.get("CASE_COUNT", "1"))))  # 测试用例数（1-3）
@@ -649,6 +651,7 @@ def tool_invoke_skill(user_message: str, skill_system_prompt: str = None) -> dic
 # ─── 进度上报（stdout + HTTP POST 到平台，线程异步不阻塞主流程）──────────────
 def _post_progress(msg: dict):
     if not CALLBACK_URL:
+        print(f"[progress:skip] CALLBACK_URL is empty, skipping: {msg.get('step','?')}", flush=True)
         return
     import threading
     def _send():
@@ -659,9 +662,13 @@ def _post_progress(msg: dict):
                               headers={"Content-Type": "application/json",
                                        "X-Sandbox-Secret": SANDBOX_SECRET},
                               method="POST")
-            _ur.urlopen(req, timeout=5)
-        except Exception:
-            pass  # 进度上报失败不影响主流程
+            resp = _ur.urlopen(req, timeout=5)
+            status = resp.status
+            body = resp.read().decode()[:100]
+            print(f"[progress:ok] step={msg.get('step','?')} → {status} {body}", flush=True)
+        except Exception as e:
+            print(f"[progress:FAIL] step={msg.get('step','?')} url={CALLBACK_URL[:80]} "
+                  f"error={type(e).__name__}: {e}", flush=True)
     threading.Thread(target=_send, daemon=True).start()
 
 def progress(step: str, detail: str = ""):
