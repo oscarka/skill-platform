@@ -59,9 +59,9 @@ def _get_persistent_conn(host: str, port: int = 443) -> _http_client.HTTPSConnec
     print(f"[conn-pool] new connection to {key}", flush=True)
     return conn
 
-# 预热：仅对 Gemini 模型建立持久 TLS 连接（ARK 用 urlopen，持久连接无效且浪费 ~600ms）
-_is_gemini_model = os.environ.get("AI_MODEL", "").lower().startswith("gemini")
-if _dns_warm_host and _is_gemini_model:
+# 预热：在进程启动时建立到 AI API 的持久 TLS 连接
+# 所有模型统一走 HTTPSConnection 持久连接（Gemini/ARK 均支持，实测验证 2026-08-13）
+if _dns_warm_host:
     try:
         _t_conn0 = _init_time.time()
         _warm_conn = _get_persistent_conn(_dns_warm_host, 443)
@@ -70,8 +70,6 @@ if _dns_warm_host and _is_gemini_model:
               f"({round((_t_conn1-_t_conn0)*1000)}ms)", flush=True)
     except Exception as _ce:
         print(f"[init] TLS pre-warm failed: {_ce}", flush=True)
-elif _dns_warm_host:
-    print(f"[init] TLS pre-warm: skipped (non-Gemini model, using urlopen)", flush=True)
 # 确保工作目录可写（Dockerfile WORKDIR=/ 但 sandbox 用户无权写根目录）
 _home = os.path.expanduser("~")
 if os.getcwd() == "/" and os.path.isdir(_home):
@@ -1278,8 +1276,9 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
 
     data = json.dumps(body).encode()
 
+    _provider = 'gemini' if is_gemini else 'ark'
     print(f"[llm] -> {base}/chat/completions model={use_model} "
-          f"provider={'gemini' if is_gemini else 'ark'} "
+          f"provider={_provider} "
           f"msgs={len(messages)} tools={'yes' if tools else 'no'} "
           f"body={len(data)}b", flush=True)
 
@@ -1290,96 +1289,48 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             print(f"[llm] retry attempt={attempt+1}", flush=True)
 
         try:
-            if is_gemini:
-                # ── Gemini：持久 HTTPSConnection ────────────────────────────────
-                from urllib.parse import urlparse
-                _parsed = urlparse(f"{base}/chat/completions")
-                _host = _parsed.hostname
-                _port = _parsed.port or 443
-                _path = _parsed.path
+            # ── 统一路径：所有模型走持久 HTTPSConnection ──────────────────────
+            from urllib.parse import urlparse
+            _parsed = urlparse(f"{base}/chat/completions")
+            _host = _parsed.hostname
+            _port = _parsed.port or 443
+            _path = _parsed.path
 
-                conn = _get_persistent_conn(_host, _port)
-                conn.request("POST", _path, body=data,
-                             headers={"Authorization": f"Bearer {key}",
-                                      "Content-Type": "application/json",
-                                      "Accept": "text/event-stream"})
-                r = conn.getresponse()
-                t_connected = _t2.time()
-                connect_ms = round((t_connected - t_attempt_start) * 1000)
+            # key 为空时 fallback 到环境变量
+            _effective_key = key
+            if not _effective_key:
+                _effective_key = os.environ.get("DOUBAO_API_KEY", "") or os.environ.get("AI_API_KEY", "")
+                if _effective_key:
+                    print(f"[llm] fallback to env API key", flush=True)
+                else:
+                    raise RuntimeError("AI API key 为空，无法调用 LLM")
 
-                if r.status != 200:
-                    err_body = r.read().decode(errors="replace")[:200]
-                    print(f"[llm] HTTP {r.status} after {connect_ms}ms: {err_body}", flush=True)
-                    try: conn.close()
-                    except: pass
-                    _PERSISTENT_CONNS.pop(f"{_host}:{_port}", None)
-                    raise RuntimeError(f"AI API error {r.status}: {err_body}")
+            conn = _get_persistent_conn(_host, _port)
+            conn.request("POST", _path, body=data,
+                         headers={"Authorization": f"Bearer {_effective_key}",
+                                  "Content-Type": "application/json",
+                                  "Accept": "text/event-stream"})
+            r = conn.getresponse()
+            t_connected = _t2.time()
+            connect_ms = round((t_connected - t_attempt_start) * 1000)
 
-                print(f"[llm] connected in {connect_ms}ms status={r.status}", flush=True)
-                _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
-                    "step": "AI连接", "detail": f"模型已响应（{connect_ms}ms）"})
+            if r.status != 200:
+                err_body = r.read().decode(errors="replace")[:200]
+                print(f"[llm] HTTP {r.status} after {connect_ms}ms: {err_body}", flush=True)
+                try: conn.close()
+                except: pass
+                _PERSISTENT_CONNS.pop(f"{_host}:{_port}", None)
+                raise RuntimeError(f"AI API error {r.status}: {err_body}")
 
-                try:
-                    conn.sock.settimeout(120)
-                except Exception:
-                    pass
-                return _parse_sse_stream(r, t_connect=t_attempt_start)
+            print(f"[llm] connected in {connect_ms}ms status={r.status}", flush=True)
+            _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
+                "step": "AI连接", "detail": f"{_provider}模型已响应（{connect_ms}ms）"})
 
-            else:
-                # ── ARK/Doubao/DeepSeek：urllib.urlopen SSE ──────────────────────
-                # ARK TLS 和持久连接不兼容（aug11 分支验证），用 urlopen 稳定运行
-                import threading as _thr
-
-                # key 为空时 fallback 到 DOUBAO_API_KEY 环境变量
-                _ark_key = key
-                if not _ark_key:
-                    _ark_key = os.environ.get("DOUBAO_API_KEY", "") or os.environ.get("AI_API_KEY", "")
-                    if _ark_key:
-                        print(f"[llm] fallback to DOUBAO_API_KEY from env", flush=True)
-                    else:
-                        raise RuntimeError("AI API key 为空，无法调用 LLM")
-
-                # 心跳线程：卡住时每 10s 报一次
-                _hb_stop = _thr.Event()
-                def _heartbeat():
-                    _n = 0
-                    while not _hb_stop.wait(10):
-                        _n += 10
-                        print(f"[llm:ark] heartbeat {_n}s (waiting for response)", flush=True)
-                _thr.Thread(target=_heartbeat, daemon=True).start()
-
-                try:
-                    req = urllib.request.Request(
-                        f"{base}/chat/completions",
-                        data=data,
-                        headers={
-                            "Authorization": f"Bearer {_ark_key}",
-                            "Content-Type": "application/json",
-                        },
-                        method="POST",
-                    )
-                    print(f"[llm:ark] urlopen start attempt={attempt} body={len(data)}b msgs={len(messages)}", flush=True)
-                    t_urlopen_start = _t2.time()
-
-                    with urllib.request.urlopen(req, timeout=first_token_timeout) as r:
-                        dt_urlopen = (_t2.time() - t_urlopen_start) * 1000
-                        _hb_stop.set()
-                        print(f"[llm:ark] urlopen returned {dt_urlopen:.0f}ms HTTP={r.status}", flush=True)
-                        connect_ms = round((_t2.time() - t_attempt_start) * 1000)
-                        _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
-                            "step": "AI连接", "detail": f"ARK模型已响应（{connect_ms}ms）"})
-
-                        # 放宽 socket 超时
-                        try:
-                            r.fp.raw._sock.settimeout(300)
-                        except Exception:
-                            pass
-
-                        # 复用 _parse_sse_stream 解析 SSE
-                        return _parse_sse_stream(r, t_connect=t_attempt_start)
-
-                finally:
-                    _hb_stop.set()
+            try:
+                conn.sock.settimeout(120)
+            except Exception:
+                pass
+            return _parse_sse_stream(r, t_connect=t_attempt_start)
 
         except RuntimeError:
             raise  # HTTP 4xx/5xx 不重试
@@ -1390,15 +1341,12 @@ def _do_ai_call(messages: list, tools=None, first_token_timeout=120,
             print(f"[llm] error after {elapsed_ms}ms (attempt {attempt+1}/3): "
                   f"{type(e).__name__}: {err_str[:120]}", flush=True)
 
-            if is_gemini:
-                # Gemini：关闭坏连接，下次重建
-                try:
-                    from urllib.parse import urlparse as _up
-                    _h = _up(f"{base}/chat/completions").hostname
-                    _PERSISTENT_CONNS.pop(f"{_h}:443", None)
-                except: pass
-            else:
-                _hb_stop.set()  # 确保心跳停止
+            # 关闭坏连接，下次重建
+            try:
+                from urllib.parse import urlparse as _up
+                _h = _up(f"{base}/chat/completions").hostname
+                _PERSISTENT_CONNS.pop(f"{_h}:443", None)
+            except: pass
 
             _post_progress({"ts": datetime.now(timezone.utc).isoformat(),
                 "step": "网络重试", "detail": f"attempt {attempt+1}（{elapsed_ms}ms）: {err_str[:80]}"})
