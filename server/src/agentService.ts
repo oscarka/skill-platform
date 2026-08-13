@@ -513,11 +513,12 @@ let _credCache: { apiKey: string; baseUrl: string; model: string; provider: stri
 let _credCacheExpire = 0;
 
 async function getSetting(key: string): Promise<string> {
-  // 高频凭证 key 优先从环境变量读，完全跳过 DB 查询
-  if (key in _settingEnvMap && _settingEnvMap[key]) return _settingEnvMap[key];
+  // 凭证 key 永远从 env map 读，不查 DB（即使值为空）
+  // 避免空 env var 导致 DB 查询洪水
+  if (key in _settingEnvMap) return _settingEnvMap[key];
   // 其他 key 正常走 DB
   const row = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', [key]);
-  return row?.value || _settingEnvMap[key] || '';
+  return row?.value || '';
 }
 
 
@@ -1620,8 +1621,9 @@ export async function handleJobCallback(requestId: string, jobResult: any): Prom
 // ─── 主入口 ───────────────────────────────────────────────────────────────────
 
 export async function processAgentChat(req: AgentChatRequest): Promise<AgentResponse> {
-  const apiKey = await getGeminiKey();
-  if (!apiKey) throw new Error('Gemini API key not configured. Please set it in Settings.');
+  // 凭证通过 getAICredentials() 缓存获取，不重复查 DB
+  const creds = await getAICredentials();
+  if (!creds.apiKey) throw new Error('AI credentials not configured. Set DOUBAO_API_KEY or GEMINI_API_KEY.');
 
   const requestId  = `req_${uuidv4().replace(/-/g, '').slice(0, 10)}`;
   const serviceUrl = process.env.SERVICE_URL || '';
