@@ -563,6 +563,24 @@ exports.skillRouter.put('/:id', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// ─── PATCH /api/skills/:id/model ─────────────────────────────────────────────
+// 允许对任何状态（包括 published）的 skill 更新 preferred_model / fallback_model
+// 这是纯配置变更（不改内容），无需创建新版本
+exports.skillRouter.patch('/:id/model', async (req, res) => {
+    try {
+        const skill = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        if (!skill)
+            return res.status(404).json({ error: 'Skill not found' });
+        const { preferred_model, fallback_model } = req.body;
+        await db.runAsync(`UPDATE skills SET preferred_model=?, fallback_model=COALESCE(?,fallback_model), updated_at=? WHERE id=?`, [preferred_model ?? null, fallback_model ?? null, Date.now(), req.params.id]);
+        const updated = await db.getAsync('SELECT * FROM skills WHERE id=?', [req.params.id]);
+        console.log(`[SkillModel] skill=${req.params.id} preferred_model=${updated?.preferred_model} fallback_model=${updated?.fallback_model}`);
+        res.json({ skill: sanitize(updated, true) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 // ─── POST /api/skills/:id/review ─────────────────────────────────────────────
 // OpenClaw-style review agent:
 //   - 评审 AI 通过工具调用按需读取 Skill 内容（不预先拼串）

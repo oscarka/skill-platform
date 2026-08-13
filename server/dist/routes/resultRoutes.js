@@ -48,7 +48,10 @@ const marked_1 = require("marked");
 exports.resultRouter = express_1.default.Router();
 const REPORTS_DIR = path_1.default.resolve(__dirname, '..', '..', '..', 'reports');
 if (!fs_1.default.existsSync(REPORTS_DIR))
-    fs_1.default.mkdirSync(REPORTS_DIR, { recursive: true });
+    try {
+        fs_1.default.mkdirSync(REPORTS_DIR, { recursive: true });
+    }
+    catch { /* Cloud Run read-only FS */ }
 // ─── POST /api/results/process/:ticketId ─────────────────────────────────────
 // Trigger AI processing. Runs async (doesn't block response).
 // Body: { override_model?: string } — optional model override for testing

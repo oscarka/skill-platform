@@ -11,8 +11,11 @@ const fs_1 = __importDefault(require("fs"));
 const uuid_1 = require("uuid");
 exports.uploadRouter = express_1.default.Router();
 const UPLOAD_DIR = path_1.default.resolve(process.env.UPLOAD_DIR || path_1.default.join(__dirname, '..', '..', '..', 'uploads', 'files'));
-if (!fs_1.default.existsSync(UPLOAD_DIR))
-    fs_1.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+    if (!fs_1.default.existsSync(UPLOAD_DIR))
+        fs_1.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+catch { /* Cloud Run read-only FS; GCS used instead */ }
 const storage = multer_1.default.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
     filename: (_req, file, cb) => {

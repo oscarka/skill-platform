@@ -4,9 +4,12 @@
  *
  * POST /api/v1/agent/chat                   — 主入口：接收消息，路由处理，返回 AgentResponse
  * POST /api/v1/agent/job-callback/:requestId — Cloud Run Job 完成时的内部回调
+ * POST /api/orch/ingest                      — 渠道统一入口（wechat-archiver → Skill Platform）
  * GET  /api/v1/agent/profile                 — 读取 Agent Profile 配置
  * PUT  /api/v1/agent/profile                 — 保存 Agent Profile 配置
  * GET  /api/v1/agent/skills/available        — 读取所有已发布 skill（供前端配置页使用）
+ * GET  /api/v1/agent/tasks                   — 统一任务日志（所有渠道）
+ * GET  /api/v1/agent/tasks/:id               — 单个任务详情 + 事件流
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -50,6 +53,307 @@ const express_1 = __importDefault(require("express"));
 const agentService_1 = require("../agentService");
 const db = __importStar(require("../db"));
 exports.agentRouter = express_1.default.Router();
+// ─── 渠道适配辅助 ─────────────────────────────────────────────────────────────
+const CUA_SEND_URL = process.env.CUA_SEND_URL || ''; // Mac mini 发消息接口（Step 5 用）
+/**
+ * POST /api/orch/ingest
+ * wechat-archiver / 其他渠道 adapter 的统一推送入口
+ *
+ * Body（wechat-archiver 原生格式）：
+ * {
+ *   from_name: string,       // 发送者名称
+ *   from_user_id: string,    // 企微 userId
+ *   content: string,         // 消息内容（已聚合防抖后）
+ *   msgtype: string,         // 'text' | 'image' | ...
+ *   room_name?: string,      // 群名（群消息）
+ *   channel: string,         // 'wecom'
+ *   conversation_id?: string // 会话 ID
+ * }
+ *
+ * 返回：{ task_id, status }（立即返回，AI 处理异步）
+ */
+exports.agentRouter.post('/ingest', async (req, res) => {
+    try {
+        const { from_name, from_user_id, content, msgtype, channel = 'wecom', conversation_id } = req.body;
+        if (!content || typeof content !== 'string' || !content.trim()) {
+            return res.status(400).json({ error: 'content is required' });
+        }
+        if (!from_user_id) {
+            return res.status(400).json({ error: 'from_user_id is required' });
+        }
+        // 只处理文字消息，其他类型（图片、语音）暂不处理
+        if (msgtype && msgtype !== 'text') {
+            console.log(`[Orch/Ingest] skip non-text msgtype=${msgtype} from=${from_name}`);
+            return res.json({ ok: true, skipped: true, reason: 'non-text message' });
+        }
+        const sessionId = conversation_id || from_user_id;
+        const history = Array.isArray(req.body.history) ? req.body.history : [];
+        const notes = req.body.notes || '';
+        console.log(`[Orch/Ingest] channel=${channel} from=${from_name}(${from_user_id}) content="${content.slice(0, 80)}" history=${history.length}`);
+        // 构造 AgentChatRequest
+        const agentReq = {
+            content: content.trim(),
+            source: channel,
+            source_channel: channel,
+            session_id: sessionId,
+            meta: {
+                from_name: from_name || from_user_id,
+                user_id: from_user_id,
+            },
+            context: {
+                available_apps: ['企业微信'],
+                current_recipient: from_name || from_user_id,
+            },
+            history,
+            notes,
+            // callback_url：skill 执行完成后通知 Mac mini CUA 发消息
+            callback_url: CUA_SEND_URL ? `${CUA_SEND_URL}/api/agent-callback` : '',
+        };
+        // 立即返回，异步处理
+        res.json({ ok: true, status: 'processing' });
+        // 异步执行（fire and forget），错误只写日志不影响响应
+        (0, agentService_1.processAgentChat)(agentReq).then(result => {
+            console.log(`[Orch/Ingest] done from=${from_name} status=${result.status} reply="${(result.reply || '').slice(0, 60)}"`);
+            // 有回复就推给 CUA 发送（done=同步回复, processing=安抚消息）
+            if (result.reply && CUA_SEND_URL) {
+                const cuaBody = {
+                    request_id: result.request_id,
+                    session_id: sessionId,
+                    status: result.status === 'processing' ? 'done' : result.status, // CUA 不认识 processing，统一用 done
+                    reply: result.reply,
+                    delivery: result.delivery || { app: '企业微信', recipient: from_name, action: 'type_and_send' },
+                    reasoning: result.reasoning,
+                };
+                const label = result.status === 'processing' ? '安抚消息' : '同步回复';
+                fetch(`${CUA_SEND_URL}/api/agent-callback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': process.env.AGENT_SECRET || '' },
+                    body: JSON.stringify(cuaBody),
+                    signal: AbortSignal.timeout(30_000),
+                }).then(r => console.log(`[Orch/Ingest] CUA ${label} HTTP ${r.status}`))
+                    .catch(e => console.warn(`[Orch/Ingest] CUA ${label} failed:`, e.message));
+            }
+        }).catch(err => {
+            console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
+            // 把错误写回 agent_task 记录
+            const reqIdMatch = err.stack ? null : null; // requestId is in agentReq.request_id if set
+            const failedReqId = agentReq._requestId || '';
+            void (0, agentService_1.updateAgentTask)(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
+            void (0, agentService_1.appendTaskEvent)(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
+        });
+    }
+    catch (err) {
+        console.error('[Orch/Ingest] error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/v1/agent/tasks — 统一任务日志 ──────────────────────────────────
+exports.agentRouter.get('/tasks', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    try {
+        const limit = Math.min(parseInt(String(req.query.limit || '50')), 200);
+        const offset = parseInt(String(req.query.offset || '0'));
+        const channel = req.query.channel;
+        const status = req.query.status;
+        const userId = req.query.user_id;
+        let where = 'WHERE 1=1';
+        const params = [];
+        if (channel) {
+            where += ' AND source_channel=?';
+            params.push(channel);
+        }
+        if (status) {
+            where += ' AND status=?';
+            params.push(status);
+        }
+        if (userId) {
+            where += ' AND user_id=?';
+            params.push(userId);
+        }
+        const tasks = await db.allAsync(`SELECT id, session_id, user_id, source_channel, input_content, route_type,
+              skill_id, status, reply_content, error_message, meta,
+              started_at, ended_at, duration_ms
+       FROM agent_tasks ${where}
+       ORDER BY started_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+        const total = await db.getAsync(`SELECT COUNT(*) as cnt FROM agent_tasks ${where}`, params);
+        res.json({ tasks, total: total?.cnt || 0, limit, offset });
+    }
+    catch (err) {
+        console.error('[AgentRoute] GET /tasks error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/v1/agent/tasks/:id — 单个任务 + 事件流 ────────────────────────
+exports.agentRouter.get('/tasks/:id', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    try {
+        const task = await db.getAsync(`SELECT * FROM agent_tasks WHERE id=?`, [req.params.id]);
+        if (!task)
+            return res.status(404).json({ error: 'not found' });
+        const events = await db.allAsync(`SELECT id, event_type, payload, ts FROM agent_task_events WHERE task_id=? ORDER BY ts ASC`, [req.params.id]);
+        res.json({
+            ...task,
+            meta: task.meta ? JSON.parse(task.meta) : null,
+            job_transcript: task.job_transcript ? JSON.parse(task.job_transcript) : null,
+            context_snapshot: task.context_snapshot ? JSON.parse(task.context_snapshot) : null,
+            cua_events: task.cua_events ? JSON.parse(task.cua_events) : null,
+            events: events.map((e) => ({
+                ...e,
+                payload: e.payload ? JSON.parse(e.payload) : null,
+            })),
+        });
+    }
+    catch (err) {
+        console.error('[AgentRoute] GET /tasks/:id error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── GET /api/v1/agent/tasks/:id/stream — SSE 实时事件推送 ───────────────────
+exports.agentRouter.get('/tasks/:id/stream', async (req, res) => {
+    const taskId = req.params.id;
+    // SSE headers
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no', // nginx/Cloud Run: disable buffering
+    });
+    res.flushHeaders();
+    // Send initial events from DB
+    try {
+        const events = await db.allAsync(`SELECT id, event_type, payload, ts FROM agent_task_events WHERE task_id=? ORDER BY ts ASC`, [taskId]);
+        const parsed = events.map((e) => ({
+            ...e, payload: e.payload ? JSON.parse(e.payload) : null,
+        }));
+        res.write(`data: ${JSON.stringify({ type: 'init', events: parsed })}\n\n`);
+    }
+    catch (e) { /* ignore */ }
+    // Subscribe to real-time events
+    const handler = (event) => {
+        try {
+            res.write(`data: ${JSON.stringify({ type: 'event', ...event })}\n\n`);
+        }
+        catch { /* client disconnected */ }
+    };
+    agentService_1.taskEventBus.on(`task:${taskId}`, handler);
+    // Heartbeat every 15s to keep connection alive
+    const heartbeat = setInterval(() => {
+        try {
+            res.write(': heartbeat\n\n');
+        }
+        catch { /* ignore */ }
+    }, 15000);
+    // Cleanup on disconnect
+    req.on('close', () => {
+        agentService_1.taskEventBus.removeListener(`task:${taskId}`, handler);
+        clearInterval(heartbeat);
+    });
+});
+// ─── POST /api/v1/agent/cua-step/:requestId — CUA 逐步事件推送 ───────────────
+exports.agentRouter.post('/cua-step/:requestId', async (req, res) => {
+    const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+    if (req.headers['x-sandbox-secret'] !== EXPECTED) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+    res.json({ ok: true }); // respond immediately
+    const { requestId } = req.params;
+    const { step_index, event_type, detail, tool_name, tool_result, ts } = req.body;
+    // Write as task event + auto-push via EventEmitter
+    void (0, agentService_1.appendTaskEvent)(requestId, 'cua_step', {
+        step_index,
+        event_type: event_type || 'step',
+        detail: typeof detail === 'string' ? detail.slice(0, 300) : detail,
+        tool_name,
+        tool_result: typeof tool_result === 'string' ? tool_result.slice(0, 200) : undefined,
+        ts: ts || Date.now(),
+    });
+});
+// ─── GET /api/v1/agent/skill-result/:requestId — 公开结果查看（无需登录）────
+// Task 5: 用户点链接查看 skill 完整结果
+exports.agentRouter.get('/skill-result/:requestId', async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        const task = await db.getAsync(`SELECT id, session_id, reply_content, status, route_type, skill_id, ended_at, started_at
+       FROM agent_tasks WHERE id=?`, [requestId]);
+        if (!task)
+            return res.status(404).json({ error: 'not found' });
+        if (task.status !== 'done')
+            return res.status(202).json({ status: task.status, message: '分析尚未完成' });
+        // 查 wiki 确认状态（存在 agent_tasks 的 reply_content 字段，从另一张表查更合适但这里暂存在内存中）
+        // 简单方案：在 task events 里找 wiki_confirmed 事件
+        const events = await db.allAsync(`SELECT event_type, payload, ts FROM agent_task_events WHERE task_id=? ORDER BY ts ASC`, [requestId]);
+        const confirmedEvent = events.find((e) => e.event_type === 'wiki_confirmed');
+        const declinedEvent = events.find((e) => e.event_type === 'wiki_declined');
+        // 找 skill_id 对应的 skill 名称
+        const skill = task.skill_id ? await db.getAsync('SELECT name, description FROM skills WHERE id=?', [task.skill_id]) : null;
+        res.json({
+            request_id: requestId,
+            status: task.status,
+            skill_name: skill?.name || '',
+            output: task.reply_content || '', // 完整 skill output
+            ended_at: task.ended_at,
+            wiki_confirmed: !!confirmedEvent,
+            wiki_declined: !!declinedEvent,
+        });
+    }
+    catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+// ─── POST /api/v1/agent/skill-result/:requestId/wiki-confirm ─────────────────
+// Task 6: 用户点「认可并执行」→ 触发 wiki sync
+exports.agentRouter.post('/skill-result/:requestId/wiki-confirm', async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        const { action } = req.body; // 'confirm' | 'decline'
+        const task = await db.getAsync(`SELECT id, session_id, reply_content, status FROM agent_tasks WHERE id=?`, [requestId]);
+        if (!task) {
+            console.log(`[WikiConfirm] ❌ requestId=${requestId} 不存在`);
+            return res.status(404).json({ error: 'not found' });
+        }
+        if (task.status !== 'done') {
+            console.log(`[WikiConfirm] ⚠️ requestId=${requestId} 状态=${task.status}，尚未完成，拒绝确认`);
+            return res.status(400).json({ error: '任务未完成' });
+        }
+        const userId = task.session_id?.replace(/^wechat_/, '') || '';
+        if (action === 'confirm') {
+            console.log(`[WikiConfirm] ✅ 用户确认: requestId=${requestId} userId=${userId} → 触发 wiki sync`);
+            void (0, agentService_1.appendTaskEvent)(requestId, 'wiki_confirmed', {
+                confirmed_at: Date.now(),
+                userId,
+                note: '用户点击「认可并执行」，触发 wiki 同步',
+            });
+            if (userId) {
+                const { triggerWikiSyncPublic } = await Promise.resolve().then(() => __importStar(require('../agentService')));
+                triggerWikiSyncPublic(userId, `user_confirmed:${requestId}`);
+                console.log(`[WikiConfirm] 📤 wiki sync 已下发: userId=${userId} reason=user_confirmed:${requestId}`);
+            }
+            else {
+                console.warn(`[WikiConfirm] ⚠️ session_id=${task.session_id} 无法解析 userId，wiki sync 跳过`);
+            }
+            res.json({ success: true, message: 'wiki 同步已触发' });
+        }
+        else if (action === 'decline') {
+            console.log(`[WikiConfirm] ❌ 用户取消: requestId=${requestId} userId=${userId} → 不写入 wiki`);
+            void (0, agentService_1.appendTaskEvent)(requestId, 'wiki_declined', {
+                declined_at: Date.now(),
+                userId,
+                note: '用户点击「暂不采纳」，不写入 wiki',
+            });
+            res.json({ success: true, message: '已记录，不写入 wiki' });
+        }
+        else {
+            console.log(`[WikiConfirm] ⚠️ 未知 action="${action}" requestId=${requestId}`);
+            res.status(400).json({ error: 'action must be confirm or decline' });
+        }
+    }
+    catch (e) {
+        console.error(`[WikiConfirm] 💥 异常:`, e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
 // ─── POST /api/v1/agent/chat ──────────────────────────────────────────────────
 exports.agentRouter.post('/chat', async (req, res) => {
     try {
@@ -84,15 +388,84 @@ exports.agentRouter.post('/chat', async (req, res) => {
 // ─── POST /api/v1/agent/job-callback/:requestId ───────────────────────────────
 exports.agentRouter.post('/job-callback/:requestId', async (req, res) => {
     const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
-    const secret = req.headers['x-sandbox-secret'];
+    // runner.py sends progress callbacks with secret in body, final result in header
+    const secret = req.headers['x-sandbox-secret'] || req.body?.secret || '';
     if (secret !== EXPECTED) {
         console.warn(`[AgentRoute] job-callback: invalid secret for requestId=${req.params.requestId}`);
         return res.status(403).json({ error: 'Forbidden' });
     }
     const { requestId } = req.params;
+    const body = req.body;
+    // ── 实时流式 transcript 上报（和工单系统相同机制）──────────────────────────
+    if (body?.type === 'progress' || body?.type === 'transcript_step') {
+        const stepEntry = body.entry || {
+            type: 'event',
+            event: body.event?.step || 'progress',
+            detail: body.event?.detail || '',
+            ts: body.event?.ts || new Date().toISOString(),
+        };
+        // 追加到 job_transcript JSON 数组（存在 agent_tasks 表）
+        const taskRow = await db.getAsync('SELECT job_transcript FROM agent_tasks WHERE id=?', [requestId]);
+        let currentLog = [];
+        if (taskRow?.job_transcript) {
+            try {
+                currentLog = JSON.parse(taskRow.job_transcript);
+            }
+            catch {
+                currentLog = [];
+            }
+        }
+        if (!stepEntry.id || !currentLog.some((e) => e.id === stepEntry.id)) {
+            currentLog.push(stepEntry);
+        }
+        void (0, agentService_1.updateAgentTask)(requestId, { jobTranscript: JSON.stringify(currentLog) });
+        return res.json({ ok: true, streamed: true });
+    }
+    // ── 最终结果回调 ──────────────────────────────────────────────────────────
     console.log(`[AgentRoute] job-callback received for requestId=${requestId}`);
     res.json({ ok: true });
-    (0, agentService_1.handleJobCallback)(requestId, req.body).catch(err => console.error(`[AgentRoute] job-callback forward error for ${requestId}:`, err));
+    (0, agentService_1.handleJobCallback)(requestId, body).catch(err => console.error(`[AgentRoute] job-callback forward error for ${requestId}:`, err));
+});
+// ─── POST /api/v1/agent/cua-done/:requestId — CUA 执行完成后回传事件 ─────────────
+exports.agentRouter.post('/cua-done/:requestId', async (req, res) => {
+    const EXPECTED = process.env.SANDBOX_SECRET || 'sandbox-secret-2024';
+    const secret = req.headers['x-sandbox-secret'];
+    if (secret !== EXPECTED) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { requestId } = req.params;
+    const body = req.body;
+    res.json({ ok: true });
+    try {
+        const cuaEvents = body.cua_events || [];
+        const deliveredAt = body.delivered_at || Date.now();
+        const success = body.success !== false;
+        // Store CUA events as cua_events column
+        await (0, agentService_1.updateAgentTask)(requestId, {
+            cuaEvents: JSON.stringify({
+                events: cuaEvents,
+                delivered_at: deliveredAt,
+                success,
+                recipient: body.recipient,
+                app: body.app,
+            }),
+        });
+        // Also append a summary event to agent_task_events
+        await (0, agentService_1.appendTaskEvent)(requestId, 'cua_delivered', {
+            success,
+            recipient: body.recipient,
+            app: body.app || '企业微信',
+            step_count: cuaEvents.length,
+            delivered_at: deliveredAt,
+            events_preview: cuaEvents.slice(0, 5).map((e) => ({
+                type: e.type, phase: e.phase, text: (e.text || e.detail || e.content || '').slice(0, 80),
+            })),
+        });
+        console.log(`[AgentRoute] cua-done: requestId=${requestId}, events=${cuaEvents.length}, success=${success}`);
+    }
+    catch (err) {
+        console.error(`[AgentRoute] cua-done error for ${requestId}:`, err.message);
+    }
 });
 // ─── GET /api/v1/agent/profile ────────────────────────────────────────────────
 exports.agentRouter.get('/profile', async (_req, res) => {

@@ -44,10 +44,14 @@ const fs_1 = __importDefault(require("fs"));
 const uuid_1 = require("uuid");
 const db = __importStar(require("../db"));
 const aiProcessor_1 = require("../aiProcessor");
+const agentService_1 = require("../agentService");
 exports.h5Router = express_1.default.Router();
 const UPLOAD_DIR = path_1.default.resolve(process.env.UPLOAD_DIR || path_1.default.join(__dirname, '..', '..', '..', 'uploads', 'files'));
-if (!fs_1.default.existsSync(UPLOAD_DIR))
-    fs_1.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+    if (!fs_1.default.existsSync(UPLOAD_DIR))
+        fs_1.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+catch { /* Cloud Run read-only FS */ }
 const storage = multer_1.default.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
     filename: (_req, file, cb) => {
@@ -126,21 +130,58 @@ exports.h5Router.post('/:token/submit', upload.array('files', 10), async (req, r
         for (const [key, value] of Object.entries(fields)) {
             if (key === 'fields')
                 continue;
+            const strValue = (value === null || value === undefined)
+                ? ''
+                : (typeof value === 'object' ? JSON.stringify(value) : String(value));
             await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, value, created_at)
-         VALUES (?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, key, 'text', String(value), now]);
+         VALUES (?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, key, 'text', strValue, now]);
         }
         // Save uploaded files
         const files = req.files || [];
         for (const file of files) {
+            // multer decodes originalname as latin1; re-encode as utf8 for Chinese filenames
+            let fileName = file.originalname;
+            try {
+                fileName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+            }
+            catch { /* keep original if conversion fails */ }
             await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
-         VALUES (?,?,?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, 'file', 'file', file.path, file.originalname, file.mimetype, now]);
+         VALUES (?,?,?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, 'file', 'file', file.path, fileName, file.mimetype, now]);
         }
         // Update ticket status
         await db.runAsync(`UPDATE tickets SET status='submitted', h5_submitted_at=?, updated_at=? WHERE id=?`, [now, now, ticket.id]);
-        // ✅ Auto-trigger AI processing (non-blocking — client gets response immediately)
-        console.log(`[H5] Ticket ${ticket.id} submitted — auto-triggering AI...`);
-        (0, aiProcessor_1.processTicket)(ticket.id).catch(err => {
+        // ── 创建独立处理任务（左侧列表独立显示，状态 processing → done）───────────────
+        const skill = await db.getAsync('SELECT name, id FROM skills WHERE id=?', [ticket.skill_id]);
+        const skillName = skill?.name || '技能';
+        const processingTaskId = `req_h5_${ticket.id.slice(0, 8)}_${now}`;
+        await (0, agentService_1.createAgentTask)({
+            id: processingTaskId,
+            sessionId: `h5_${ticket.id}`,
+            userId: ticket.created_by || 'unknown',
+            sourceChannel: 'wechat',
+            inputContent: `[表单提交] ${skillName} — ${ticket.patient_name || '用户'} 提交了表单`,
+            meta: { ticketId: ticket.id, skillName, patientName: ticket.patient_name, fromH5: true },
+        });
+        await (0, agentService_1.updateAgentTask)(processingTaskId, {
+            status: 'processing',
+            routeType: 'ticket_processing',
+            skillId: ticket.skill_id,
+        });
+        // ticket_submitted 事件：记录用户已提交表单
+        void (0, agentService_1.appendTaskEvent)(processingTaskId, 'ticket_submitted', {
+            ticketId: ticket.id,
+            skillName,
+            fieldCount: Object.keys(fields).length,
+            patientName: ticket.patient_name || '',
+            submittedAt: new Date(now).toISOString(),
+        });
+        // ticket.request_id 指向新任务，后续进度/完成事件都写这里
+        await db.runAsync(`UPDATE tickets SET request_id=?, updated_at=? WHERE id=?`, [processingTaskId, now, ticket.id]);
+        // ✅ 异步触发 AI（非阻塞，客户立即收到响应）
+        console.log(`[H5] Ticket ${ticket.id} submitted — auto-triggering AI, task=${processingTaskId}`);
+        (0, aiProcessor_1.processTicket)(ticket.id, processingTaskId).catch(err => {
             console.error(`[H5→AI] Ticket ${ticket.id} AI failed:`, err.message);
+            void (0, agentService_1.updateAgentTask)(processingTaskId, { status: 'error', errorMessage: err.message, endedAt: Date.now() });
         });
         res.json({ success: true, message: '提交成功！AI 正在为您处理，结果将由工作人员反馈给您。' });
     }
