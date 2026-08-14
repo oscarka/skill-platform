@@ -1976,17 +1976,43 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     return chatResult;
   }
 
-  // ── Step 4 (v2): 路由后守卫管理 + 守卫 AI 判断（plan 1.2 规则1 / plan 1.3）────────
-  // 规则：routeDecision=high → 查同skill守卫
-  //   有同skill守卫 → 运行守卫 AI 判断（yes/unclear/no）→ 结果驱动后续行为
-  //   无守卫/不同skill守卫 → 新建守卫，fall-through 到 handleHealthDirect（Agent 介绍服务）
+  // ── Step 4 (v2): 路由后守卫管理 + 守卫 AI 判断（plan 1.2 规则A/B）────────────────────
+  // 规则 A：有活跃守卫 → 无条件运行守卫判断（不依赖 routeConfidence）
+  //   「好的」「不用了」等确认/拒绝消息路由往往返回 none，
+  //   守卫判断必须独立于路由结果运行，才能正确检测 confirm=yes/no。
+  //   例外：跨 skill（routing=high 且指向不同 skill）→ 关闭旧守卫，走规则 B 建新守卫。
+  // 规则 B：无守卫 + routing=high → 新建守卫（Agent 介绍服务）
   // Bug3 修复：processing/submitted 状态下不进入守卫/推荐流程
-  if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId
-      && !(['processing', 'submitted'] as string[]).includes(ctxSnapshot.recentTicket?.status || '')) {
+  const recentTicketStatus = ctxSnapshot.recentTicket?.status || '';
+  const ticketBlocked = (['processing', 'submitted'] as string[]).includes(recentTicketStatus);
 
-    if (activeGuardRow && activeGuardRow.skill_id === selectedSkillId) {
-      // ─ 同 skill 守卫已存在 → 路由后守卫 AI 判断（plan 1.3）──────────────────
-      console.log(`[SkillGuard] 🔍 路由后守卫判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
+  // ── 规则 A: 有活跃守卫 → 判断（不管 routing 结果）──────────────────────────────
+  if (activeGuardRow && !forcedSkillId && !ticketBlocked) {
+    // 跨 skill 切换：routing=high 且指向不同 skill → 关闭旧守卫，走规则 B 建新守卫
+    const crossSkill = routeConfidence === 'high' && selectedSkillId && selectedSkillId !== activeGuardRow.skill_id;
+
+    if (crossSkill) {
+      try {
+        await db.runAsync(
+          `UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`,
+          [activeGuardRow.id],
+        );
+        console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
+        void appendTaskEvent(requestId, 'guard_lifecycle', {
+          action: 'closed_by_new_skill',
+          guardId: activeGuardRow.id,
+          oldSkillId: activeGuardRow.skill_id,
+          oldSkillName: activeGuardRow.skill_name,
+          newSkillId: selectedSkillId,
+          newSkillName: selectedSkillName,
+        });
+      } catch (e: any) {
+        console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
+      }
+      // currentGuardStatus 保持 'none'，允许规则 B 建新守卫
+    } else {
+      // ─ 同 skill 守卫 OR 确认/拒绝消息（routing=none/low）→ 守卫 AI 判断 ────
+      console.log(`[SkillGuard] 🔍 守卫判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name} routeConf=${routeConfidence}`);
 
       const historyAfterSuggest = (req.history || [])
         .filter((h: any) => !h.ts || h.ts >= activeGuardRow.suggest_ts)
@@ -2005,7 +2031,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 请判断：
 - interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
 - confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
-  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
+  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「匂」等无动词，或在提问）
 
 输出示例：
 - 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
@@ -2067,19 +2093,21 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         await closeGuard('user_declined');
         currentGuardStatus    = 'declined';
         currentGuardSkillName = activeGuardRow.skill_name;
-        selectedSkillId   = null;   // → handleHealthDirect 正常回答
+        selectedSkillId   = null;
       } else if (guardResult.confirm === 'yes') {
         await closeGuard('user_confirmed');
         console.log(`[SkillGuard] ✅ 用户确认，执行 skill ${activeGuardRow.skill_id}`);
         currentGuardStatus    = 'confirmed_ticket';
         currentGuardSkillName = activeGuardRow.skill_name;
-        // selectedSkillId/Name 保持（routeDecision 已返回同一 skill）→ handleHealthSkill
+        // 确认消息本身 routing 可能是 none → 强制注入守卫的 skill
+        selectedSkillId   = activeGuardRow.skill_id;
+        selectedSkillName = activeGuardRow.skill_name;
+        selectedSkillDesc = availableSkills.find(s => s.id === activeGuardRow.skill_id)?.description || null;
       } else if (guardResult.confirm === 'no') {
-        // interest=yes 但明确拒绝（confirm=no）→ 关闭守卫，走正常回答
         await closeGuard('user_declined_explicit');
         currentGuardStatus    = 'declined';
         currentGuardSkillName = activeGuardRow.skill_name;
-        selectedSkillId   = null;   // → handleHealthDirect
+        selectedSkillId   = null;
       } else {
         // unclear
         const isUserAsking = req.content.includes('？') || req.content.includes('?');
@@ -2100,67 +2128,50 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         }
         currentGuardStatus    = 'pending_unclear';
         currentGuardSkillName = activeGuardRow.skill_name;
-        selectedSkillId   = null;   // → handleHealthDirect with pending_unclear directive
+        selectedSkillId   = null;
       }
-
-    } else {
-      // ─ 无守卫 或 不同 skill 守卫 → 新建守卫（plan 1.2 规则1）───────────────
-      // 关闭不同 skill 的旧守卫（跨 skill 切换）
-      if (activeGuardRow) {
-        try {
-          await db.runAsync(
-            `UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`,
-            [activeGuardRow.id],
-          );
-          console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
-          void appendTaskEvent(requestId, 'guard_lifecycle', {
-            action: 'closed_by_new_skill',
-            guardId: activeGuardRow.id,
-            oldSkillId: activeGuardRow.skill_id,
-            oldSkillName: activeGuardRow.skill_name,
-            newSkillId: selectedSkillId,
-            newSkillName: selectedSkillName,
-          });
-        } catch (e: any) {
-          console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
-        }
-      }
-
-      // 新建守卫
-      const newGuardSkillId   = selectedSkillId!;
-      const newGuardSkillName = selectedSkillName!;
-      const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
-      const nowTs = Date.now();
-      try {
-        await db.runAsync(
-          `INSERT INTO skill_confirm_guards
-            (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-          [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
-           '', nowTs, nowTs, nowTs + 30 * 60 * 1000],
-        );
-        console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
-        void appendTaskEvent(requestId, 'skill_guard_activated', {
-          guardId, skillId: newGuardSkillId, skillName: newGuardSkillName,
-          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
-        });
-        void appendTaskEvent(requestId, 'guard_lifecycle', {
-          action: 'new_created', guardId,
-          skillId: newGuardSkillId, skillName: newGuardSkillName,
-          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
-        });
-        void appendTaskEvent(requestId, 'skill_suggest', {
-          skillId: newGuardSkillId, skillName: newGuardSkillName, reason: routeReason,
-        });
-      } catch (e: any) {
-        console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
-      }
-
-      currentGuardStatus    = 'new_created';
-      currentGuardSkillName = newGuardSkillName;
-      selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
     }
   }
+
+  // ── 规则 B: 无守卫（或刚跨skill关闭）+ routing=high → 新建守卫 ──────────────────────────
+  if (currentGuardStatus === 'none'
+      && routeConfidence === 'high' && selectedSkillId && selectedSkillName
+      && !forcedSkillId && !ticketBlocked) {
+
+    const newGuardSkillId   = selectedSkillId;
+    const newGuardSkillName = selectedSkillName;
+    const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+    const nowTs = Date.now();
+    try {
+      await db.runAsync(
+        `INSERT INTO skill_confirm_guards
+          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
+         '', nowTs, nowTs, nowTs + 30 * 60 * 1000],
+      );
+      console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
+      void appendTaskEvent(requestId, 'skill_guard_activated', {
+        guardId, skillId: newGuardSkillId, skillName: newGuardSkillName,
+        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+      });
+      void appendTaskEvent(requestId, 'guard_lifecycle', {
+        action: 'new_created', guardId,
+        skillId: newGuardSkillId, skillName: newGuardSkillName,
+        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+      });
+      void appendTaskEvent(requestId, 'skill_suggest', {
+        skillId: newGuardSkillId, skillName: newGuardSkillName, reason: routeReason,
+      });
+    } catch (e: any) {
+      console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
+    }
+
+    currentGuardStatus    = 'new_created';
+    currentGuardSkillName = newGuardSkillName;
+    selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
+  }
+
 
 
   const skillRouteLog: SkillRouteLog = {

@@ -853,6 +853,150 @@ async function testFullE2E() {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 二f. 重构 Bug 修复回归（RFIX2）
+//   Bug1: 同skill同session → 第二条走judgment，不重建守卫
+//   Bug2: done工单 + 重做意图 → expire旧单，新建工单
+//   Bug3: processing/submitted工单 → 不进守卫/推荐流程
+//   Arch: 守卫判断在路由后 — event顺序验证
+// ══════════════════════════════════════════════════════════════
+async function testRefactorBugFixes() {
+  section('二f. 重构 Bug 修复回归（RFIX2）— 双守卫/重做/Processing/架构顺序');
+  const skill = await getExternalSkill();
+  if (!skill) { skip('RFIX2', '无已发布的 external skill'); return; }
+
+  // ── Bug1: 同 skill 同 session，第二条不重建守卫 ──────────────────────────
+  console.log('\n[RFIX2-Bug1] 同session同skill → 第二条走judgment，不新建守卫');
+  await clearGuards();
+  await expireAllTestTickets();
+  const sessB1 = `rfix2_b1_${RUN_ID}`;
+
+  const { taskId: b1t1 } = await chat('我想要AI营养师帮我做营养分析', sessB1);
+  await sleep(8000);
+  const db1a = await events(b1t1);
+  const evb1a = db1a.events || [];
+  log('RFIX2-B1-1 第一条 → 建守卫', has(evb1a, 'skill_guard_activated'));
+  log('RFIX2-B1-2 第一条 → 不运行守卫判断（首次建守卫）',
+    !has(evb1a, 'skill_guard_judgment'), '首条建守卫不判断');
+
+  await sleep(1000);
+  const { taskId: b1t2 } = await chat('我想要AI营养师帮我做营养分析', sessB1);
+  await sleep(10000);
+  const db1b = await events(b1t2, 14000);
+  const evb1b = db1b.events || [];
+  log('RFIX2-B1-3 第二条 → 不新建守卫（Bug1修复验证）',
+    !has(evb1b, 'skill_guard_activated'), '同skill不重建');
+  log('RFIX2-B1-4 第二条 → 运行守卫判断', has(evb1b, 'skill_guard_judgment'), '应走判断路径');
+  log('RFIX2-B1-5 第二条 → 有回复', has(evb1b, 'reply_sent'));
+
+  // ── Bug3: processing/submitted 工单时不进守卫/推荐流程 ───────────────────
+  console.log('\n[RFIX2-Bug3] 工单processing → 意向消息不创建守卫，回复处理中');
+  await clearGuards();
+  await expireAllTestTickets();
+
+  const tB3 = await createTicket(skill.id, { title: `RFIX2_B3_${RUN_ID}` });
+  if (tB3) {
+    // 使用 /status 接口（同 expireTicket），PUT /api/tickets/:id 不更新status
+    await fetch(`${BASE}/api/tickets/${tB3.id}/status`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'processing' }),
+    });
+    await sleep(500);
+    const { taskId: b3t } = await chat('我想要AI营养师帮我做营养分析', `rfix2_b3_${RUN_ID}`);
+    await sleep(10000);
+    const db3 = await events(b3t, 13000);
+    const evb3 = db3.events || [];
+    log('RFIX2-B3-1 processing工单 → 不新建守卫（Bug3修复验证）',
+      !has(evb3, 'skill_guard_activated'));
+    log('RFIX2-B3-2 Agent有回复（不崩溃）', has(evb3, 'reply_sent'));
+    const replyB3 = replyText(evb3);
+    log('RFIX2-B3-3 回复提示工单进行中',
+      replyB3.includes('处理') || replyB3.includes('分析') ||
+      replyB3.includes('等待') || replyB3.includes('工单') || replyB3.includes('进行'),
+      `回复: ${replyB3.slice(0, 80)}`);
+    await expireTicket(tB3.id);
+  }
+
+  // ── Bug2: done 工单 + 重做意图 → expire旧单，新建工单 ────────────────────
+  console.log('\n[RFIX2-Bug2] done工单 + 重做意图 → expire旧单+新建工单');
+  await clearGuards();
+  await expireAllTestTickets();
+  const sessB2 = `rfix2_b2_${RUN_ID}`;
+
+  const tB2 = await createTicket(skill.id, { title: `RFIX2_B2_${RUN_ID}` });
+  if (tB2) {
+    log('RFIX2-B2-0 注入done报告',
+      await injectReport(tB2.id, '【测试报告】营养分析完成，建议多吃蔬菜减少精制碳水。'));
+    await sleep(500);
+
+    // Round1: 有done工单 → 发意向 → done不阻断Step4 → 建守卫
+    const { taskId: b2t1 } = await chat('我想要AI营养师帮我做营养分析', sessB2);
+    await sleep(8000);
+    const db2a = await events(b2t1);
+    log('RFIX2-B2-1 有done工单时仍可建守卫（done不阻断推荐）',
+      has(db2a.events||[], 'skill_guard_activated'));
+
+    // Round2: 确认 + 重做关键词 → judgment=yes → handleHealthSkill → redo
+    await sleep(1000);
+    const { taskId: b2t2 } = await chat('好的，我想重新再做一次，帮我开始', sessB2);
+    await sleep(13000);
+    const db2b = await events(b2t2, 17000);
+    const evb2b = db2b.events || [];
+    const gjB2 = payload(evb2b, 'skill_guard_judgment');
+    log('RFIX2-B2-2 守卫判断运行', has(evb2b, 'skill_guard_judgment'));
+    log('RFIX2-B2-3 判断=confirm:yes（含重做+确认意图）', gjB2?.confirm === 'yes',
+      `confirm=${gjB2?.confirm} interest=${gjB2?.interest}`);
+    log('RFIX2-B2-4 新建工单（不显示旧报告）', has(evb2b, 'ticket_created'),
+      'Bug2修复验证：重做意图→新建工单');
+    log('RFIX2-B2-5 Agent有回复', has(evb2b, 'reply_sent'));
+
+    // 验证旧工单已被 expire
+    const oldTData = await fetch(`${BASE}/api/tickets/${tB2.id}`)
+      .then(r => r.json()).catch(() => ({}));
+    const oldStatus = oldTData?.ticket?.status || oldTData?.status;
+    log('RFIX2-B2-6 旧工单已被expire（Bug2关键断言）', oldStatus === 'expired',
+      `旧单status=${oldStatus}`);
+
+    // 新旧工单 ID 不同
+    const tcEvB2 = evb2b.find(e => e.event_type === 'ticket_created');
+    if (tcEvB2) {
+      const tcp = typeof tcEvB2.payload === 'string' ? JSON.parse(tcEvB2.payload) : tcEvB2.payload;
+      const newTid = tcp?.ticket_id || tcp?.ticketId || tcp?.id;
+      log('RFIX2-B2-7 新工单ID与旧工单不同', !!newTid && newTid !== tB2.id,
+        `new=${(newTid||'?').slice(0,12)} old=${tB2.id.slice(0,12)}`);
+      if (newTid) await expireTicket(newTid);
+    }
+    if (oldStatus !== 'expired') await expireTicket(tB2.id);
+  }
+
+  // ── 架构验证: 守卫判断在路由后（event 顺序）─────────────────────────────
+  console.log('\n[RFIX2-Arch] 守卫判断在路由后 → context_snapshot < route_decided < skill_guard_judgment');
+  await clearGuards();
+  await expireAllTestTickets();
+  const sessArch = `rfix2_arch_${RUN_ID}`;
+
+  await chat('我想要AI营养师', sessArch);
+  await sleep(8000);
+
+  await sleep(1000);
+  // 发确认意图消息（而非提问），让守卫判断有机会运行（routing 可能 none，但守卫判断独立于 routing）
+  const { taskId: archT } = await chat('好的，帮我开始分析吧', sessArch);
+  await sleep(10000);
+  const dArch = await events(archT, 14000);
+  const evArch = dArch.events || [];
+  const archTypes = evArch.map(e => e.event_type);
+  const ctxIdx = archTypes.indexOf('context_snapshot');
+  const rdIdx  = archTypes.indexOf('route_decided');
+  const gjIdx  = archTypes.indexOf('skill_guard_judgment');
+
+  console.log(`  📋 事件顺序: ...${archTypes.slice(Math.max(0,ctxIdx-1)).join(' → ')}`);
+  log('RFIX2-Arch-1 context_snapshot < route_decided（快照在路由前）',
+    ctxIdx !== -1 && rdIdx !== -1 && ctxIdx < rdIdx, `ctx[${ctxIdx}] rd[${rdIdx}]`);
+  log('RFIX2-Arch-2 route_decided < skill_guard_judgment（守卫判断在路由后）',
+    rdIdx !== -1 && gjIdx !== -1 && rdIdx < gjIdx, `rd[${rdIdx}] gj[${gjIdx}]`);
+  log('RFIX2-Arch-3 skill_guard_judgment 事件确实存在', gjIdx !== -1, `gj索引=${gjIdx}`);
+}
+
+// ══════════════════════════════════════════════════════════════
 // 主流程
 // ══════════════════════════════════════════════════════════════
 async function main() {
@@ -869,6 +1013,7 @@ async function main() {
   await testAgentContextAssembled();       // S6: agent_context_assembled (3)
   await testMultiTurnIntegration();        // INT: 同session多轮 (9)
   await testGuardFixRegression();          // GFIX: 守卫修复回归 (8)
+  await testRefactorBugFixes();            // RFIX2: 双守卫/重做/Processing/架构顺序 (20)
   await testTicketAndQuery();              // T09-T14: 工单+query_ticket (12)
 
   await testHistoricalConversations();      // HIST: 历史对话场景 (18)
