@@ -656,12 +656,15 @@ async function callGeminiMessages(
       } else if (fnName === 'query_ticket') {
         // Step 6 (v2): 查询工单/报告内容
         const ticket = await db.getAsync<any>(
-          `SELECT id, skill_id, skill_name, status, raw_result, report_url, created_at
-           FROM tickets
-           WHERE created_by=? AND status IN ('done','processing','submitted','waiting_input')
-           ORDER BY created_at DESC LIMIT 1`,
+          `SELECT t.id, t.skill_id, t.skill_name, t.status, t.created_at,
+                  tr.raw_result, tr.report_url
+           FROM tickets t
+           LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+           WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input')
+           ORDER BY t.created_at DESC LIMIT 1`,
           [userId || ''],
         ).catch(() => null);
+
         if (ticket) {
           result = JSON.stringify({
             ticket_id:    ticket.id,
@@ -2031,7 +2034,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 请判断：
 - interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
 - confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
-  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「匂」等无动词，或在提问）
+  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
 
 输出示例：
 - 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
