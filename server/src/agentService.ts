@@ -2074,6 +2074,12 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         currentGuardStatus    = 'confirmed_ticket';
         currentGuardSkillName = activeGuardRow.skill_name;
         // selectedSkillId/Name 保持（routeDecision 已返回同一 skill）→ handleHealthSkill
+      } else if (guardResult.confirm === 'no') {
+        // interest=yes 但明确拒绝（confirm=no）→ 关闭守卫，走正常回答
+        await closeGuard('user_declined_explicit');
+        currentGuardStatus    = 'declined';
+        currentGuardSkillName = activeGuardRow.skill_name;
+        selectedSkillId   = null;   // → handleHealthDirect
       } else {
         // unclear
         const isUserAsking = req.content.includes('？') || req.content.includes('?');
