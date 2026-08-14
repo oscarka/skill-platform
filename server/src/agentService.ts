@@ -2217,9 +2217,10 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     // ── Step 5 (v2): 组装 Agent 上下文包 + directive（直接回复路径）──────────────
     // guardStatus 说明：
     //   none           = 无守卫，无工单
-    //   pending_unclear= 守卫存在但用户未确认（保留守卫，继续追问）
+    //   pending_unclear= 守卫存在但用户未确认（保留守卫，Agent 引导确认）
     //   declined       = 用户拒绝了守卫，正常回答
-    //   new_created    = 守卫被新建（但此路径是已跳过 skill_suggest 的 fallthrough，很少见）
+    //   new_created    = 守卫刚新建（Agent 介绍服务，询问是否确认），是正常的首次推荐路径
+    //   confirmed_ticket= 用户已确认 → 走 handleHealthSkill，不到这里
     const agentCtxPkg = assembleAgentContext({
       req,
       routeSkillId:   selectedSkillId,
