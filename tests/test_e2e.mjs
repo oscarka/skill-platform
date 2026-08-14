@@ -598,7 +598,7 @@ async function testTicketAndQuery() {
   console.log('\n[T09] 工单processing中 — AI查状态告知');
   const t9 = await createTicket(skill.id, { title: `T09_${RUN_ID}` });
   if (t9) {
-    await fetch(`${BASE}/api/tickets/${t9.id}`, {
+    await fetch(`${BASE}/api/tickets/${t9.id}/status`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'processing' }),
     });

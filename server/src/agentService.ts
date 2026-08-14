@@ -1089,14 +1089,18 @@ function assembleAgentContext(params: {
       directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
         + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
     } else if (existingTicket.status === 'done' && existingTicket.reportContent) {
-      directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告（报告内容见下方）。`
-        + `如用户询问报告细节，请结合报告内容具体回答。`;
+      // 报告已完成且有内容：主动告知用户报告已生成
+      directive = `用户的「${existingTicket.skillName}」分析报告已完成，请直接告知用户报告已生成（报告原文见下方）。`
+        + `如用户询问具体建议或细节，请结合下方报告内容回答；`
+        + (existingTicket.reportUrl ? `如用户询问报告在哪查看，提供此链接：${existingTicket.reportUrl}` : `告知报告内容已在此对话中呈现`);
     } else if (existingTicket.status === 'done') {
-      directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告。`
-        + (existingTicket.reportUrl ? `\n报告链接：${existingTicket.reportUrl}` : '');
-    } else if (existingTicket.status === 'waiting_input' && existingTicket.h5Url) {
-      directive = `用户有一个未填写的「${existingTicket.skillName}」工单。`
-        + `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`;
+      directive = `用户的「${existingTicket.skillName}」分析报告已完成，请告知用户报告已生成。`
+        + (existingTicket.reportUrl ? `\n报告查看链接：${existingTicket.reportUrl}` : '');
+    } else if (existingTicket.status === 'waiting_input') {
+      directive = `用户有一个待填写的「${existingTicket.skillName}」工单。`
+        + (existingTicket.h5Url
+          ? `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`
+          : `\n请告知用户工单已创建，稍后会收到填写链接通知。`);
     }
   }
   // guardStatus=none + 无工单 → directive 为空，Agent 正常回答
@@ -1234,7 +1238,8 @@ async function handleHealthDirect(
 - 如无健康档案，基于对话内容给出通用建议
 - 如【当前任务指令】中包含链接（如工单链接、报告链接），直接使用该链接，不要自行生成任何 URL
 - 不要提“系统正在处理”、“请稍等”等等待话术；若工单正在处理中，只需简短告知并安抚即可
-- 只有当【当前任务指令】未提供工单信息，且客户明确提到“曾提交过某项分析服务”，才调用 query_ticket 工具补充查询`;
+- 只有当客户明确提到曾经提交过某项分析服务（如「我提交的报告」「之前做的营养分析」「我的工单结果」「分析报告出来了吗」等），才调用 query_ticket 工具查询最新状态；【当前任务指令】中已有工单信息时优先按指令行事，但仍可调用 query_ticket 确认最新状态
+- 工单状态处理规则：「wait_input」=待填写，给填写链接；「submitted/processing」=处理中，安抚并告知；「done」=已完成，引用 report 字段内容回答，附 report_url`;
 
   const contextBlock = [
     notes ? `【客户备注】\n${notes}` : '',
