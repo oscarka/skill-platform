@@ -1317,7 +1317,18 @@ async function handleHealthSkill(
         } else if (existing.status === 'submitted' || existing.status === 'processing') {
           reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳`;
         } else if (existing.status === 'done') {
-          reply = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看报告：\n${reportUrl}`;
+          // Bug2 修复：检测重做意图（「重来/再做」等）→ expire 旧工单，fall-through 新建
+          const wantsRedo = /重新|再做|再来|新的|重来|重做/.test(content);
+          if (wantsRedo) {
+            await db.runAsync(
+              `UPDATE tickets SET status='expired', updated_at=? WHERE id=?`,
+              [Date.now(), existing.id]
+            );
+            console.log(`[AgentService] 🔄 用户要求重做，旧工单 ${existing.id} → expired，将新建工单`);
+            // reply 为空 → 跳过 if(reply) 块，继续新建工单
+          } else {
+            reply = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看报告：\n${reportUrl}`;
+          }
         } else if (existing.status === 'returned') {
           const reason = existing.return_reason ? `\n原因：${existing.return_reason}\n\n` : '\n\n';
           reply = `${fromName}，工作人员已审阅并打回您的「${skillName}」工单，请重新填写：${reason}${exUrl}`;
@@ -1813,15 +1824,15 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   });
   console.log(`[AgentService] 📸 context_snapshot: guard=${ctxSnapshot.activeGuard?.skill_name||'none'} ticket=${ctxSnapshot.recentTicket?.status||'none'}`);
 
-  // ── Step 0.9: Skill 确认守卫前置检查 ─────────────────────────────────────────
-  // 在 routeMessage 之前检查：当前 session 是否有激活的 skill_suggest 守卫？
-  // 如果有，运行三值判断（感兴趣/确认），跳过或改写后续路由
-  let guardHint = '';  // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
-  let currentGuardStatus: GuardStatus = 'none';          // Step 5 (v2): 追踪守卫状态
-  let currentGuardSkillName: string | null = null;       // Step 5 (v2): 守卫对应的 skill
-  let isFirstClarify = false;                            // Step 7fix: 首次 unclear 需要 Agent 主动引导
-  if (sessionId) {
+  // ── Step 0.9: Skill 确认守卫存在性检查（AI判断移至路由后 Step 4，plan 1.2/1.3）────
+  // 只检查守卫是否存在 + 轮次限制，不在路由前做 AI 判断。
+  // 守卫 AI 判断（yes/unclear/no）在 routeDecision 之后、Step 4 里运行。
+  let currentGuardStatus: GuardStatus = 'none';      // Step 5 (v2): 追踪守卫状态
+  let currentGuardSkillName: string | null = null;   // Step 5 (v2): 守卫对应的 skill
+  let isFirstClarify = false;                        // 首次 unclear → Agent 主动引导
+  let activeGuardRow: any = null;                    // 非 null = 守卫有效且未超轮次，留给 Step 4
 
+  if (sessionId) {
     const nowMs = Date.now();
     const activeGuard = await db.getAsync<any>(
       `SELECT * FROM skill_confirm_guards
@@ -1830,15 +1841,12 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       [sessionId, nowMs],
     );
     if (activeGuard) {
-      const MAX_GUARD_ROUNDS = 10;  // 超过 10 轮未确认则自动关闭守卫
-
-      // 每次检查都递增 check_count
+      const MAX_GUARD_ROUNDS = 10;
       const newCheckCount = (activeGuard.check_count || 0) + 1;
       await db.runAsync(
         `UPDATE skill_confirm_guards SET check_count=? WHERE id=?`,
         [newCheckCount, activeGuard.id],
       );
-
       console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name} round=${newCheckCount}/${MAX_GUARD_ROUNDS}`);
       void appendTaskEvent(requestId, 'skill_guard_check', {
         guardId: activeGuard.id,
@@ -1849,7 +1857,6 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         maxRounds: MAX_GUARD_ROUNDS,
         userMsg: req.content.slice(0, 200),
       });
-      // ── Step 4 (v2): guard_lifecycle=existing 事件 ─────────────────────────
       void appendTaskEvent(requestId, 'guard_lifecycle', {
         action: 'existing',
         guardId: activeGuard.id,
@@ -1857,7 +1864,6 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
         skillName: activeGuard.skill_name,
         round: newCheckCount,
       });
-      // 超过轮数限制→自动关闭，往下游传 hint
       if (newCheckCount > MAX_GUARD_ROUNDS) {
         await db.runAsync(
           `UPDATE skill_confirm_guards SET status='closed', close_reason='round_limit' WHERE id=?`,
@@ -1870,153 +1876,12 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
           reason: 'round_limit',
           checkCount: newCheckCount,
         });
-        guardHint = `[守卫提示：用户连续${MAX_GUARD_ROUNDS}轮没有确认「${activeGuard.skill_name}」服务，守卫已自动关闭，请正常回答]`;
+        // 超轮后守卫关闭，activeGuardRow 保持 null，后续按无守卫处理
       } else {
-      // 截取 suggest_ts 之后的对话（让 AI 看到完整上下文，而非只看最后一条）
-      const historyAfterSuggest = (req.history || [])
-        .filter((h: any) => !h.ts || h.ts >= activeGuard.suggest_ts)
-        .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
-        .join('\n');
-
-      // 守卫 AI 判断：用 callGeminiMessages，明确禁止推理过程，max_tokens 足够大确保 JSON 不被截断
-      const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
-
-背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务。
-
-对话记录：
-${historyAfterSuggest || '（推荐后暂无其他对话）'}
-
-用户最新消息：「${req.content}」
-
-请判断：
-- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
-- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
-  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
-
-输出示例：
-- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
-
-只输出 JSON，不输出任何其他文字：`;
-
-      const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
-
-      let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
-
-      try {
-        const t0 = Date.now();
-        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
-        const durationMs = Date.now() - t0;
-        // 支持模型输出 {"interest":...} 或前缀文字 + {"interest":...}
-        // 去除 markdown 代码块后提取 JSON（支持模型在 JSON 前后有额外文字）
-        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
-        let parsed: any = {};
-        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* keep {} */ } }
-        guardResult = {
-          interest: parsed.interest === 'no' ? 'no' : 'yes',
-          confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
-        };
-        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0,100)}"`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
-          guardId: activeGuard.id,
-          skillName: activeGuard.skill_name,
-          interest: guardResult.interest,
-          confirm: guardResult.confirm,
-          durationMs,
-          rawResult: raw.slice(0, 300),
-        });
-      } catch (e: any) {
-        console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
-          guardId: activeGuard.id,
-          error: e.message,
-          interest: 'yes',
-          confirm: 'unclear',
-        });
+        activeGuardRow        = activeGuard;       // 守卫有效，留给 Step 4 路由后判断
+        currentGuardStatus    = 'pending_unclear'; // 预设；Step 4 判断后会更新
+        currentGuardSkillName = activeGuard.skill_name;
       }
-
-      const closeGuard = async (reason: string) => {
-        await db.runAsync(
-          `UPDATE skill_confirm_guards SET status='closed', close_reason=? WHERE id=?`,
-          [reason, activeGuard.id],
-        );
-        console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuard.id} reason=${reason}`);
-        void appendTaskEvent(requestId, 'skill_guard_closed', {
-          guardId: activeGuard.id,
-          skillName: activeGuard.skill_name,
-          reason,
-        });
-      };
-
-      if (guardResult.interest === 'no') {
-        // ─ 用户不感兴趣 → 关闭守卫，往下游传 hint，走正常路由 ─
-        await closeGuard('user_declined');
-        guardHint = `[守卫提示：用户之前对「${activeGuard.skill_name}」服务不感兴趣，本轮消息与此无关，请正常回答]`;
-        currentGuardStatus    = 'declined';                 // Step 5
-        currentGuardSkillName = activeGuard.skill_name;    // Step 5
-
-      } else if (guardResult.confirm === 'yes') {
-        // ─ 明确确认 → 关闭守卫，直接执行 skill（跳过 routeMessage）─
-        await closeGuard('user_confirmed');
-        console.log(`[SkillGuard] ✅ 用户确认，直接执行 skill ${activeGuard.skill_id}`);
-        currentGuardStatus    = 'confirmed_ticket';         // Step 5（工单将在 handleHealthSkill 创建）
-        currentGuardSkillName = activeGuard.skill_name;    // Step 5
-
-        // 将 skill_id 注入 req，让后续代码当作「前端强制指定」处理
-        (req as any).skill_id = activeGuard.skill_id;
-
-      } else if (guardResult.confirm === 'unclear') {
-        // ─ 模糊确认 → 检查是否已经追问过 ─
-        // 如果用户在提问（消息较长/含问号），让正常路由回答，守卫继续等
-        // 只有用户发了短暂模糊回复（如「好的」「嗯」）且本次 guard 还没追问过，才触发追问
-        const isUserAsking = req.content.includes('？') || req.content.includes('?');
-
-        // 查是否已对此 guard 追问过
-        const prevClarifyCount = await db.getAsync<any>(
-          `SELECT COUNT(*) as cnt FROM agent_task_events
-           WHERE event_type='skill_guard_clarify'
-             AND JSON_EXTRACT(payload,'$.guardId')=?`,
-          [activeGuard.id],
-        ).then((r: any) => r?.cnt || 0).catch(() => 0);
-
-        if (isUserAsking || prevClarifyCount > 0) {
-          // 用户在提问，或已追问过 → 走正常路由，守卫保持
-          console.log(`[SkillGuard] ❓ unclear 但用户在提问或已追问过(${prevClarifyCount}次)，走正常路由`);
-          void appendTaskEvent(requestId, 'skill_guard_judgment', {
-            guardId: activeGuard.id,
-            note: `unclear→正常路由 isUserAsking=${isUserAsking} prevClarify=${prevClarifyCount}`,
-          });
-          currentGuardStatus    = 'pending_unclear';          // Step 5
-          currentGuardSkillName = activeGuard.skill_name;   // Step 5
-          // guardHint 不设置，直接 fall through 到正常路由
-        } else {
-          // 用户发了短暂模糊词 且 尚未追问过 → 不再直接发守卫消息，改走 Agent
-          // Agent 会通过 directive(pending_unclear+isFirstClarify) 自然地引导用户确认
-          console.log(`[SkillGuard] ❓ 首次模糊确认，交给 Agent 引导（不再守卫直接发消息）`);
-          void appendTaskEvent(requestId, 'skill_guard_clarify', {
-            guardId: activeGuard.id,
-            skillName: activeGuard.skill_name,
-            note: '首次unclear→交给Agent引导',
-          });
-          currentGuardStatus    = 'pending_unclear';        // Step 5: Agent 将收到 pending_unclear directive
-          currentGuardSkillName = activeGuard.skill_name;
-          isFirstClarify        = true;                      // 首次 unclear → Agent 需要主动引导
-          // fall through → Agent 根据 directive 生成自然的引导回复
-        }
-
-
-      } else {
-        // ─ confirm=no（明确不用）→ 关闭守卫，走正常路由 ─
-        await closeGuard('user_declined_explicit');
-        guardHint = `[守卫提示：用户明确不使用「${activeGuard.skill_name}」服务，请正常回答]`;
-        currentGuardStatus    = 'declined';                  // Step 5
-        currentGuardSkillName = activeGuard.skill_name;     // Step 5
-      }
-      }  // end: else(未超轮数)
     }
   }
 
@@ -2053,12 +1918,12 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     routeReason       = `守卫确认/前端强制 skill_id=${forcedSkillId}`;
     void appendTaskEvent(requestId, 'route_decided', {
       confidence: 'high', skill_id: selectedSkillId, skill_name: selectedSkillName,
-      reason: routeReason, forced: true, durationMs: 0, guardHint: guardHint || null,
+      reason: routeReason, forced: true, durationMs: 0,
     });
   } else {
     // 正常路由：单次 AI 调用（v2）
     const rdResult = await routeDecision(
-      guardHint ? `${req.content}\n${guardHint}` : req.content,
+      req.content,  // 守卫判断已移至路由后，无需 guardHint
       req.history || [],
       req.notes || '',
       availableSkills,
@@ -2079,7 +1944,6 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
       durationMs: rdResult.durationMs,
       model:      rdResult.model,
       rawResult:  rdResult.rawResult?.slice(0, 200),
-      guardHint:  guardHint || null,
     });
   }
 
@@ -2112,101 +1976,184 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     return chatResult;
   }
 
-  // ── Step 4 (v2): confidence=high → skill_suggest 推荐流程（v2 暂保留模板，Step8改为Agent）
-  if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId) {
-    console.log(`[AgentService] 💡 skill_suggest: skill=${selectedSkillName}(${selectedSkillId}) 高置信度，向用户介绍并询问确认`);
-    currentGuardStatus    = 'new_created';   // Step 5: 标记守卫状态
-    currentGuardSkillName = selectedSkillName;
+  // ── Step 4 (v2): 路由后守卫管理 + 守卫 AI 判断（plan 1.2 规则1 / plan 1.3）────────
+  // 规则：routeDecision=high → 查同skill守卫
+  //   有同skill守卫 → 运行守卫 AI 判断（yes/unclear/no）→ 结果驱动后续行为
+  //   无守卫/不同skill守卫 → 新建守卫，fall-through 到 handleHealthDirect（Agent 介绍服务）
+  // Bug3 修复：processing/submitted 状态下不进入守卫/推荐流程
+  if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId
+      && !(['processing', 'submitted'] as string[]).includes(ctxSnapshot.recentTicket?.status || '')) {
 
+    if (activeGuardRow && activeGuardRow.skill_id === selectedSkillId) {
+      // ─ 同 skill 守卫已存在 → 路由后守卫 AI 判断（plan 1.3）──────────────────
+      console.log(`[SkillGuard] 🔍 路由后守卫判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
 
-    // ── Step 4 (v2): 跨skill守卫切换 ─────────────────────────────────────────
-    // 若当前有活跃守卫且是【不同 skill】，先关闭旧守卫，再建新守卫
-    if (ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id !== selectedSkillId) {
-      const oldGuard = ctxSnapshot.activeGuard;
+      const historyAfterSuggest = (req.history || [])
+        .filter((h: any) => !h.ts || h.ts >= activeGuardRow.suggest_ts)
+        .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
+        .join('\n');
+
+      const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
+
+背景：AI助手之前向用户推荐了「${activeGuardRow.skill_name}」服务。
+
+对话记录：
+${historyAfterSuggest || '（推荐后暂无其他对话）'}
+
+用户最新消息：「${req.content}」
+
+请判断：
+- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
+- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
+  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
+
+输出示例：
+- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
+
+只输出 JSON，不输出任何其他文字：`;
+
+      const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
+      let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
+
       try {
-        await db.runAsync(
-          `UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`,
-          [oldGuard.id],
-        );
-        console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${oldGuard.id} skill=${oldGuard.skill_name}`);
-        void appendTaskEvent(requestId, 'guard_lifecycle', {
-          action: 'closed_by_new_skill',
-          guardId: oldGuard.id,
-          oldSkillId: oldGuard.skill_id,
-          oldSkillName: oldGuard.skill_name,
-          newSkillId: selectedSkillId,
-          newSkillName: selectedSkillName,
+        const t0 = Date.now();
+        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
+        const durationMs = Date.now() - t0;
+        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
+        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
+        let parsed: any = {};
+        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* keep {} */ } }
+        guardResult = {
+          interest: parsed.interest === 'no' ? 'no' : 'yes',
+          confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
+        };
+        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0,100)}"`);
+        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+          guardId: activeGuardRow.id,
+          skillName: activeGuardRow.skill_name,
+          interest: guardResult.interest,
+          confirm: guardResult.confirm,
+          durationMs,
+          rawResult: raw.slice(0, 300),
         });
       } catch (e: any) {
-        console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
+        console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
+        void appendTaskEvent(requestId, 'skill_guard_judgment', {
+          guardId: activeGuardRow.id,
+          error: e.message,
+          interest: 'yes',
+          confirm: 'unclear',
+        });
       }
+
+      const closeGuard = async (reason: string) => {
+        await db.runAsync(
+          `UPDATE skill_confirm_guards SET status='closed', close_reason=? WHERE id=?`,
+          [reason, activeGuardRow.id],
+        );
+        console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuardRow.id} reason=${reason}`);
+        void appendTaskEvent(requestId, 'skill_guard_closed', {
+          guardId: activeGuardRow.id,
+          skillName: activeGuardRow.skill_name,
+          reason,
+        });
+      };
+
+      if (guardResult.interest === 'no') {
+        await closeGuard('user_declined');
+        currentGuardStatus    = 'declined';
+        currentGuardSkillName = activeGuardRow.skill_name;
+        selectedSkillId   = null;   // → handleHealthDirect 正常回答
+      } else if (guardResult.confirm === 'yes') {
+        await closeGuard('user_confirmed');
+        console.log(`[SkillGuard] ✅ 用户确认，执行 skill ${activeGuardRow.skill_id}`);
+        currentGuardStatus    = 'confirmed_ticket';
+        currentGuardSkillName = activeGuardRow.skill_name;
+        // selectedSkillId/Name 保持（routeDecision 已返回同一 skill）→ handleHealthSkill
+      } else {
+        // unclear
+        const isUserAsking = req.content.includes('？') || req.content.includes('?');
+        const prevClarifyCount = await db.getAsync<any>(
+          `SELECT COUNT(*) as cnt FROM agent_task_events
+           WHERE event_type='skill_guard_clarify'
+             AND JSON_EXTRACT(payload,'$.guardId')=?`,
+          [activeGuardRow.id],
+        ).then((r: any) => r?.cnt || 0).catch(() => 0);
+
+        if (!isUserAsking && prevClarifyCount === 0) {
+          void appendTaskEvent(requestId, 'skill_guard_clarify', {
+            guardId: activeGuardRow.id,
+            skillName: activeGuardRow.skill_name,
+            note: '首次unclear→交给Agent引导',
+          });
+          isFirstClarify = true;
+        }
+        currentGuardStatus    = 'pending_unclear';
+        currentGuardSkillName = activeGuardRow.skill_name;
+        selectedSkillId   = null;   // → handleHealthDirect with pending_unclear directive
+      }
+
+    } else {
+      // ─ 无守卫 或 不同 skill 守卫 → 新建守卫（plan 1.2 规则1）───────────────
+      // 关闭不同 skill 的旧守卫（跨 skill 切换）
+      if (activeGuardRow) {
+        try {
+          await db.runAsync(
+            `UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`,
+            [activeGuardRow.id],
+          );
+          console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
+          void appendTaskEvent(requestId, 'guard_lifecycle', {
+            action: 'closed_by_new_skill',
+            guardId: activeGuardRow.id,
+            oldSkillId: activeGuardRow.skill_id,
+            oldSkillName: activeGuardRow.skill_name,
+            newSkillId: selectedSkillId,
+            newSkillName: selectedSkillName,
+          });
+        } catch (e: any) {
+          console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
+        }
+      }
+
+      // 新建守卫
+      const newGuardSkillId   = selectedSkillId!;
+      const newGuardSkillName = selectedSkillName!;
+      const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+      const nowTs = Date.now();
+      try {
+        await db.runAsync(
+          `INSERT INTO skill_confirm_guards
+            (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
+           '', nowTs, nowTs, nowTs + 30 * 60 * 1000],
+        );
+        console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
+        void appendTaskEvent(requestId, 'skill_guard_activated', {
+          guardId, skillId: newGuardSkillId, skillName: newGuardSkillName,
+          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+        });
+        void appendTaskEvent(requestId, 'guard_lifecycle', {
+          action: 'new_created', guardId,
+          skillId: newGuardSkillId, skillName: newGuardSkillName,
+          expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+        });
+        void appendTaskEvent(requestId, 'skill_suggest', {
+          skillId: newGuardSkillId, skillName: newGuardSkillName, reason: routeReason,
+        });
+      } catch (e: any) {
+        console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
+      }
+
+      currentGuardStatus    = 'new_created';
+      currentGuardSkillName = newGuardSkillName;
+      selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
     }
-
-    // 若当前已有相同 skill 的活跃守卫，不重复创建
-    const existingSameGuard = ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id === selectedSkillId
-      ? ctxSnapshot.activeGuard : null;
-    if (existingSameGuard) {
-      console.log(`[SkillGuard] ♻️ 同skill守卫已存在 id=${existingSameGuard.id}，不重复创建`);
-      void appendTaskEvent(requestId, 'guard_lifecycle', {
-        action: 'existing',
-        guardId: existingSameGuard.id,
-        skillId: selectedSkillId,
-        skillName: selectedSkillName,
-        note: 'skill_suggest重入：同skill守卫已存在',
-      });
-    }
-
-
-    const fromName = req.meta.from_name || '您';
-    const skillDescText = selectedSkillDesc || '';
-    const suggestMsg = `${fromName}，根据您的需求，我们有一项「${selectedSkillName}」服务可能适合您。\n\n${skillDescText ? `📋 ${skillDescText.slice(0, 100)}${skillDescText.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
-
-    void appendTaskEvent(requestId, 'skill_suggest', {
-      skillId: selectedSkillId, skillName: selectedSkillName, reason: routeReason, suggestMsg,
-    });
-    void appendTaskEvent(requestId, 'reply_sent', {
-      replyLen: suggestMsg.length, reply: suggestMsg.slice(0, 300),
-      channel: delivery.app, recipient: delivery.recipient, note: 'skill_suggest',
-    });
-
-    const nowTs = Date.now();
-    void updateAgentTask(requestId, {
-      status: 'done', routeType: 'skill_suggest', skillId: selectedSkillId,
-      replyContent: suggestMsg.slice(0, 500), endedAt: nowTs, durationMs: nowTs - taskStartMs,
-    });
-
-    // 激活守卫
-    const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
-    try {
-      await db.runAsync(
-        `INSERT INTO skill_confirm_guards
-          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-        [guardId, sessionId, userId, selectedSkillId, selectedSkillName,
-         suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000],
-      );
-      console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${selectedSkillName} session=${sessionId}`);
-      void appendTaskEvent(requestId, 'skill_guard_activated', {
-        guardId, skillId: selectedSkillId, skillName: selectedSkillName,
-        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
-      });
-      // ── Step 4 (v2): guard_lifecycle=new_created 标准事件 ─────────────────
-      void appendTaskEvent(requestId, 'guard_lifecycle', {
-        action:    'new_created',
-        guardId,
-        skillId:   selectedSkillId,
-        skillName: selectedSkillName,
-        expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
-      });
-    } catch (e: any) {
-      console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
-    }
-
-    return {
-      request_id: requestId, status: 'done', reply: suggestMsg, delivery,
-      reasoning:  `Skill「${selectedSkillName}」高置信度匹配，询问用户确认`,
-      route_type: 'skill_suggest',
-    } as any;
   }
 
 
