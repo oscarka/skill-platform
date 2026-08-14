@@ -1274,7 +1274,8 @@ async function testJuheChannel() {
     const r = await fetch(`${BASE}/api/v1/agent/tasks?limit=10`);
     const d = await r.json();
     const tasks = d.tasks || [];
-    const juheTask = tasks.find(t => t.source_channel === 'juhe' && t.user_id === JUHE_USER_ID);
+    const juheTask = tasks.find(t => t.source_channel === 'juhe' &&
+      (t.user_id === JUHE_USER_ID || t.user_id === `juhe_${JUHE_USER_ID}`));
     log('JUHE-3 找到 juhe channel task', !!juheTask, juheTask ? `id=${juheTask.id} status=${juheTask.status}` : '未找到');
 
     if (juheTask) {

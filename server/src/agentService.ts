@@ -1206,6 +1206,7 @@ async function handleHealthDirect(
   delivery: AgentDelivery,
   profile: AgentProfile,
   skillRouteLog: SkillRouteLog,
+  agentCtxPkg?: AgentContextPackage,   // Step 5 组装的上下文包（含 directive + existingTicket）
 ): Promise<AgentResponse> {
   const { content, meta, history = [], notes = '' } = req;
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
@@ -1214,13 +1215,26 @@ async function handleHealthDirect(
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
   const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
   const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
+
+  // ── 工单 / 守卫 directive 块（来自 agentCtxPkg）────────────────────────────────────────
+  const directiveBlock = agentCtxPkg?.directive
+    ? `\n\n【当前任务指令】\n${agentCtxPkg.directive}`
+    : '';
+  // 若已完成报告有内容，直接注入报告原文（AI 可据此回答细节问题）
+  const reportBlock = agentCtxPkg?.existingTicket?.reportContent
+    ? `\n\n【分析报告原文（${agentCtxPkg.existingTicket.skillName}）】\n${agentCtxPkg.existingTicket.reportContent}`
+    : '';
+
   const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
-回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}${reportBlock}
 
 要求：
 - 不要使用 Markdown 格式
 - 亲切专业，直接称呼客户为"${fromName}"
-- 如无健康档案，基于对话内容给出通用建议`;
+- 如无健康档案，基于对话内容给出通用建议
+- 如【当前任务指令】中包含链接（如工单链接、报告链接），直接使用该链接，不要自行生成任何 URL
+- 不要提“系统正在处理”、“请稍等”等等待话术；若工单正在处理中，只需简短告知并安抚即可
+- 只有当【当前任务指令】未提供工单信息，且客户明确提到“曾提交过某项分析服务”，才调用 query_ticket 工具补充查询`;
 
   const contextBlock = [
     notes ? `【客户备注】\n${notes}` : '',
@@ -2210,6 +2224,15 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
   if (selectedSkillId && selectedSkillName) {
     const skillDesc = availableSkills.find(s => s.id === selectedSkillId);
     const _wikiForLog = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
+    // INT-8 fix: handleHealthSkill 路径也发 agent_context_assembled（便于日志链完整性检查）
+    void appendTaskEvent(requestId, 'agent_context_assembled', {
+      guardStatus:  currentGuardStatus,
+      routeSkill:   selectedSkillName,
+      confidence:   routeConfidence,
+      hasTicket:    !!ctxSnapshot.recentTicket,
+      ticketStatus: ctxSnapshot.recentTicket?.status || null,
+      directive:    'handleHealthSkill path',
+    });
     void appendTaskEvent(requestId, 'skill_started', {
       skillId: selectedSkillId,
       skillName: selectedSkillName,
@@ -2259,7 +2282,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     });
     console.log(`[AgentService] 📦 agent_context_assembled: guardStatus=${agentCtxPkg.guardStatus} directive=${agentCtxPkg.directive?.slice(0,50)||'(none)'}`);
 
-    const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
+    const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog, agentCtxPkg);
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
