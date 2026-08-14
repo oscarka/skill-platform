@@ -184,17 +184,18 @@ export function triggerWikiSyncPublic(userId: string, reason: string): void {
   triggerWikiSync(userId, reason);
 }
 
-function triggerWikiSync(userId: string, reason: string): void {
+function triggerWikiSync(userId: string, reason: string, maxLogs: number = 15): void {
   if (!LLMWIKI_BASE || !userId) {
     console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
     return;
   }
   const url = `${LLMWIKI_BASE}/api/clients/${userId}/sync`;
-  console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId}`);
+  console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId} maxLogs=${maxLogs}`);
   fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(60_000),  // sync 可能需要较长时间（LLM 调用）
+    body: JSON.stringify({ reason, maxLogs }),
+    signal: AbortSignal.timeout(600_000),  // 10min: 3-stage LLM pipeline can take 5-10min
   })
     .then(async res => {
       const data = await res.json().catch(() => ({}));
