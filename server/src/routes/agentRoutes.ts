@@ -662,3 +662,40 @@ agentRouter.get('/skills/available', async (_req, res) => {
     res.status(500).json({ error: 'db_error', message: err.message });
   }
 });
+
+// ─── Debug: 守卫状态查看 / 清理（仅供测试使用）────────────────────────────────
+
+agentRouter.get('/debug/guards', async (req, res) => {
+  try {
+    const userId = req.query.user_id as string;
+    if (!userId) return res.status(400).json({ error: 'user_id required' });
+    // session_id = user_id for direct /chat requests (processMessage fallback)
+    const guards = await db.allAsync<any>(
+      `SELECT id, session_id, skill_id, skill_name, status, check_count, expires_at, created_at, close_reason
+       FROM skill_confirm_guards
+       WHERE session_id=?
+       ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+    res.json({ guards, count: guards.length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+agentRouter.delete('/debug/guards', async (req, res) => {
+  try {
+    const userId = req.query.user_id as string;
+    if (!userId) return res.status(400).json({ error: 'user_id required' });
+    const result = await db.runAsync(
+      `UPDATE skill_confirm_guards SET status='closed', close_reason='debug_cleanup'
+       WHERE session_id=? AND status='active'`,
+      [userId]
+    );
+    const closed = (result as any).changes || 0;
+    console.log(`[Debug] Closed ${closed} active guards for session=${userId}`);
+    res.json({ ok: true, closed });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
