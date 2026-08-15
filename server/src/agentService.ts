@@ -1186,8 +1186,19 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
     { role: 'user', content },
   ];
 
-  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024,
-    { tools: WIKI_TOOLS, userId: meta.user_id });  // 始终传入，含 query_ticket
+  const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
+    tools:      WIKI_TOOLS,   // 含 query_ticket，让 AI 按需查工单
+    userId:     meta.user_id,
+    onToolCall: (name, _args, result) => {
+      if (name === 'query_ticket') {
+        void appendTaskEvent(requestId, 'tool_query_ticket', {
+          userId: meta.user_id,
+          result: (() => { try { return JSON.parse(result); } catch { return result; } })(),
+        });
+        console.log(`[AgentService] 🔧 [Chat] tool_query_ticket 已触发 userId=${meta.user_id}`);
+      }
+    },
+  });
 
   // ── LLMWiki: 后台写日志 ──
   backgroundPostLog(meta.user_id, content, reply.trim());
