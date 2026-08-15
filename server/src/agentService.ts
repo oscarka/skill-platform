@@ -654,27 +654,62 @@ async function callGeminiMessages(
         result = await fetchWikiPage(userId, 'medication_plan.md');
         console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
       } else if (fnName === 'query_ticket') {
-        // Step 6 (v2): 查询工单/报告内容
-        const ticket = await db.getAsync<any>(
-          `SELECT t.id, t.skill_id, t.skill_name, t.status, t.created_at,
-                  tr.raw_result, tr.report_url
-           FROM tickets t
-           LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
-           WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input')
-           ORDER BY t.created_at DESC LIMIT 1`,
-          [userId || ''],
-        ).catch(() => null);
+        // Step 6 (v2): 查询工单/报告内容（JOIN skills获取skill_name，JOIN ticket_results获取报告）
+        let ticket: any = null;
+        try {
+          ticket = await db.getAsync<any>(
+            `SELECT t.id, t.skill_id, t.token, s.name as skill_name, t.status, t.created_at,
+                    tr.raw_result, tr.report_url
+             FROM tickets t
+             LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+             LEFT JOIN skills s ON s.id = t.skill_id
+             WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+             ORDER BY t.created_at DESC LIMIT 1`,
+            [userId || ''],
+          );
+        } catch (qerr: any) {
+          console.error(`[Gemini] ❌ query_ticket SQL error userId=${userId}: ${qerr?.message}`);
+          // fallback: 无 JOIN 版本（兜底）
+          try {
+            ticket = await db.getAsync<any>(
+              `SELECT t.id, t.skill_id, t.token, t.status, t.created_at
+               FROM tickets t
+               WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+               ORDER BY t.created_at DESC LIMIT 1`,
+              [userId || ''],
+            );
+            console.log(`[Gemini] 📋 query_ticket fallback (no JOIN) → ticket_id=${ticket?.id}`);
+          } catch (ferr: any) {
+            console.error(`[Gemini] ❌ query_ticket fallback error: ${ferr?.message}`);
+          }
+        }
 
         if (ticket) {
+          const reportContent = ticket.raw_result || null;
+          // waiting_input 状态：构造 H5 填写链接
+          let fillUrl: string | null = null;
+          if (ticket.status === 'waiting_input' && ticket.token) {
+            const h5BaseRow = await db.getAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', ['h5_base_url']).catch(() => null);
+            const serviceUrl = process.env.PUBLIC_BASE_URL || '';
+            const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
+            fillUrl = `${h5Base}?token=${ticket.token}`;
+          }
           result = JSON.stringify({
-            ticket_id:    ticket.id,
-            skill_name:   ticket.skill_name || ticket.skill_id,
-            status:       ticket.status,
-            report:       ticket.raw_result || '（报告尚未生成）',
-            report_url:   ticket.report_url || null,
-            created_at:   ticket.created_at,
+            ticket_id:   ticket.id,
+            skill_name:  ticket.skill_name || ticket.skill_id,
+            status:      ticket.status,
+            status_desc: ticket.status === 'waiting_input'  ? '等待您填写信息（请直接把 fill_url 发给用户）'
+                       : ticket.status === 'submitted'      ? '您已提交，等待分析'
+                       : ticket.status === 'processing'     ? 'AI正在分析中'
+                       : ticket.status === 'done'           ? '分析已完成'
+                       : ticket.status === 'created'        ? '已创建待处理'
+                       : ticket.status,
+            fill_url:    fillUrl,
+            report:      reportContent || '（报告尚未生成）',
+            report_url:  ticket.report_url || null,
+            created_at:  ticket.created_at,
           });
-          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${ticket.raw_result?.length || 0}`);
+          console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} fill_url=${fillUrl ? '有' : '无'} report_len=${reportContent?.length || 0}`);
         } else {
           result = JSON.stringify({ found: false, message: '未找到近期工单' });
           console.log(`[Gemini] 📋 query_ticket → 无工单 userId=${userId}`);
