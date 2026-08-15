@@ -2254,8 +2254,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
   });
 
   // ── confidence=low 时不执行 skill，走 Gemini 直接回复 ──
-  // 只有前端强制指定 skill_id 或 skill_suggest 确认后才执行
-  if (routeConfidence === 'low' && selectedSkillId) {
+  // 例外：守卫已确认（confirmed_ticket）→ 必须执行，不受 confidence=low 影响
+  if (routeConfidence === 'low' && selectedSkillId && currentGuardStatus !== 'confirmed_ticket') {
     console.log(`[AgentService] 📊 confidence=low, 不自动执行 skill「${selectedSkillName}」, 走 Gemini 直接回复`);
     void appendTaskEvent(requestId, 'skill_skipped_low_confidence', {
       skippedSkillId:   selectedSkillId,
