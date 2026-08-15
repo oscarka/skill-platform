@@ -1270,13 +1270,11 @@ async function handleHealthDirect(
   const directiveBlock = agentCtxPkg?.directive
     ? `\n\n【当前任务指令】\n${agentCtxPkg.directive}`
     : '';
-  // 若已完成报告有内容，直接注入报告原文（AI 可据此回答细节问题）
-  const reportBlock = agentCtxPkg?.existingTicket?.reportContent
-    ? `\n\n【分析报告原文（${agentCtxPkg.existingTicket.skillName}）】\n${agentCtxPkg.existingTicket.reportContent}`
-    : '';
+  // 注意：不在 prompt 中注入报告原文（reportBlock），让 AI 通过 query_ticket 工具获取报告
+  // 这样可确保 tool_query_ticket 事件被记录，保证日志链完整性
 
   const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
-回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}${reportBlock}
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
 - 不要使用 Markdown 格式
@@ -1428,6 +1426,23 @@ async function handleHealthSkill(
           return { request_id: requestId, status: 'done', reply, delivery, route_type: 'ticket_reused' } as any;
         }
         // status='error' → 不复用，继续新建
+      }
+
+      // ── 跨 skill 重做：同 skill 没找到 done 工单，但用户有重做意图 → 查所有 skill 的 done 工单并 expire ──
+      const wantsRedoCross = /重新|再做|再来|新的|重来|重做/.test(content);
+      if (wantsRedoCross) {
+        const doneTickets = await db.allAsync<any>(
+          `SELECT id, skill_id FROM tickets WHERE created_by=? AND status='done' AND created_at > ?
+           ORDER BY created_at DESC`,
+          [meta.user_id, oneHourAgo]
+        ).catch(() => [] as any[]);
+        for (const dt of doneTickets) {
+          await db.runAsync(
+            `UPDATE tickets SET status='expired', updated_at=? WHERE id=?`,
+            [Date.now(), dt.id]
+          );
+          console.log(`[AgentService] 🔄 跨skill重做，旧工单 ${dt.id} (skill=${dt.skill_id}) → expired`);
+        }
       }
     }
 
