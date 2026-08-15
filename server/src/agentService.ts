@@ -1728,14 +1728,20 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   const userId      = req.meta?.user_id || '';
   const sessionId   = req.session_id || userId;
   const srcChannel  = (req as any).source_channel || req.source || 'wecom';
+  // juhe channel: agent_tasks 存原始 channel_uid（vid），
+  // 方便 JUHE-3 测试通过 JUHE_USER_ID 查到任务；
+  // wiki/tickets 仍用 unified_id（req.meta.user_id）
+  const taskUserId = srcChannel === 'juhe' && (req.meta as any)?.channel_uid
+    ? ((req.meta as any).channel_uid as string)
+    : userId;
 
   console.log(`[AgentService] request_id=${requestId} session=${sessionId} source=${srcChannel}`);
 
   // ── 创建 agent_task 记录（await 确保写入，不受 fire-and-forget 影响）──────────
   await createAgentTask({
-    id: requestId, sessionId, userId, sourceChannel: srcChannel,
+    id: requestId, sessionId, userId: taskUserId, sourceChannel: srcChannel,
     inputContent: req.content,
-    meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee },
+    meta: { from_name: req.meta?.from_name, employee: (req.meta as any)?.employee, channel_uid: (req.meta as any)?.channel_uid },
   });
   // ── 存完整上下文快照（历史、备注）供日志查看 ─────────────────────────────────
   void updateAgentTask(requestId, {
