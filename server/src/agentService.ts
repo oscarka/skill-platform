@@ -2069,9 +2069,24 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   //   守卫判断必须独立于路由结果运行，才能正确检测 confirm=yes/no。
   //   例外：跨 skill（routing=high 且指向不同 skill）→ 关闭旧守卫，走规则 B 建新守卫。
   // 规则 B：无守卫 + routing=high → 新建守卫（Agent 介绍服务）
-  // Bug3 修复：processing/submitted 状态下不进入守卫/推荐流程
-  const recentTicketStatus = ctxSnapshot.recentTicket?.status || '';
-  const ticketBlocked = (['processing', 'submitted'] as string[]).includes(recentTicketStatus);
+  // 1小时内同skill有活跃工单 → 跳过守卫介绍轮，直接走 handleHealthSkill 的状态判断
+  // 覆盖所有非 error/expired 状态：
+  //   waiting_input   → 固定话术「已有工单，点击填写」
+  //   submitted       → 固定话术「处理中」
+  //   processing      → 固定话术「处理中」
+  //   done            → 固定话术「报告已生成」或重做意图→expire→新建
+  //   returned        → 固定话术「已打回，重新填写」
+  //   patient_rejected/patient_confirmed → reply='' → fall-through → 新建工单
+  const oneHourAgoForGuard = Date.now() - 60 * 60 * 1000;
+  const recentTicketStatus  = ctxSnapshot.recentTicket?.status || '';
+  const recentTicketSkillId = ctxSnapshot.recentTicket?.skill_id || '';
+  const recentTicketAge     = Number(ctxSnapshot.recentTicket?.created_at || 0);
+  const ticketBlocked = !!(
+    ctxSnapshot.recentTicket
+    && recentTicketAge > oneHourAgoForGuard
+    && recentTicketSkillId === selectedSkillId
+    && !['error', 'expired'].includes(recentTicketStatus)
+  );
 
   // ── 规则 A: 有活跃守卫 → 判断（不管 routing 结果）──────────────────────────────
   if (activeGuardRow && !forcedSkillId && !ticketBlocked) {
