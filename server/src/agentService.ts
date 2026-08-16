@@ -1103,7 +1103,7 @@ function assembleAgentContext(params: {
       + `\n请告知用户工单已创建，引导他点击链接填写问卷。直接使用以上链接，不要自己生成链接。`;
 
   } else if (guardStatus === 'declined') {
-    directive = '';  // 用户已拒绝，无需任何指令，Agent 正常回答即可
+    directive = `用户明确拒绝了「${guardSkillName || ''}」服务，守卫已关闭。请正常回答用户的问题。`;
 
   } else if (guardStatus === 'pending_unclear' && guardSkillName) {
     if (routeSkillId && routeSkillId !== (params.recentTicket?.skill_id) && routeSkillName !== guardSkillName) {
@@ -1115,8 +1115,9 @@ function assembleAgentContext(params: {
       directive = `[服务匹配提示] 用户此前对「${guardSkillName}」有一定意向，但尚未明确确认。`
         + `先回答用户的问题；如果回复末尾有自然的空间，可以轻轻问一句是否想使用，不必强求。`;
     } else {
-      // 已追问过或用户在提问 → 正常回答，不再追问
-      directive = `[服务匹配提示] 用户对「${guardSkillName}」有一定意向，先正常回答用户的问题即可，不必再次推荐。`;
+      // 已追问过或用户在提问 → 先回答，顺带引导
+      directive = `用户对「${guardSkillName}」服务有意向但尚未明确确认。`
+        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾轻描淡写地引导用户确认是否使用该服务（不要强迫）。`;
     }
 
   } else if (guardStatus === 'none' && existingTicket) {
