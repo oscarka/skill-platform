@@ -1092,9 +1092,10 @@ function assembleAgentContext(params: {
   let directive = '';
 
   if (guardStatus === 'new_created' && routeSkillName) {
-    directive = `用户表达了对「${routeSkillName}」服务的意向，守卫已创建。`
-      + `请向用户介绍该服务，并自然地询问是否确认使用。`
-      + (routeSkillDesc ? `\n服务描述：${routeSkillDesc.slice(0, 200)}` : '');
+    // 信息式提示，不强制介绍——让 Agent 根据对话场景自己判断是否、如何提及
+    directive = `[服务匹配提示] 系统检测到用户可能对「${routeSkillName}」感兴趣（置信度：高）。`
+      + `如果当前对话场景自然合适，可以顺带提及；如果用户正在聊别的事或问题与此无关，正常回答即可，不必强制推荐。`
+      + (routeSkillDesc ? `\n服务简介（供参考）：${routeSkillDesc.slice(0, 150)}` : '');
 
   } else if (guardStatus === 'confirmed_ticket' && ticketUrl) {
     directive = `用户已确认使用「${guardSkillName || routeSkillName || ''}」，工单已建立。`
@@ -1102,7 +1103,7 @@ function assembleAgentContext(params: {
       + `\n请告知用户工单已创建，引导他点击链接填写问卷。直接使用以上链接，不要自己生成链接。`;
 
   } else if (guardStatus === 'declined') {
-    directive = `用户明确拒绝了「${guardSkillName || ''}」服务，守卫已关闭。请正常回答用户的问题。`;
+    directive = '';  // 用户已拒绝，无需任何指令，Agent 正常回答即可
 
   } else if (guardStatus === 'pending_unclear' && guardSkillName) {
     if (routeSkillId && routeSkillId !== (params.recentTicket?.skill_id) && routeSkillName !== guardSkillName) {
@@ -1110,13 +1111,12 @@ function assembleAgentContext(params: {
       directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
         + `本次消息话题指向其他方向，请先回答用户的问题，不必重复推荐服务。`;
     } else if ((params as any).isFirstClarify) {
-      // 首次模糊确认（守卫首轮unclear，用户没有在提问）→ Agent 必须主动引导确认
-      directive = `用户刚才的回复意向不明确，是否要使用「${guardSkillName}」服务尚未确认。`
-        + `\n请先简短回答用户的问题，然后**在回复末尾自然地询问**：「您是想现在使用「${guardSkillName}」服务吗？」（语气自然，不要强迫）。`;
+      // 首次模糊确认 → 软提示，不强制追问
+      directive = `[服务匹配提示] 用户此前对「${guardSkillName}」有一定意向，但尚未明确确认。`
+        + `先回答用户的问题；如果回复末尾有自然的空间，可以轻轻问一句是否想使用，不必强求。`;
     } else {
-      // 已追问过或用户在提问 → 先回答，顺带引导
-      directive = `用户对「${guardSkillName}」服务有意向但尚未明确确认。`
-        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾轻描淡写地引导用户确认是否使用该服务（不要强迫）。`;
+      // 已追问过或用户在提问 → 正常回答，不再追问
+      directive = `[服务匹配提示] 用户对「${guardSkillName}」有一定意向，先正常回答用户的问题即可，不必再次推荐。`;
     }
 
   } else if (guardStatus === 'none' && existingTicket) {
