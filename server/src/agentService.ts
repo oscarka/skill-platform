@@ -1462,10 +1462,12 @@ async function handleHealthSkill(
     const expiresAt = now + 60 * 60 * 1000; // 1小时有效（与复用窗口一致）
 
     const deliveryInfo = JSON.stringify({
-      callback_url: req.callback_url || '',
-      app:          delivery.app,
-      recipient:    delivery.recipient,
-      action:       delivery.action,
+      callback_url:   req.callback_url || '',
+      app:            delivery.app,
+      recipient:      delivery.recipient,
+      action:         delivery.action,
+      source_channel: (req as any).source_channel || req.source || '',
+      juhe_conv_id:   (req as any).meta?.juhe_conv_id || '',
     });
 
     await db.runAsync(

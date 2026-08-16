@@ -186,11 +186,12 @@ export async function notifyUserTicketDone(ticketId: string): Promise<void> {
   let info: any;
   try { info = JSON.parse(ticket.delivery_info); } catch { return; }
 
-  const callbackUrl = info.callback_url;
-  if (!callbackUrl) {
-    console.log(`[TicketNotify] 工单 ${ticketId} 无 callback_url，跳过`);
-    return;
-  }
+  const JUHE_SEND_URL = process.env.JUHE_SEND_URL || '';
+  const CUA_SEND_URL  = process.env.CUA_SEND_URL  || '';
+
+  const callbackUrl   = info.callback_url;
+  const juheConvId    = info.juhe_conv_id;
+  const sourceChannel = info.source_channel;
 
   const skill   = await db.getAsync<any>('SELECT name FROM skills WHERE id=?', [ticket.skill_id]);
   const h5Base  = await db.getAsync<any>('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
@@ -201,19 +202,56 @@ export async function notifyUserTicketDone(ticketId: string): Promise<void> {
   const skillName = skill?.name || '分析';
   const replyText = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看完整报告：\n${reportUrl}`;
 
-  console.log(`[TicketNotify] 通知 ${info.recipient} via ${callbackUrl}`);
-  await fetch(callbackUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      reply:     replyText,
-      app:       info.app,
-      recipient: info.recipient,
-      action:    info.action || 'send',
-      ticket_id: ticketId,
-    }),
-  });
-  console.log(`[TicketNotify] ✅ 通知已发出 ticketId=${ticketId}`);
+  let sent = false;
+
+  // ① callback_url（企微 agent-callback / 标准回调）
+  if (callbackUrl) {
+    console.log(`[TicketNotify] 通知 ${info.recipient} via callback_url`);
+    await fetch(callbackUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reply: replyText, app: info.app,
+        recipient: info.recipient, action: info.action || 'send',
+        ticket_id: ticketId,
+      }),
+    });
+    sent = true;
+    console.log(`[TicketNotify] ✅ callback_url 通知已发出 ticketId=${ticketId}`);
+  }
+
+  // ② juhe 渠道（juhe_conv_id 存在时通过 JUHE_SEND_URL 发）
+  if (!sent && JUHE_SEND_URL && juheConvId) {
+    console.log(`[TicketNotify] juhe 渠道通知 conv=${juheConvId}`);
+    const r = await fetch(`${JUHE_SEND_URL.replace(/\/?$/, '')}/api/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: juheConvId, content: replyText }),
+    }).catch(e => { console.warn(`[TicketNotify] juhe send error: ${e.message}`); return null; });
+    if (r?.ok) {
+      sent = true;
+      console.log(`[TicketNotify] ✅ juhe 通知已发出 ticketId=${ticketId} conv=${juheConvId}`);
+    }
+  }
+
+  // ③ CUA_SEND_URL fallback（企微 wecom 渠道兜底）
+  if (!sent && CUA_SEND_URL && info.recipient) {
+    console.log(`[TicketNotify] CUA fallback 通知 recipient=${info.recipient}`);
+    await fetch(`${CUA_SEND_URL}/api/agent-callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reply: replyText, recipient: info.recipient,
+        app: info.app, action: info.action || 'send',
+      }),
+    }).catch(e => console.warn(`[TicketNotify] CUA send error: ${e.message}`));
+    sent = true;
+    console.log(`[TicketNotify] ✅ CUA 通知已发出 ticketId=${ticketId}`);
+  }
+
+  if (!sent) {
+    console.log(`[TicketNotify] ⚠️ 无可用渠道发送通知 ticketId=${ticketId} source=${sourceChannel}`);
+  }
 
   // 回写渠道消息日志：将结果发送事件 append 到原始 agent 任务
   if (ticket.request_id) {

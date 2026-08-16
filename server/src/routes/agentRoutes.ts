@@ -187,9 +187,10 @@ agentRouter.post('/ingest', async (req, res) => {
       source_channel: channel,
       session_id: unified_id,
       meta: {
-        from_name:   display_name,
-        user_id:     unified_id,
-        channel_uid: from_user_id,
+        from_name:    display_name,
+        user_id:      unified_id,
+        channel_uid:  from_user_id,
+        juhe_conv_id: juhe_conv_id || '',
       },
       context: {
         available_apps: ['企业微信'],
