@@ -245,8 +245,37 @@ ticketRouter.put('/:id/status', async (req, res) => {
   }
 });
 
+// ─── PATCH /api/tickets/:id — Admin: update ticket fields (notes, prefilled_values, etc.) ──
+ticketRouter.patch('/:id', async (req, res) => {
+  try {
+    const ticket = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    const { notes, title, patient_name, prefilled_values } = req.body;
+    const updates: string[] = [];
+    const params: any[]    = [];
+
+    if (notes            !== undefined) { updates.push('notes=?');            params.push(notes); }
+    if (title            !== undefined) { updates.push('title=?');            params.push(title); }
+    if (patient_name     !== undefined) { updates.push('patient_name=?');     params.push(patient_name); }
+    if (prefilled_values !== undefined) { updates.push('prefilled_values=?'); params.push(prefilled_values); }
+
+    if (updates.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+
+    const now = Date.now();
+    updates.push('updated_at=?');
+    params.push(now, ticket.id);
+
+    await db.runAsync(`UPDATE tickets SET ${updates.join(', ')} WHERE id=?`, params);
+    const updated = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [ticket.id]);
+    res.json({ ticket: await ticketToResponse(updated!) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── GET /api/tickets/:id/status — Poll status ────────────────────────────────
+
 ticketRouter.get('/:id/status', async (req, res) => {
   try {
     const ticket = await db.getAsync<{ status: string; updated_at: number }>('SELECT status, updated_at FROM tickets WHERE id=?', [req.params.id]);
