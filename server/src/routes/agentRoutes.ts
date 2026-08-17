@@ -197,12 +197,14 @@ agentRouter.post('/ingest', async (req, res) => {
       }
     }
 
-    // ── 文件消息守卫：纯文件/扫描件（无 AI摘要）不触发 agent，只保存附件 ──────
+    // ── 文件消息守卫：文件/图片（不管有没有 AI摘要）不触发 agent，只保存附件 ──────
     // archiver.js 是第一道拦截；ingest 这里是第二道防线
-    // 有效内容：含 AI摘要（PDF 成功提取文字）才进 agent
+    // 规则：msgtype=file/image + media_url → 只存 user_recent_files，不进 processAgentChat
+    //   （即使 Gemini OCR 提取出了 AI摘要，文件消息也不主动触发 agent）
+    //   → 等用户主动发文字消息才触发 agent，届时文件自动挂载到工单
     const isFileOnlyContent = (
       msgtype === 'file' || msgtype === 'image'
-    ) && !!media_url && !content.includes('AI摘要:');
+    ) && !!media_url;
 
     console.log(`[Orch/Ingest] channel=${channel} from=${display_name}(${from_user_id}) unified=${unified_id} juhe_conv=${juhe_conv_id||'none'} content="${content.slice(0,60)}" isFileOnly=${isFileOnlyContent} history=${history.length}`);
 
