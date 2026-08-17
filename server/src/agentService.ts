@@ -1506,7 +1506,15 @@ async function handleHealthSkill(
     }
 
 
-    const prefilledFiles = recentFiles.map(f => ({
+    // 按 URL 去重，只保留每个文件最新一次（LIMIT 5 已按 created_at DESC，first-seen wins）
+    const seenUrls = new Set<string>();
+    const uniqueRecentFiles = recentFiles.filter((f: any) => {
+      if (seenUrls.has(f.file_url)) return false;
+      seenUrls.add(f.file_url);
+      return true;
+    });
+
+    const prefilledFiles = uniqueRecentFiles.map((f: any) => ({
       id: f.id,
       name: f.file_name || '附件',
       url: f.file_url,

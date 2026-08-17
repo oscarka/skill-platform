@@ -159,7 +159,8 @@
     }
 
     function fmtDate(ts) {
-      const d = new Date(ts);
+      const d = new Date(Number(ts));  // ts may be a numeric string from DB
+      if (isNaN(d.getTime())) return '未知';
       return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     }
 
@@ -211,6 +212,8 @@
           <span class="file-size">${fmtSize(f.size)}</span>
           <button class="remove-btn" onclick="removeFile(${i})">✕</button>
         </div>`).join('');
+
+      list.innerHTML = prefilledHTML + selectedHTML;  // ← Bug fix: was missing this line
     }
 
     window.removeFile = function(idx) {
@@ -218,8 +221,31 @@
       renderFileList();
     };
 
+    // Key alias: skill H5 config may use short keys, backend stores canonical keys
+    const PREFILL_ALIAS = {
+      name:      ['contact_name', 'patient_name', 'name'],
+      phone:     ['contact_phone', 'phone'],
+      extraInfo: ['additional_health_info', 'extraInfo'],
+      contact_name:  ['contact_name', 'name'],
+      patient_name:  ['patient_name', 'name'],
+      contact_phone: ['contact_phone', 'phone'],
+      additional_health_info: ['additional_health_info', 'extraInfo'],
+    };
+
+    function resolvePrefilledVal(fieldKey, prefilled) {
+      if (!prefilled) return '';
+      // Try exact key first
+      if (prefilled[fieldKey] !== undefined && prefilled[fieldKey] !== '') return prefilled[fieldKey];
+      // Try aliases
+      const aliases = PREFILL_ALIAS[fieldKey] || [];
+      for (const alias of aliases) {
+        if (prefilled[alias] !== undefined && prefilled[alias] !== '') return prefilled[alias];
+      }
+      return '';
+    }
+
     function buildFieldHTML(field, prefilled) {
-      const val = (prefilled && prefilled[field.key]) ? prefilled[field.key] : '';
+      const val = resolvePrefilledVal(field.key, prefilled);
       const req = field.required ? '<span class="req"> *</span>' : '';
       const label = `<label class="form-label" for="f_${field.key}">${field.label}${req}</label>`;
       let input = '';
@@ -409,7 +435,11 @@
         h5Config = data.h5_config;
         ticketId = data.ticket_id;
         prefilledValues = data.prefilled_values || {};
-        prefilledFiles = Array.isArray(prefilledValues.prefilled_files) ? [...prefilledValues.prefilled_files] : [];
+        // prefilled_files may be inside prefilled_values or at top level
+        const rawFiles = prefilledValues.prefilled_files || data.prefilled_files || [];
+        prefilledFiles = Array.isArray(rawFiles) ? [...rawFiles] : [];
+        // Also expose prefilled_files in prefilledValues for buildFieldHTML
+        prefilledValues.prefilled_files = prefilledFiles;
         document.title = data.h5_config?.title || data.skill_name || '信息提交';
         renderForm(data);
       } catch (err) {
