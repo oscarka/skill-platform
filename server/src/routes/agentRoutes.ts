@@ -197,63 +197,75 @@ agentRouter.post('/ingest', async (req, res) => {
       }
     }
 
-    console.log(`[Orch/Ingest] channel=${channel} from=${display_name}(${from_user_id}) unified=${unified_id} juhe_conv=${juhe_conv_id||'none'} content="${content.slice(0,60)}" history=${history.length}`);
+    // ── 文件消息守卫：纯文件/扫描件（无 AI摘要）不触发 agent，只保存附件 ──────
+    // archiver.js 是第一道拦截；ingest 这里是第二道防线
+    // 有效内容：含 AI摘要（PDF 成功提取文字）才进 agent
+    const isFileOnlyContent = (
+      msgtype === 'file' || msgtype === 'image'
+    ) && !!media_url && !content.includes('AI摘要:');
 
+    console.log(`[Orch/Ingest] channel=${channel} from=${display_name}(${from_user_id}) unified=${unified_id} juhe_conv=${juhe_conv_id||'none'} content="${content.slice(0,60)}" isFileOnly=${isFileOnlyContent} history=${history.length}`);
 
-    // 构造 AgentChatRequest，用 unified_id 作为 user_id（写入 agent_tasks / wiki 均用此 ID）
-    const agentReq = {
-      content:    content.trim(),
-      source:     channel,
-      source_channel: channel,
-      session_id: unified_id,
-      meta: {
-        from_name:    display_name,
-        user_id:      unified_id,
-        channel_uid:  from_user_id,
-        juhe_conv_id: juhe_conv_id || '',
-      },
-      context: {
-        available_apps: ['企业微信'],
-        current_recipient: display_name,
-      },
-      history,
-      notes,
-    };
+    // 立即返回给 archiver（不阻塞）
+    res.json({ ok: true, status: isFileOnlyContent ? 'file_saved' : 'processing' });
 
-    // 立即返回，异步处理
-    res.json({ ok: true, status: 'processing' });
+    if (isFileOnlyContent) {
+      console.log(`[Orch/Ingest] 📎 纯文件消息（无 AI摘要），跳过 agent，仅暂存附件 file="${file_name}"`);
+      // user_recent_files 已在上面保存，不需要额外处理
+    } else {
+      // 构造 AgentChatRequest
+      const agentReq = {
+        content:    content.trim(),
+        source:     channel,
+        source_channel: channel,
+        session_id: unified_id,
+        meta: {
+          from_name:    display_name,
+          user_id:      unified_id,
+          channel_uid:  from_user_id,
+          juhe_conv_id: juhe_conv_id || '',
+        },
+        context: {
+          available_apps: ['企业微信'],
+          current_recipient: display_name,
+        },
+        history,
+        notes,
+      };
 
-    const t0Process = Date.now();
-    processAgentChat(agentReq as any).then(async result => {
-      const processMs = Date.now() - t0Process;
-      console.log(`[Orch/Ingest] done unified=${unified_id} status=${result.status} processMs=${processMs} reply="${(result.reply || '').slice(0, 60)}"`);
+      const t0Process = Date.now();
+      processAgentChat(agentReq as any).then(async result => {
+        const processMs = Date.now() - t0Process;
+        console.log(`[Orch/Ingest] done unified=${unified_id} status=${result.status} processMs=${processMs} reply="${(result.reply || '').slice(0, 60)}"`);
 
-      if (result.reply) {
-        const t0Send = Date.now();
-        await sendReply({
-          reply:        result.reply,
-          juhe_conv_id,
-          display_name,
-          request_id:  result.request_id || '',
-          session_id:  unified_id,
-          status:      result.status,
-          reasoning:   result.reasoning,
-          delivery:    result.delivery,
-        }).catch(e => console.warn('[Orch/Ingest] sendReply error:', e.message));
-        console.log(`[Orch/Ingest] ⏱️ total: process=${processMs}ms send=${Date.now() - t0Send}ms e2e=${Date.now() - t0Process}ms`);
-      }
-    }).catch(err => {
-      console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
-      const failedReqId = (agentReq as any)._requestId || '';
-      void updateAgentTask(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
-      void appendTaskEvent(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
-    });
+        if (result.reply) {
+          const t0Send = Date.now();
+          await sendReply({
+            reply:        result.reply,
+            juhe_conv_id,
+            display_name,
+            request_id:  result.request_id || '',
+            session_id:  unified_id,
+            status:      result.status,
+            reasoning:   result.reasoning,
+            delivery:    result.delivery,
+          }).catch(e => console.warn('[Orch/Ingest] sendReply error:', e.message));
+          console.log(`[Orch/Ingest] ⏱️ total: process=${processMs}ms send=${Date.now() - t0Send}ms e2e=${Date.now() - t0Process}ms`);
+        }
+      }).catch(err => {
+        console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
+        const failedReqId = (agentReq as any)._requestId || '';
+        void updateAgentTask(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
+        void appendTaskEvent(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
+      });
+    }
 
   } catch (err: any) {
     console.error('[Orch/Ingest] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // ─── GET /api/v1/agent/tasks — 统一任务日志 ──────────────────────────────────
 
