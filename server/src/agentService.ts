@@ -620,10 +620,16 @@ async function callGeminiMessages(
     const contentLen = (assistantMsg?.content || '').length;
     const toolCalls = assistantMsg?.tool_calls || [];
     const logLevel = finishReason !== 'stop' && finishReason !== 'tool_calls' ? 'WARN' : 'INFO';
+    // 记录 AI thinking（DeepSeek/ARK 的 reasoning_content 字段）
+    const reasoningContent: string = assistantMsg?.reasoning_content || '';
+    if (reasoningContent) {
+      console.log(`[Gemini][THINKING] round=${round} len=${reasoningContent.length} preview="${reasoningContent.slice(0, 200).replace(/\n/g, '↵')}"`);
+    }
     console.log(
       `[Gemini][${logLevel}] round=${round} finish_reason=${finishReason}` +
       ` prompt_tokens=${usage.prompt_tokens ?? '?'}` +
       ` completion_tokens=${usage.completion_tokens ?? '?'}` +
+      ` reasoning_tokens=${usage.completion_tokens_details?.reasoning_tokens ?? 0}` +
       ` content_len=${contentLen} tool_calls=${toolCalls.length}` +
       ` max_tokens=${maxTokens}` +
       (contentLen > 0 ? ` preview="${(assistantMsg?.content || '').slice(0, 60).replace(/\n/g, '↵')}..."` : '')
@@ -698,7 +704,7 @@ async function callGeminiMessages(
             ticket_id:   ticket.id,
             skill_name:  ticket.skill_name || ticket.skill_id,
             status:      ticket.status,
-            status_desc: ticket.status === 'waiting_input'  ? '等待您填写信息（请直接把 fill_url 发给用户）'
+            status_desc: ticket.status === 'waiting_input'  ? '工单等待填写。仅当用户明确询问工单填写链接时，才把 fill_url 发给用户，其他情况不要主动推送'
                        : ticket.status === 'submitted'      ? '您已提交，等待分析'
                        : ticket.status === 'processing'     ? 'AI正在分析中'
                        : ticket.status === 'done'           ? '分析已完成'
@@ -1225,8 +1231,9 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
 - 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理
-- 如客户询问工单进度、报告状态、之前提交的服务情况（如"工单进行到哪了"、"报告出来了吗"、"之前提交的分析怎么样了"等），必须先调用 query_ticket 工具查询真实状态，再据实回答；工单状态处理规则：
-  「waiting_input」= 用户已有待填写工单，必须直接把 fill_url 链接发给用户引导他们填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
+- 客户发送文件/图片时（消息包含 [文件:] 或 [图片]），先简单确认收到并询问需求，**不要主动调用 query_ticket 工具、不要主动提及或推送任何已有工单链接**
+- 只有当客户**明确询问**工单进度、报告状态（如"工单进行到哪了"、"报告出来了吗"、"之前提交的分析怎么样了"）时，才调用 query_ticket 工具查询，再据实回答；工单状态处理规则：
+  「waiting_input」= 用户已有待填写工单，把 fill_url 链接发给用户引导填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
   「submitted/processing」= AI 分析中，告知预计时间
   「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
   「created」= 已创建待处理，告知工单已建即可
