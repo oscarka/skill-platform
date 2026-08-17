@@ -2102,8 +2102,29 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     });
   } else {
     // 正常路由：单次 AI 调用（v2）
+    // ── 路由前查最近 24h 文件，让路由器知道用户有上传文件 ──────────────────────
+    let routingContent = req.content;
+    if (userId) {
+      try {
+        const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const uId = String(userId);
+        const wecomUid = uId.startsWith('wecom_') ? uId : `wecom_${uId}`;
+        const rawUid = uId.replace(/^wecom_/, '');
+        const recentFilesForRoute = await db.allAsync<any>(
+          `SELECT file_name, summary FROM user_recent_files WHERE (user_id=? OR user_id=? OR user_id=?) AND created_at > ? ORDER BY created_at DESC LIMIT 3`,
+          [uId, wecomUid, rawUid, oneDayAgo]
+        );
+        if (recentFilesForRoute.length > 0) {
+          const fileSummaries = recentFilesForRoute
+            .map(f => `[文件: ${f.file_name || '附件'} | ${(f.summary || '').slice(0, 80)}]`)
+            .join('；');
+          routingContent = `${req.content}\n（用户近期上传的文件：${fileSummaries}）`;
+          console.log(`[AgentService][RouteContext] 注入 ${recentFilesForRoute.length} 个近期文件到路由上下文`);
+        }
+      } catch { /* 查询失败不影响路由 */ }
+    }
     const rdResult = await routeDecision(
-      req.content,  // 守卫判断已移至路由后，无需 guardHint
+      routingContent,   // 含文件摘要的路由上下文
       req.history || [],
       req.notes || '',
       availableSkills,
