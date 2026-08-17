@@ -431,7 +431,7 @@ CREATE TABLE IF NOT EXISTS user_recent_files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash);
+-- NOTE: idx_user_recent_files_hash is created in migrations (after ALTER TABLE adds content_hash)
 
 `;
 
@@ -469,6 +469,10 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS guard_mode TEXT DEFAULT 'existing'`,
       // closed_reason: 守卫关闭原因（user_declined | user_confirmed | closed_by_new_skill | max_rounds）
       `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS closed_reason TEXT`,
+      // content_hash: 文件内容 MD5，用于去重（异步计算，NULL 表示尚未计算）
+      `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
+      // content_hash 索引：必须在 ALTER TABLE 之后创建（否则列不存在会报错）
+      `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }
