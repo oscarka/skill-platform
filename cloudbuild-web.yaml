@@ -7,8 +7,6 @@
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8
-  pool:
-    name: ''
 # region 必须通过 gcloud builds submit --region 指定，见 deploy-web.sh
 
 steps:
