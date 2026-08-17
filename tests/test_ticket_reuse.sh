@@ -135,6 +135,60 @@ else
   red "T7跳过"; ((FAIL++)) || true
 fi
 
+# 取 T7 新建的工单
+TICKET_ID2=$(curl -sf "$BASE/api/tickets?limit=50" 2>/dev/null | python3 -c "
+import sys,json
+user='$TEST_USER'
+ts=json.load(sys.stdin).get('tickets',[])
+for t in ts:
+    if t.get('created_by','')==user and t.get('status') not in ('error',): print(t['id']); break
+" 2>/dev/null || echo "")
+echo "ticket_id2: $TICKET_ID2"
+
+echo; echo "══ T8: patient_rejected → 直接新建工单（不走守卫介绍轮）══"
+if [ -n "$TICKET_ID2" ]; then
+  # patient_rejected 只能从 done 状态触发，先设 done 再 reject
+  set_status "$TICKET_ID2" "done"
+  curl -sf -X POST "$BASE/api/results/$TICKET_ID2/reject" \
+    -H "Content-Type: application/json" 2>/dev/null >/dev/null || true
+  sleep 10
+  # 验证状态已是 patient_rejected
+  ACTUAL_ST=$(curl -sf "$BASE/api/tickets/$TICKET_ID2/status" 2>/dev/null | python3 -c \
+    'import sys,json; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || echo "")
+  echo "ticket_id2 状态: $ACTUAL_ST"
+  R8=$(call_agent "我想再做一次营养分析")
+  RT8=$(get_route "$R8"); REPL8=$(get_reply "$R8")
+  echo "route: $RT8 | reply: ${REPL8:0:150}"
+  assert_contains "T8 patient_rejected→ticket_created" "$R8" "ticket_created|已为您创建"
+else
+  red "T8跳过(无ticket_id2)"; ((FAIL++)) || true
+fi
+
+# 取 T8 新建的工单
+TICKET_ID3=$(curl -sf "$BASE/api/tickets?limit=50" 2>/dev/null | python3 -c "
+import sys,json
+user='$TEST_USER'
+ts=json.load(sys.stdin).get('tickets',[])
+for t in ts:
+    if t.get('created_by','')==user and t.get('status') not in ('error','patient_rejected'): print(t['id']); break
+" 2>/dev/null || echo "")
+echo "ticket_id3: $TICKET_ID3"
+
+echo; echo "══ T9: done状态 + 重做意图 → expire旧单+新建 ══"
+if [ -n "$TICKET_ID3" ]; then
+  set_status "$TICKET_ID3" "done"; sleep 10
+  R9=$(call_agent "能重新给我一个新的填写入口吗")
+  RT9=$(get_route "$R9"); REPL9=$(get_reply "$R9")
+  echo "route: $RT9 | reply: ${REPL9:0:150}"
+  assert_contains "T9 done+重做→ticket_created" "$R9" "ticket_created|已为您创建"
+  OLD_ST=$(curl -sf "$BASE/api/tickets/$TICKET_ID3" 2>/dev/null | python3 -c \
+    'import sys,json; d=json.load(sys.stdin); print(d.get("ticket",d).get("status",""))' 2>/dev/null || echo "")
+  echo "旧工单状态: $OLD_ST"
+  assert_contains "T9 旧单已expire" "$OLD_ST" "expired"
+else
+  red "T9跳过(无ticket_id3)"; ((FAIL++)) || true
+fi
+
 echo; echo "══════════════════════════════════════"
 echo "通过=$PASS  失败=$FAIL"
 [ "$FAIL" -eq 0 ] && green "全部通过！" || red "有 $FAIL 个失败"

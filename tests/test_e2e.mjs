@@ -1000,55 +1000,86 @@ async function testRefactorBugFixes() {
 // 主流程
 // ══════════════════════════════════════════════════════════════
 async function main() {
-  console.log('╔══════════════════════════════════════════════════════════════╗');
-  console.log('║   Skill Platform — 完整 E2E 自动化测试（T01-T24 + JUHE）        ║');
-  console.log(`║   RUN_ID: ${RUN_ID}   服务: ${BASE.replace('https://', '').slice(0,35)} ║`);
-  console.log('╚══════════════════════════════════════════════════════════════╝');
+  // ── 命令行参数：支持单独跑某个 section ──────────────────────────────────────
+  // 用法：node tests/test_e2e.mjs [FILTER...]
+  // 示例：node tests/test_e2e.mjs RFIX2
+  //       node tests/test_e2e.mjs T09
+  //       node tests/test_e2e.mjs ticket
+  //       node tests/test_e2e.mjs HIST JUHE
+  //（不传参数 = 跑全部）
+  const filters = process.argv.slice(2).map(s => s.toUpperCase());
+  const only = (keys) => {
+    if (filters.length === 0) return true;
+    return keys.some(k => filters.some(f => k.toUpperCase().includes(f) || f.includes(k.toUpperCase())));
+  };
 
-  await preflight();  // ← 预检：环境 + Schema + 数据状态
+  console.log('\u256f\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256e');
+  console.log('\u2551   Skill Platform \u2014 \u5b8c\u6574 E2E \u81ea\u52a8\u5316\u6d4b\u8bd5\uff08T01-T24 + JUHE\uff09        \u2551');
+  console.log(`\u2551   RUN_ID: ${RUN_ID}   \u670d\u52a1: ${BASE.replace('https://', '').slice(0,35)} \u2551`);
+  if (filters.length > 0) {
+    console.log(`\u2551   \ud83d\udd0d \u8fc7\u6ee4\u5668\uff1a${filters.join(', ')}\uff08\u4ec5\u8dd1\u5339\u914d section\uff09`);
+  }
+  console.log('\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d');
 
-  await testInfrastructureEvents();       // S2: 基础事件链 (6)
-  await testRouting();                     // T01-T03: 路由 (16)
-  await testGuardJudgment();               // T04-T08: 守卫判断 (20)
-  await testAgentContextAssembled();       // S6: agent_context_assembled (3)
-  await testMultiTurnIntegration();        // INT: 同session多轮 (9)
-  await testGuardFixRegression();          // GFIX: 守卫修复回归 (8)
-  await testRefactorBugFixes();            // RFIX2: 双守卫/重做/Processing/架构顺序 (20)
-  await testTicketAndQuery();              // T09-T14: 工单+query_ticket (12)
+  await preflight();  // ← 预检：环境 + Schema + 数据状态（始终运行）
 
-  await testHistoricalConversations();      // HIST: 历史对话场景 (18)
-
-  section('五、跨 skill 守卫切换（T15）');
-  skip('T15 跨skill守卫切换', '需≥2个不同 external skill，手动验证');
-
-  await testEdgeCases();                   // T17 T19: 边界情况 (2)
-  await testLogChain();                    // T20: 日志链 (6)
-  await clearGuards();
-  await testFullE2E();                     // E2E: 完整工单流程 (10)
-  // ⚠️ juhe 渠道测试：当前回退版本不支持，设 SKIP_JUHE=1 跳过
-  if (process.env.SKIP_JUHE !== '1') {
-    await testJuheChannel();               // JUHE: juhe 渠道集成验证 (5)
-  } else {
-    section('十、juhe 渠道集成验证（JUHE）');
-    skip('JUHE-1~5 juhe渠道', '当前版本未含 juhe 支持 (SKIP_JUHE=1)，回退版本跳过');
+  if (only(['S2', 'INFRA', 'INFRASTRUCTURE']))
+    await testInfrastructureEvents();
+  if (only(['ROUTING', 'T01', 'T02', 'T03']))
+    await testRouting();
+  if (only(['GUARD', 'T04', 'T05', 'T06', 'T07', 'T08']))
+    await testGuardJudgment();
+  if (only(['S6', 'CONTEXT', 'ASSEMBLED']))
+    await testAgentContextAssembled();
+  if (only(['INT', 'MULTITURN', 'INTEGRATION']))
+    await testMultiTurnIntegration();
+  if (only(['GFIX', 'GUARDFIX']))
+    await testGuardFixRegression();
+  if (only(['RFIX2', 'REFACTOR', 'RFIX']))
+    await testRefactorBugFixes();
+  if (only(['TICKET', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14']))
+    await testTicketAndQuery();
+  if (only(['HIST', 'HISTORY', 'HISTORICAL']))
+    await testHistoricalConversations();
+  if (only(['EDGE', 'T17', 'T19']))
+    await testEdgeCases();
+  if (only(['LOG', 'T20', 'LOGCHAIN']))
+    await testLogChain();
+  if (only(['E2E', 'FULLE2E', 'FULL'])) {
+    await clearGuards();
+    await testFullE2E();
+  }
+  if (only(['JUHE'])) {
+    if (process.env.SKIP_JUHE !== '1') {
+      await testJuheChannel();
+    } else {
+      section('\u5341\u3001juhe \u6e20\u9053\u96c6\u6210\u9a8c\u8bc1\uff08JUHE\uff09');
+      skip('JUHE-1~5 juhe\u6e20\u9053', '\u5f53\u524d\u7248\u672c\u672a\u542b juhe \u652f\u6301 (SKIP_JUHE=1)\uff0c\u56de\u9000\u7248\u672c\u8df3\u8fc7');
+    }
   }
 
-  section('八、回归测试（T21-T22，手动项）');
-  skip('T21 Wiki档案保留', '需要检查Agent回复是否体现健康档案，手动验证');
-  skip('T22 LLMWiki日志写入', '需要检查 data/logs/{userId}.json，手动验证');
-  skip('T23 H5提交确认通知（完整）', 'E2E-5已覆盖API层，真实微信推送需真实渠道');
-  skip('T24 报告通知微信推送（完整）', 'E2E-6已触发通知链路，真实推送需真实渠道');
+  if (filters.length === 0) {
+    section('\u4e94\u3001\u8de8 skill \u5b88\u536b\u5207\u6362\uff08T15\uff09');
+    skip('T15 \u8de8skill\u5b88\u536b\u5207\u6362', '\u9700\u22652\u4e2a\u4e0d\u540c external skill\uff0c\u624b\u52a8\u9a8c\u8bc1');
+    section('\u516b\u3001\u56de\u5f52\u6d4b\u8bd5\uff08T21-T22\uff0c\u624b\u52a8\u9879\uff09');
+    skip('T21 Wiki\u6863\u6848\u4fdd\u7559', '\u9700\u8981\u68c0\u67e5Agent\u56de\u590d\u662f\u5426\u4f53\u73b0\u5065\u5eb7\u6863\u6848\uff0c\u624b\u52a8\u9a8c\u8bc1');
+    skip('T22 LLMWiki\u65e5\u5fd7\u5199\u5165', '\u9700\u8981\u68c0\u67e5 data/logs/{userId}.json\uff0c\u624b\u52a8\u9a8c\u8bc1');
+    skip('T23 H5\u63d0\u4ea4\u786e\u8ba4\u901a\u77e5\uff08\u5b8c\u6574\uff09', 'E2E-5\u5df2\u8986\u76d6API\u5c42\uff0c\u771f\u5b9e\u5fae\u4fe1\u63a8\u9001\u9700\u771f\u5b9e\u6e20\u9053');
+    skip('T24 \u62a5\u544a\u901a\u77e5\u5fae\u4fe1\u63a8\u9001\uff08\u5b8c\u6574\uff09', 'E2E-6\u5df2\u89e6\u53d1\u901a\u77e5\u94fe\u8def\uff0c\u771f\u5b9e\u63a8\u9001\u9700\u771f\u5b9e\u6e20\u9053');
+  }
 
   // 汇总
-  console.log('\n╔══════════════════════════════════════════════════════════════╗');
-  console.log(`  ✅ ${passed} 通过   ❌ ${failed} 失败   ⏭️  ${skipped} 跳过`);
-  console.log('╚══════════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log('\u256f\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256e');
+  console.log(`  \u2705 ${passed} \u901a\u8fc7   \u274c ${failed} \u5931\u8d25   \u23ed\ufe0f  ${skipped} \u8df3\u8fc7`);
+  console.log('\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d');
   if (failed > 0) {
-    console.log('\n❌ 失败项：');
+    console.log('\n\u274c \u5931\u8d25\u9879\uff1a');
     results.filter(r => !r.ok).forEach(r => console.log(`  ${r.label}: ${r.detail}`));
   }
   process.exit(failed > 0 ? 1 : 0);
 }
+
 
 // ══════════════════════════════════════════════════════════════
 // 九、历史对话场景模拟（HIST）— 真实多轮对话模式
