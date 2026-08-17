@@ -1852,9 +1852,9 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   const isFileOnlyContent = /^\[文件:/.test(req.content.trim()) && !req.content.includes('\n');
   if (isFileOnlyContent) {
     console.log(`[AgentService][FileGuard] ${requestId} content is file-only placeholder, returning silent`);
-    void updateAgentTask(requestId, { status: 'done', result: '(file-only: silent)' });
+    void updateAgentTask(requestId, { status: 'done', routeType: 'file_saved', replyContent: '(file-only: silent)', endedAt: Date.now(), durationMs: 0 });
     void appendTaskEvent(requestId, 'file_only_silent', { reason: '纯文件占位符，不回复用户' });
-    return { reply: '', route_type: 'file_saved' };
+    return { request_id: requestId, status: 'done', reply: '', delivery, skill_route: undefined };
   }
 
   // ── 立即触发 CUA 预热（并行于后续处理，不阻塞）─────────────────────────
