@@ -1092,10 +1092,14 @@ function assembleAgentContext(params: {
   let directive = '';
 
   if (guardStatus === 'new_created' && routeSkillName) {
-    // 信息式提示，不强制介绍——让 Agent 根据对话场景自己判断是否、如何提及
+    // V3.5：信息式提示 + 括号简介 + 明确不要求确认 + 用户拒绝时的保护语
+    const shortDesc = routeSkillDesc ? `（${routeSkillDesc.slice(0, 60)}）` : '';
     directive = `[服务匹配提示] 系统检测到用户可能对「${routeSkillName}」感兴趣（置信度：高）。`
-      + `如果当前对话场景自然合适，可以顺带提及；如果用户正在聊别的事或问题与此无关，正常回答即可，不必强制推荐。`
-      + (routeSkillDesc ? `\n服务简介（供参考）：${routeSkillDesc.slice(0, 150)}` : '');
+      + `如果当前对话场景自然合适，可顺带提及${shortDesc}；`
+      + `不必要求用户确认，感兴趣自然会主动询问。`
+      + `若用户正在聊别的事，正常回答即可。`
+      + `若用户明确表示不需要推荐、或已有专业服务，不必提及。`;
+
 
   } else if (guardStatus === 'confirmed_ticket' && ticketUrl) {
     directive = `用户已确认使用「${guardSkillName || routeSkillName || ''}」，工单已建立。`
