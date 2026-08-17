@@ -2086,6 +2086,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   let selectedSkillId:   string | null = null;
   let selectedSkillName: string | null = null;
   let selectedSkillDesc: string | null = null;
+  let routingContent = req.content;  // 路由上下文（可能含近期文件摘要）
   let routeConfidence: 'high' | 'low' | 'none' = 'none';
   let routeReason = '';
 
@@ -2103,7 +2104,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   } else {
     // 正常路由：单次 AI 调用（v2）
     // ── 路由前查最近 24h 文件，让路由器知道用户有上传文件 ──────────────────────
-    let routingContent = req.content;
+    routingContent = req.content;  // 重置（else 分支内会注入文件摘要）
     if (userId) {
       try {
         const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
@@ -2385,7 +2386,26 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
 
     currentGuardStatus    = 'new_created';
     currentGuardSkillName = newGuardSkillName;
-    selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
+
+    // ── 快捷路径：用户已上传文件 + 明确要求分析 → 跳过介绍轮，直接建工单 ──────
+    // 场景：用户先发 PDF（ingest 暂存），再发「能做报告分析吗」
+    // routingContent 里含「用户近期上传的文件」说明文件上下文已注入，
+    // 用户明确要分析，不需要再走一轮「介绍服务→等确认」的守卫流程
+    const hasFileContext = routingContent.includes('用户近期上传的文件');
+    if (hasFileContext) {
+      console.log(`[SkillGuard] ⚡ 文件+分析意图快捷路径：跳过介绍轮，直接建工单 skill=${newGuardSkillName}`);
+      // 关闭刚建的守卫（不需要它了）
+      await db.runAsync(
+        `UPDATE skill_confirm_guards SET status='closed', close_reason='file_direct_ticket' WHERE id=?`,
+        [guardId],
+      ).catch(() => {});
+      currentGuardStatus    = 'confirmed_ticket';
+      selectedSkillId   = newGuardSkillId;
+      selectedSkillName = newGuardSkillName;
+      selectedSkillDesc = availableSkills.find(s => s.id === newGuardSkillId)?.description || null;
+    } else {
+      selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
+    }
   }
 
 
