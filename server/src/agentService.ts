@@ -1126,23 +1126,36 @@ function assembleAgentContext(params: {
 
   } else if (guardStatus === 'none' && existingTicket) {
     if (existingTicket.status === 'processing' || existingTicket.status === 'submitted') {
-      directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
-        + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
+      // 只有当前意向 skill 与进行中工单一致时才注入 directive
+      if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+        directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
+          + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
+      }
     } else if (existingTicket.status === 'done' && existingTicket.reportContent) {
       // 报告已完成且有内容：主动告知用户报告已生成
-      directive = `用户的「${existingTicket.skillName}」分析报告已完成，请直接告知用户报告已生成（报告原文见下方）。`
-        + `如用户询问具体建议或细节，请结合下方报告内容回答；`
-        + (existingTicket.reportUrl ? `如用户询问报告在哪查看，提供此链接：${existingTicket.reportUrl}` : `告知报告内容已在此对话中呈现`);
+      if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+        directive = `用户的「${existingTicket.skillName}」分析报告已完成，请直接告知用户报告已生成（报告原文见下方）。`
+          + `如用户询问具体建议或细节，请结合下方报告内容回答；`
+          + (existingTicket.reportUrl ? `如用户询问报告在哪查看，提供此链接：${existingTicket.reportUrl}` : `告知报告内容已在此对话中呈现`);
+      }
     } else if (existingTicket.status === 'done') {
-      directive = `用户的「${existingTicket.skillName}」分析报告已完成，请告知用户报告已生成。`
-        + (existingTicket.reportUrl ? `\n报告查看链接：${existingTicket.reportUrl}` : '');
+      if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+        directive = `用户的「${existingTicket.skillName}」分析报告已完成，请告知用户报告已生成。`
+          + (existingTicket.reportUrl ? `\n报告查看链接：${existingTicket.reportUrl}` : '');
+      }
     } else if (existingTicket.status === 'waiting_input') {
-      directive = `用户有一个待填写的「${existingTicket.skillName}」工单。`
-        + (existingTicket.h5Url
-          ? `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`
-          : `\n请告知用户工单已创建，稍后会收到填写链接通知。`);
+      // ⚠️ 关键：只有当前意向 skill 与待填写工单 skill 一致时才提示填写
+      // 如果用户正在问别的 skill，不应用旧工单打断用户意图
+      if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+        directive = `用户有一个待填写的「${existingTicket.skillName}」工单。`
+          + (existingTicket.h5Url
+            ? `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`
+            : `\n请告知用户工单已创建，稍后会收到填写链接通知。`);
+      }
+      // routeSkillId 与 existingTicket.skillId 不同时 → directive 为空，Agent 正常按新意向回答
     }
   }
+
   // guardStatus=none + 无工单 → directive 为空，Agent 正常回答
 
   return {
