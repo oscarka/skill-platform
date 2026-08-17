@@ -130,6 +130,8 @@
     let h5Config = null;
     let ticketId = null;
     let submitting = false;
+    let prefilledValues = {};   // 从后端返回的预填字段
+    let isSelf = true;          // 默认本人
 
     // ── Helpers ──────────────────────────────────────────────────────
     function toast(msg, dur = 2500) {
@@ -203,21 +205,38 @@
       renderFileList();
     };
 
-    function buildFieldHTML(field) {
+    function buildFieldHTML(field, prefilled) {
+      const val = (prefilled && prefilled[field.key]) ? prefilled[field.key] : '';
       const req = field.required ? '<span class="req"> *</span>' : '';
       const label = `<label class="form-label" for="f_${field.key}">${field.label}${req}</label>`;
       let input = '';
       if (field.type === 'textarea') {
-        input = `<textarea class="form-textarea" id="f_${field.key}" name="${field.key}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}></textarea>`;
+        input = `<textarea class="form-textarea" id="f_${field.key}" name="${field.key}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}>${val}</textarea>`;
       } else if (field.type === 'select' && field.options?.length) {
-        const opts = field.options.map(o => `<option value="${o.value ?? o}">${o.label ?? o}</option>`).join('');
+        const opts = field.options.map(o => `<option value="${o.value ?? o}" ${String(o.value??o)===val?'selected':''}>${o.label ?? o}</option>`).join('');
         input = `<select class="form-select" id="f_${field.key}" name="${field.key}" ${field.required ? 'required' : ''}><option value="">请选择…</option>${opts}</select>`;
       } else {
         const typeMap = { number: 'number', date: 'date', text: 'text' };
-        input = `<input class="form-input" id="f_${field.key}" name="${field.key}" type="${typeMap[field.type] || 'text'}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''} />`;
+        input = `<input class="form-input" id="f_${field.key}" name="${field.key}" type="${typeMap[field.type] || 'text'}" placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''} value="${val.replace(/"/g,'&quot;')}" />`;
       }
       return `<div class="form-item">${label}${input}</div>`;
     }
+
+    // 切换本人/家人时重建表单字段
+    window.toggleIdentity = function(val) {
+      isSelf = (val === 'self');
+      const fields = h5Config?.fields || [];
+      const prefill = isSelf ? prefilledValues : {
+        // 家人时保留联系人姓名，其余清空
+        contact_name: prefilledValues.contact_name || '',
+        contact_phone: prefilledValues.contact_phone || '',
+      };
+      fields.forEach(f => {
+        const el = document.getElementById('f_' + f.key);
+        if (!el) return;
+        el.value = prefill[f.key] || '';
+      });
+    };
 
     function renderForm(data) {
       const cfg = data.h5_config || {};
@@ -227,8 +246,23 @@
       const daysLeft = Math.ceil(expiryMs / 86400000);
       const isReturned = data.status === 'returned';
 
+      // 本人/家人选择器（当 h5_config 有 patient_name 字段时才显示）
+      const hasPatient = fields.some(f => f.key === 'patient_name' || f.key === 'patient_age');
+      const identityToggle = hasPatient ? `
+        <div class="card" style="margin-bottom:12px">
+          <div class="form-label" style="margin-bottom:8px">👤 这份表单是谁的？</div>
+          <div style="display:flex;gap:16px">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="identity" value="self" checked onchange="toggleIdentity('self')" />本人
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="identity" value="other" onchange="toggleIdentity('other')" />家人或其他人
+            </label>
+          </div>
+        </div>` : '';
+
       const fieldsHTML = fields.length
-        ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(buildFieldHTML).join('')}</div>`
+        ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(f => buildFieldHTML(f, prefilledValues)).join('')}</div>`
         : '';
 
       const uploadHTML = uploads ? `
@@ -253,7 +287,7 @@
         <div class="container">
           ${isReturned ? `<div class="return-banner"><div class="return-title">⚠️ 工作人员请您补充信息</div><div class="return-reason">${data.return_reason || '请重新填写并提交。'}</div></div>` : ''}
           <form id="submit-form" onsubmit="handleSubmit(event)">
-            ${fieldsHTML}${uploadHTML}
+            ${identityToggle}${fieldsHTML}${uploadHTML}
             <button class="btn-submit" type="submit" id="submit-btn">提交信息</button>
           </form>
         </div>`;
@@ -283,7 +317,43 @@
       renderFileList();
     }
 
-    // ── Submit ───────────────────────────────────────────────────────
+    // ── Submit（支持 is_self + force + warning 警告确认）──────────────────────
+    async function doSubmit(force) {
+      const token = getToken();
+      const fd = new FormData();
+      const fields = {};
+      (h5Config?.fields || []).forEach(f => {
+        const el = document.getElementById('f_' + f.key);
+        if (el) fields[f.key] = el.value;
+      });
+      fd.append('fields', JSON.stringify(fields));
+      fd.append('is_self', isSelf ? 'true' : 'false');
+      if (force) fd.append('force', 'true');
+      selectedFiles.forEach(f => fd.append('files', f));
+
+      const res = await fetch(`/api/h5/${token}/submit`, { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '提交失败');
+
+      // 返回 warning：信息不符，弹确认框
+      if (data.warning) {
+        const btn = document.getElementById('submit-btn');
+        btn.disabled = false; btn.textContent = '提交信息';
+        submitting = false;
+        const confirmed = confirm(
+          data.message + '\n\n点击「确定」将直接提交；点击「取消」返回修改。'
+        );
+        if (confirmed) {
+          submitting = true;
+          btn.disabled = true; btn.textContent = '提交中…';
+          await doSubmit(true);
+        }
+        return;
+      }
+
+      showSuccess();
+    }
+
     window.handleSubmit = async function(e) {
       e.preventDefault();
       if (submitting) return;
@@ -300,27 +370,14 @@
       btn.disabled = true; btn.textContent = '提交中…';
 
       try {
-        const token = getToken();
-        const fd = new FormData();
-        // Collect text fields
-        const fields = {};
-        (h5Config?.fields || []).forEach(f => {
-          const el = document.getElementById('f_' + f.key);
-          if (el) fields[f.key] = el.value;
-        });
-        fd.append('fields', JSON.stringify(fields));
-        selectedFiles.forEach(f => fd.append('files', f));
-
-        const res = await fetch(`/api/h5/${token}/submit`, { method: 'POST', body: fd });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '提交失败');
-        showSuccess();
+        await doSubmit(false);
       } catch (err) {
         toast('提交失败：' + err.message, 4000);
         btn.disabled = false; btn.textContent = '提交信息';
         submitting = false;
       }
     };
+
 
     // ── Init ─────────────────────────────────────────────────────────
     async function init() {
@@ -335,6 +392,7 @@
         if (data.already_submitted) { showAlreadySubmitted(data.status, data.report_url); return; }
         h5Config = data.h5_config;
         ticketId = data.ticket_id;
+        prefilledValues = data.prefilled_values || {};
         document.title = data.h5_config?.title || data.skill_name || '信息提交';
         renderForm(data);
       } catch (err) {

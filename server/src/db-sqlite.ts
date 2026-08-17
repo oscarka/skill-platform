@@ -183,6 +183,9 @@ export function initDb(): void {
     `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
     // 为已有 tickets 表添加 delivery_info 列（存储 callback_url + delivery 供 AI 处理完后通知用户）
     `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
+    // prefilled_values: 建票时从 wiki 提取的预填字段 JSON
+    `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS prefilled_values TEXT`,
+
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

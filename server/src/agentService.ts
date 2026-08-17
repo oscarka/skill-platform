@@ -1459,6 +1459,19 @@ async function handleHealthSkill(
       content ? `【用户问题】${content}` : '',
     ].filter(Boolean).join('\n\n').slice(0, 800) || null;
 
+    // ── 从 wiki 提取 H5 表单预填字段 ─────────────────────────────────────────
+    const wikiText = [wikiCtx?.user_profile || '', wikiCtx?.health_wiki || ''].join('\n');
+    const ageMatch  = wikiText.match(/(\d{1,3})\s*(?:岁|歲|years?\s*old)/i);
+    const phoneMatch= wikiText.match(/1[3-9]\d{9}/);
+    const prefilledValues: Record<string, string> = {
+      contact_name:            meta.from_name || '',
+      patient_name:            meta.from_name || '',
+      patient_age:             ageMatch ? ageMatch[1] : '',
+      contact_phone:           phoneMatch ? phoneMatch[0] : '',
+      additional_health_info:  wikiCtx?.health_wiki ? wikiCtx.health_wiki.slice(0, 300).replace(/\[🔗.*?\]\(.*?\)/g, '').trim() : '',
+    };
+    const prefilledValuesJson = JSON.stringify(prefilledValues);
+
     const ticketId = require('crypto').randomUUID();
     const token    = require('crypto').randomUUID().replace(/-/g, '');
     const now      = Date.now();
@@ -1476,13 +1489,14 @@ async function handleHealthSkill(
     await db.runAsync(
       `INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [ticketId, skillId, token,
        `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
        patientName, prefilledNotes,
-       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId],
+       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson],
     );
+
 
     const ticketUrl  = `${h5Base}?token=${token}`;
     const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;

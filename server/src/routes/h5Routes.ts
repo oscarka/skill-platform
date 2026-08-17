@@ -57,12 +57,17 @@ h5Router.get('/:token', async (req, res) => {
     const skill = await db.getAsync<any>('SELECT name, h5_config FROM skills WHERE id=?', [ticket.skill_id]);
     const h5Config = skill?.h5_config ? JSON.parse(skill.h5_config) : null;
 
+    // 解析预填字段
+    let prefilledValues: Record<string, string> = {};
+    try { if (ticket.prefilled_values) prefilledValues = JSON.parse(ticket.prefilled_values); } catch { /* ignore */ }
+
     res.json({
       ticket_id: ticket.id,
       status: ticket.status === 'created' ? 'waiting_input' : ticket.status,
       return_reason: ticket.return_reason,
       skill_name: skill?.name,
       h5_config: h5Config,
+      prefilled_values: prefilledValues,
       expires_at: ticket.expires_at,
     });
   } catch (err: any) {
@@ -94,6 +99,33 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
       fields = req.body.fields ? JSON.parse(req.body.fields) : req.body;
     } catch {
       fields = req.body || {};
+    }
+
+    // ── 是否本人校验（is_self=true 且未 force 时，比对预填信息）───────────────
+    const isSelf  = req.body.is_self === 'true' || req.body.is_self === true;
+    const isForce = req.body.force  === 'true' || req.body.force  === true;
+    if (isSelf && !isForce && ticket.prefilled_values) {
+      let prefilled: Record<string, string> = {};
+      try { prefilled = JSON.parse(ticket.prefilled_values); } catch { /* ignore */ }
+      const mismatches: string[] = [];
+
+      // patient_name 不符：提交的姓名与预填不同（均非空）
+      const subName = String(fields.patient_name || '').trim();
+      const preNames = prefilled.patient_name ? prefilled.patient_name.trim() : '';
+      if (subName && preNames && subName !== preNames) mismatches.push('patient_name');
+
+      // patient_age 不符：年龄差超过 10 岁
+      const subAge  = parseInt(String(fields.patient_age || '0'), 10);
+      const preAge  = parseInt(String(prefilled.patient_age || '0'), 10);
+      if (subAge > 0 && preAge > 0 && Math.abs(subAge - preAge) > 10) mismatches.push('patient_age');
+
+      if (mismatches.length > 0) {
+        return res.status(200).json({
+          warning: true,
+          mismatch_fields: mismatches,
+          message: `您提交的信息与档案中的记录不符（${mismatches.map(f => ({ patient_name: '姓名', patient_age: '年龄' })[f] || f).join('、')}），请确认是否填写正确。如需更新个人档案信息，请联系管理员。`,
+        });
+      }
     }
 
     // Delete old inputs if resubmitting after return
