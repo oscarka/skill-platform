@@ -127,6 +127,7 @@
     const toastEl = document.getElementById('toast');
     const fileInput = document.getElementById('file-input');
     let selectedFiles = [];
+    let prefilledFiles = [];    // 从微信自动挂载的附件 [{ id, name, url, type }]
     let h5Config = null;
     let ticketId = null;
     let submitting = false;
@@ -151,6 +152,7 @@
     }
 
     function fmtSize(bytes) {
+      if (!bytes) return '';
       if (bytes < 1024) return bytes + 'B';
       if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
       return (bytes / 1024 / 1024).toFixed(1) + 'MB';
@@ -175,11 +177,7 @@
     }
 
     function showAlreadySubmitted(status, reportUrl) {
-      const labels = { processing: 'AI 处理中，请耐心等待', done: '报告已生成！', patient_confirmed: '报告已确认', patient_rejected: '报告已标记有误' };
-      const reportBtn = (status === 'done' || status === 'patient_confirmed' || status === 'patient_rejected') && reportUrl
-        ? `<a href="${reportUrl}" style="display:inline-block;margin-top:18px;padding:12px 28px;background:#16a34a;color:#fff;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;">📋 查看报告</a>`
-        : '';
-      app.innerHTML = `<div class="state-screen"><div class="state-icon">${status === 'done' ? '📋' : '✅'}</div><div class="state-title">已成功提交</div><div class="state-desc">${labels[status] || '您已提交过信息，工作人员将尽快处理。'}</div>${reportBtn}</div>`;
+      app.innerHTML = `<div class="state-screen"><div class="state-icon">✅</div><div class="state-title">已提交</div><div class="state-desc">您已成功提交信息，工作人员正在处理。<br/>${reportUrl ? `<a href="${reportUrl}" style="color:#0071e3;text-decoration:none">查看报告 →</a>` : ''}</div></div>`;
     }
 
     function showSuccess() {
@@ -190,8 +188,18 @@
     function renderFileList() {
       const list = document.getElementById('file-list');
       if (!list) return;
-      if (selectedFiles.length === 0) { list.innerHTML = ''; return; }
-      list.innerHTML = selectedFiles.map((f, i) => `
+      const totalCount = prefilledFiles.length + selectedFiles.length;
+      if (totalCount === 0) { list.innerHTML = ''; return; }
+
+      const prefilledHTML = prefilledFiles.map((f, i) => `
+        <div class="file-item" style="border-left: 3px solid #10b981; background: #f0fdf4;">
+          <span class="file-icon">${fileIcon(f.type || 'pdf')}</span>
+          <span class="file-name" title="微信自动载入附件">${f.name} <span style="font-size:11px;color:#10b981;margin-left:4px;font-weight:500;">(已自动载入)</span></span>
+          <span class="file-size"></span>
+          <button class="remove-btn" type="button" onclick="removePrefilledFile(${i})">✕</button>
+        </div>`).join('');
+
+      const selectedHTML = selectedFiles.map((f, i) => `
         <div class="file-item">
           <span class="file-icon">${fileIcon(f.type)}</span>
           <span class="file-name">${f.name}</span>
@@ -301,13 +309,14 @@
         area.ondragleave = () => area.classList.remove('drag-over');
         area.ondrop = e => { e.preventDefault(); area.classList.remove('drag-over'); addFiles(e.dataTransfer.files, maxFiles); };
         fileInput.onchange = () => { addFiles(fileInput.files, maxFiles); fileInput.value = ''; };
+        renderFileList(); // 渲染已有预填附件
       }
     }
 
     function addFiles(fileList, max) {
       const allowed = h5Config?.uploads?.accept || [];
       for (const f of fileList) {
-        if (selectedFiles.length >= max) { toast(`最多上传 ${max} 个文件`); break; }
+        if (selectedFiles.length + prefilledFiles.length >= max) { toast(`最多上传 ${max} 个文件`); break; }
         if (allowed.length && !allowed.some(a => {
           if (a.endsWith('/*')) return f.type.startsWith(a.replace('/*', '/'));
           return f.type === a;
@@ -317,7 +326,7 @@
       renderFileList();
     }
 
-    // ── Submit（支持 is_self + force + warning 警告确认）──────────────────────
+    // ── Submit（支持 is_self + force + warning 警告确认 + kept_files）─────────
     async function doSubmit(force) {
       const token = getToken();
       const fd = new FormData();
@@ -328,6 +337,7 @@
       });
       fd.append('fields', JSON.stringify(fields));
       fd.append('is_self', isSelf ? 'true' : 'false');
+      fd.append('kept_files', JSON.stringify(prefilledFiles));
       if (force) fd.append('force', 'true');
       selectedFiles.forEach(f => fd.append('files', f));
 
@@ -361,7 +371,8 @@
       if (!form.checkValidity()) { form.reportValidity(); return; }
 
       const uploads = h5Config?.uploads;
-      if (uploads && selectedFiles.length === 0 && (h5Config.fields || []).length === 0) {
+      const totalFiles = selectedFiles.length + prefilledFiles.length;
+      if (uploads && totalFiles === 0 && (h5Config.fields || []).length === 0) {
         toast('请至少上传一个文件'); return;
       }
 
@@ -393,12 +404,14 @@
         h5Config = data.h5_config;
         ticketId = data.ticket_id;
         prefilledValues = data.prefilled_values || {};
+        prefilledFiles = Array.isArray(prefilledValues.prefilled_files) ? [...prefilledValues.prefilled_files] : [];
         document.title = data.h5_config?.title || data.skill_name || '信息提交';
         renderForm(data);
       } catch (err) {
         showError('加载失败，请检查网络后刷新重试。');
       }
     }
+
 
     init();
   </script>

@@ -144,6 +144,24 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
       );
     }
 
+    // Save kept prefilled files (from WeChat auto-mount)
+    let keptFiles: Array<{ name: string, url: string, type?: string }> = [];
+    try {
+      if (req.body.kept_files) {
+        keptFiles = typeof req.body.kept_files === 'string' ? JSON.parse(req.body.kept_files) : req.body.kept_files;
+      }
+    } catch { /* ignore */ }
+
+    for (const kf of keptFiles) {
+      if (kf.url) {
+        await db.runAsync(
+          `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
+          [uuidv4(), ticket.id, 'file', 'file', kf.url, kf.name || '附件', kf.type === 'image' ? 'image/jpeg' : 'application/pdf', now]
+        );
+      }
+    }
+
     // Save uploaded files
     const files = (req.files as Express.Multer.File[]) || [];
     for (const file of files) {
@@ -158,6 +176,7 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
         [uuidv4(), ticket.id, 'file', 'file', file.path, fileName, file.mimetype, now]
       );
     }
+
 
     // Update ticket status
     await db.runAsync(

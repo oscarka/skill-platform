@@ -12,8 +12,10 @@
  */
 
 import express from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import { processAgentChat, handleJobCallback, saveAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
 import * as db from '../db';
+
 
 export const agentRouter = express.Router();
 
@@ -162,12 +164,6 @@ agentRouter.post('/ingest', async (req, res) => {
       return res.status(400).json({ error: 'from_user_id is required' });
     }
 
-    // 只处理文字消息，其他类型（图片、语音）暂不处理
-    if (msgtype && msgtype !== 'text') {
-      console.log(`[Orch/Ingest] skip non-text msgtype=${msgtype} from=${from_name}`);
-      return res.json({ ok: true, skipped: true, reason: 'non-text message' });
-    }
-
     const sessionId = conversation_id || from_user_id;
     const history   = Array.isArray(req.body.history) ? req.body.history : [];
     const notes     = req.body.notes || '';
@@ -178,7 +174,31 @@ agentRouter.post('/ingest', async (req, res) => {
     const display_name = identity.display_name;
     const juhe_conv_id = identity.juhe_conv_id;
 
+    // ── 附件暂存：记录用户最近24小时上传的文件 ──────────────────────────────
+    const media_url = req.body.media_url || null;
+    const file_name = req.body.file_name || '';
+    const file_type = req.body.file_type || (msgtype === 'image' ? 'image' : 'file');
+
+    if (media_url) {
+      const fileId = uuidv4();
+      const now = Date.now();
+      try {
+        await db.runAsync(
+          `INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, created_at)
+           VALUES (?,?,?,?,?,?,?)`,
+          [fileId, unified_id, media_url, file_name || '未命名附件', file_type, content.slice(0, 500), now]
+        );
+        // 清理超过24小时的过期附件
+        const cutoff24h = now - 24 * 60 * 60 * 1000;
+        await db.runAsync(`DELETE FROM user_recent_files WHERE created_at < ?`, [cutoff24h]);
+        console.log(`[Orch/Ingest] 📎 保存用户 ${unified_id} 最近24小时附件: ${file_name} (${media_url})`);
+      } catch (err: any) {
+        console.warn(`[Orch/Ingest] 保存附件失败:`, err.message);
+      }
+    }
+
     console.log(`[Orch/Ingest] channel=${channel} from=${display_name}(${from_user_id}) unified=${unified_id} juhe_conv=${juhe_conv_id||'none'} content="${content.slice(0,60)}" history=${history.length}`);
+
 
     // 构造 AgentChatRequest，用 unified_id 作为 user_id（写入 agent_tasks / wiki 均用此 ID）
     const agentReq = {

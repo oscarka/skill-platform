@@ -1464,18 +1464,44 @@ async function handleHealthSkill(
     const wikiText = [wikiCtx?.user_profile || '', wikiCtx?.health_wiki || ''].join('\n');
     const ageMatch  = wikiText.match(/(\d{1,3})\s*(?:岁|歲|years?\s*old)/i);
     const phoneMatch= wikiText.match(/1[3-9]\d{9}/);
-    const prefilledValues: Record<string, string> = {
+
+    const now = Date.now();
+
+    // ── 系统自动查询 24 小时内用户发送的附件 ─────────────────────────────────
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    let recentFiles: any[] = [];
+
+    if (meta.user_id) {
+      try {
+        recentFiles = await db.allAsync<any>(
+          `SELECT * FROM user_recent_files WHERE user_id=? AND created_at > ? ORDER BY created_at DESC LIMIT 5`,
+          [meta.user_id, oneDayAgo]
+        );
+      } catch (err: any) {
+        console.warn('[AgentService] 查询最近附件失败:', err.message);
+      }
+    }
+
+    const prefilledFiles = recentFiles.map(f => ({
+      id: f.id,
+      name: f.file_name || '附件',
+      url: f.file_url,
+      type: f.file_type || 'file',
+      summary: f.summary || '',
+    }));
+
+    const prefilledValues: Record<string, any> = {
       contact_name:            meta.from_name || '',
       patient_name:            meta.from_name || '',
       patient_age:             ageMatch ? ageMatch[1] : '',
       contact_phone:           phoneMatch ? phoneMatch[0] : '',
       additional_health_info:  wikiCtx?.health_wiki ? wikiCtx.health_wiki.slice(0, 300).replace(/\[🔗.*?\]\(.*?\)/g, '').trim() : '',
+      prefilled_files:         prefilledFiles,
     };
     const prefilledValuesJson = JSON.stringify(prefilledValues);
 
     const ticketId = require('crypto').randomUUID();
     const token    = require('crypto').randomUUID().replace(/-/g, '');
-    const now      = Date.now();
     const expiresAt = now + 60 * 60 * 1000; // 1小时有效
 
     const deliveryInfo = JSON.stringify({
@@ -1498,9 +1524,22 @@ async function handleHealthSkill(
        meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson],
     );
 
+    // ── 将最近附件默认写入 ticket_inputs（系统自动挂载）───────────────────────
+    for (const f of prefilledFiles) {
+      await db.runAsync(
+        `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+        [require('crypto').randomUUID(), ticketId, 'file', 'file', f.url, f.name, f.type === 'image' ? 'image/jpeg' : 'application/pdf', now]
+      );
+    }
+    if (prefilledFiles.length > 0) {
+      console.log(`[AgentService] 📎 系统自动挂载 ${prefilledFiles.length} 份24小时内附件到工单 ${ticketId}: ${prefilledFiles.map(f => f.name).join(', ')}`);
+    }
 
     const ticketUrl  = `${h5Base}?token=${token}`;
-    const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
+    const fileHint = prefilledFiles.length > 0 ? `（已为您自动载入：${prefilledFiles.map(f => f.name).join('、')}）` : '';
+    const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了信息${fileHint}，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
+
 
     void appendTaskEvent(requestId, 'ticket_created', {
       ticketId, skillId, skillName,

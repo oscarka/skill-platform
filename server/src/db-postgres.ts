@@ -419,9 +419,20 @@ CREATE TABLE IF NOT EXISTS skill_confirm_guards (
   expires_at      BIGINT NOT NULL         -- created_at + 30分钟
 );
 
-CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status);
+CREATE TABLE IF NOT EXISTS user_recent_files (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  file_url    TEXT NOT NULL,
+  file_name   TEXT NOT NULL,
+  file_type   TEXT NOT NULL DEFAULT 'file',
+  summary     TEXT,
+  created_at  BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at);
 
 `;
+
 
 export async function initDb(): Promise<void> {
   try {

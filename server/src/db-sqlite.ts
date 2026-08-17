@@ -185,6 +185,16 @@ export function initDb(): void {
     `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
     // prefilled_values: 建票时从 wiki 提取的预填字段 JSON
     `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS prefilled_values TEXT`,
+    `CREATE TABLE IF NOT EXISTS user_recent_files (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL,
+      file_url    TEXT NOT NULL,
+      file_name   TEXT NOT NULL,
+      file_type   TEXT NOT NULL DEFAULT 'file',
+      summary     TEXT,
+      created_at  INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at)`,
 
   ];
   for (const sql of migrations) {

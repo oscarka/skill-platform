@@ -453,19 +453,27 @@ async function submitTicketToSandboxService(
   const userMessage = buildUserMessageFromInputs(inputs);
   const testInputs: Record<string, any> = { ticket: userMessage };
 
-  // 附件处理（和 Job 路径完全一致）
-  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path && fs.existsSync(i.file_path));
+  // 附件处理（支持本地文件上传GCS及已有GCS链接直接透传）
+  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path);
   if (fileInputs.length > 0) {
     const gcsPaths: string[] = [];
     for (const fi of fileInputs) {
-      const gcsPath = await uploadFileToGcs(fi.file_path!, ticketId);
-      if (gcsPath) gcsPaths.push(gcsPath);
+      const p = fi.file_path!;
+      if (p.startsWith('gs://')) {
+        gcsPaths.push(p);
+      } else if (p.startsWith('https://storage.googleapis.com/')) {
+        gcsPaths.push(p.replace(/^https:\/\/storage\.googleapis\.com\//, 'gs://'));
+      } else if (fs.existsSync(p)) {
+        const gcsPath = await uploadFileToGcs(p, ticketId);
+        if (gcsPath) gcsPaths.push(gcsPath);
+      }
     }
     if (gcsPaths.length > 0) {
       testInputs['__attachments__'] = gcsPaths;
       console.log(`[SandboxService] Injecting ${gcsPaths.length} GCS attachment(s) for ticket ${ticketId}`);
     }
   }
+
 
   const svcUrl = process.env.SERVICE_URL || '';
   const callbackUrl = svcUrl ? `${svcUrl}/api/tickets/${ticketId}/agent-callback` : '';
@@ -551,18 +559,26 @@ async function submitTicketAgentJob(
 
   // ── 上传文件附件到 GCS，通过 __attachments__ 传给 sandbox runner ──────────
   // sandbox runner.py 会从 GCS 下载文件并用 pdfplumber 等工具提取内容，注入 Agent 上下文
-  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path && fs.existsSync(i.file_path));
+  const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path);
   if (fileInputs.length > 0) {
     const gcsPaths: string[] = [];
     for (const fi of fileInputs) {
-      const gcsPath = await uploadFileToGcs(fi.file_path!, ticketId);
-      if (gcsPath) gcsPaths.push(gcsPath);
+      const p = fi.file_path!;
+      if (p.startsWith('gs://')) {
+        gcsPaths.push(p);
+      } else if (p.startsWith('https://storage.googleapis.com/')) {
+        gcsPaths.push(p.replace(/^https:\/\/storage\.googleapis\.com\//, 'gs://'));
+      } else if (fs.existsSync(p)) {
+        const gcsPath = await uploadFileToGcs(p, ticketId);
+        if (gcsPath) gcsPaths.push(gcsPath);
+      }
     }
     if (gcsPaths.length > 0) {
       testInputs['__attachments__'] = gcsPaths;
       console.log(`[TicketAgent] Injecting ${gcsPaths.length} GCS attachment(s) for ticket ${ticketId}`);
     }
   }
+
 
   // Ticket-specific callback URL
   const serviceUrl = process.env.SERVICE_URL || '';
