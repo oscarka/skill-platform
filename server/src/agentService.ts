@@ -1845,6 +1845,18 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     has_notes: !!(req.notes),
   });
 
+  // ── 第三道防线：纯文件占位内容不回复 ────────────────────────────────────────
+  // 正常流程下文件消息被 ingest 守卫拦截（第二道），archiver 拦截（第一道）
+  // 但如果消息意外到达这里（直接调 /api/v1/agent/chat），也要保持静默
+  // 判断：content 以 [文件: 开头 且 不包含用户文字（无换行/空格后跟正文）
+  const isFileOnlyContent = /^\[文件:/.test(req.content.trim()) && !req.content.includes('\n');
+  if (isFileOnlyContent) {
+    console.log(`[AgentService][FileGuard] ${requestId} content is file-only placeholder, returning silent`);
+    void updateAgentTask(requestId, { status: 'done', result: '(file-only: silent)' });
+    void appendTaskEvent(requestId, 'file_only_silent', { reason: '纯文件占位符，不回复用户' });
+    return { reply: '', route_type: 'file_saved' };
+  }
+
   // ── 立即触发 CUA 预热（并行于后续处理，不阻塞）─────────────────────────
   const cuaSendUrl = process.env.CUA_SEND_URL || '';
   if (cuaSendUrl && req.meta?.from_name) {
