@@ -1506,12 +1506,15 @@ async function handleHealthSkill(
     }
 
 
-    // 按文件名去重（同名文件只保留最新一次），LIMIT 5 已按 created_at DESC
-    const seenNames = new Set<string>();
+    // 去重：优先用 content_hash（MD5），hash 未计算完时回退文件名
+    // 同一内容的文件只保留最新一次（LIMIT 5 已按 created_at DESC，first-seen wins）
+    const seenKeys = new Set<string>();
     const uniqueRecentFiles = recentFiles.filter((f: any) => {
-      const key = (f.file_name || '').trim().toLowerCase() || f.file_url;
-      if (seenNames.has(key)) return false;
-      seenNames.add(key);
+      // content_hash 已计算：用 hash 去重（最准确，即使文件名不同）
+      // content_hash 为 null：用文件名去重（兜底，hash 异步计算中）
+      const key = f.content_hash || (f.file_name || '').trim().toLowerCase() || f.file_url;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
       return true;
     });
 

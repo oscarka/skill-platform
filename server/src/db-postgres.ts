@@ -426,10 +426,12 @@ CREATE TABLE IF NOT EXISTS user_recent_files (
   file_name   TEXT NOT NULL,
   file_type   TEXT NOT NULL DEFAULT 'file',
   summary     TEXT,
+  content_hash TEXT,  -- MD5 of file content for deduplication; NULL until computed
   created_at  BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash);
 
 `;
 

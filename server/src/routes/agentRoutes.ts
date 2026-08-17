@@ -184,14 +184,43 @@ agentRouter.post('/ingest', async (req, res) => {
       const now = Date.now();
       try {
         await db.runAsync(
-          `INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, created_at)
-           VALUES (?,?,?,?,?,?,?)`,
+          `INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, content_hash, created_at)
+           VALUES (?,?,?,?,?,?,NULL,?)`,
           [fileId, unified_id, media_url, file_name || '未命名附件', file_type, content.slice(0, 500), now]
         );
         // 清理超过24小时的过期附件
         const cutoff24h = now - 24 * 60 * 60 * 1000;
         await db.runAsync(`DELETE FROM user_recent_files WHERE created_at < ?`, [cutoff24h]);
         console.log(`[Orch/Ingest] 📎 保存用户 ${unified_id} 最近24小时附件: ${file_name} (${media_url})`);
+
+        // ── 异步计算文件内容 MD5，用于真正的内容去重 ──────────────────────────
+        // 不阻塞 ingest 响应，后台下载计算
+        (async () => {
+          try {
+            const https = await import('https');
+            const http  = await import('http');
+            const crypto = await import('crypto');
+            const fetchModule = media_url.startsWith('https') ? https : http;
+            const hash = crypto.createHash('md5');
+            await new Promise<void>((resolve, reject) => {
+              fetchModule.get(media_url, (resp) => {
+                if (resp.statusCode && resp.statusCode >= 400) {
+                  reject(new Error(`HTTP ${resp.statusCode}`)); return;
+                }
+                resp.on('data', (chunk: Buffer) => hash.update(chunk));
+                resp.on('end', resolve);
+                resp.on('error', reject);
+              }).on('error', reject);
+            });
+            const md5 = hash.digest('hex');
+            await db.runAsync(`UPDATE user_recent_files SET content_hash=? WHERE id=?`, [md5, fileId]);
+            console.log(`[Orch/Ingest] 🔑 MD5 计算完成 file=${file_name} hash=${md5.slice(0,8)}…`);
+          } catch (hashErr: any) {
+            console.warn(`[Orch/Ingest] ⚠️ MD5 计算失败 file=${file_name}: ${hashErr.message}`);
+            // 失败不影响功能，content_hash 保持 NULL，回退到文件名去重
+          }
+        })();
+
       } catch (err: any) {
         console.warn(`[Orch/Ingest] 保存附件失败:`, err.message);
       }

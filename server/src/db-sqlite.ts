@@ -192,9 +192,13 @@ export function initDb(): void {
       file_name   TEXT NOT NULL,
       file_type   TEXT NOT NULL DEFAULT 'file',
       summary     TEXT,
+      content_hash TEXT,
       created_at  INTEGER NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
+    // 已存在的表加列迁移
+    `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
 
   ];
   for (const sql of migrations) {
