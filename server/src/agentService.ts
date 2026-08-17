@@ -1367,8 +1367,9 @@ async function handleHealthSkill(
     if (meta.user_id) {
       const existing = await db.getAsync<any>(
         `SELECT * FROM tickets WHERE created_by=? AND skill_id=? AND created_at > ?
+         AND expires_at > ?
          ORDER BY created_at DESC LIMIT 1`,
-        [meta.user_id, skillId, oneHourAgo]
+        [meta.user_id, skillId, oneHourAgo, Date.now()]
       );
 
       if (existing && existing.status !== 'error') {
@@ -1475,7 +1476,7 @@ async function handleHealthSkill(
     const ticketId = require('crypto').randomUUID();
     const token    = require('crypto').randomUUID().replace(/-/g, '');
     const now      = Date.now();
-    const expiresAt = now + 60 * 60 * 1000; // 1小时有效（与复用窗口一致）
+    const expiresAt = now + 60 * 60 * 1000; // 1小时有效
 
     const deliveryInfo = JSON.stringify({
       callback_url:   req.callback_url || '',
