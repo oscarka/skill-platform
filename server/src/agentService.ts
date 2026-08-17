@@ -1506,11 +1506,12 @@ async function handleHealthSkill(
     }
 
 
-    // 按 URL 去重，只保留每个文件最新一次（LIMIT 5 已按 created_at DESC，first-seen wins）
-    const seenUrls = new Set<string>();
+    // 按文件名去重（同名文件只保留最新一次），LIMIT 5 已按 created_at DESC
+    const seenNames = new Set<string>();
     const uniqueRecentFiles = recentFiles.filter((f: any) => {
-      if (seenUrls.has(f.file_url)) return false;
-      seenUrls.add(f.file_url);
+      const key = (f.file_name || '').trim().toLowerCase() || f.file_url;
+      if (seenNames.has(key)) return false;
+      seenNames.add(key);
       return true;
     });
 
@@ -1527,7 +1528,19 @@ async function handleHealthSkill(
       patient_name:            meta.from_name || '',
       patient_age:             ageMatch ? ageMatch[1] : '',
       contact_phone:           phoneMatch ? phoneMatch[0] : '',
-      additional_health_info:  wikiCtx?.health_wiki ? wikiCtx.health_wiki.slice(0, 300).replace(/\[🔗.*?\]\(.*?\)/g, '').trim() : '',
+      additional_health_info:  (() => {
+        if (!wikiCtx?.health_wiki) return '';
+        let info = wikiCtx.health_wiki;
+        // 截断内部AI指令（用户不应看到 📋 工具调用提示、get_medication_plan 等）
+        // 通常以 '---\n📋' 或 '📋 **可按需调用' 或 '（最近30轮' 为分隔符
+        const cutMarkers = ['\n---\n📋', '\n📋 **可按需调用', '\n（最近30轮', '\nprompt_tokens'];
+        for (const marker of cutMarkers) {
+          const idx = info.indexOf(marker);
+          if (idx !== -1) { info = info.slice(0, idx); break; }
+        }
+        // 再移除引用链接 [🔗 溯源](...) 和过长内容
+        return info.replace(/\[🔗.*?\]\(.*?\)/g, '').trim().slice(0, 500);
+      })(),
       prefilled_files:         prefilledFiles,
     };
     const prefilledValuesJson = JSON.stringify(prefilledValues);
