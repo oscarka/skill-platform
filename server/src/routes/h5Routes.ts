@@ -153,7 +153,7 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
     } catch { /* ignore */ }
 
     for (const kf of keptFiles) {
-      if (kf.url) {
+      if (kf && kf.url) {
         await db.runAsync(
           `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
            VALUES (?,?,?,?,?,?,?,?)`,
@@ -161,6 +161,7 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
         );
       }
     }
+
 
     // Save uploaded files
     const files = (req.files as Express.Multer.File[]) || [];

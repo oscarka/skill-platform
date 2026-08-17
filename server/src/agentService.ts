@@ -1473,14 +1473,18 @@ async function handleHealthSkill(
 
     if (meta.user_id) {
       try {
+        const uId = String(meta.user_id);
+        const wecomUid = uId.startsWith('wecom_') ? uId : `wecom_${uId}`;
+        const rawUid = uId.replace(/^wecom_/, '');
         recentFiles = await db.allAsync<any>(
-          `SELECT * FROM user_recent_files WHERE user_id=? AND created_at > ? ORDER BY created_at DESC LIMIT 5`,
-          [meta.user_id, oneDayAgo]
+          `SELECT * FROM user_recent_files WHERE (user_id=? OR user_id=? OR user_id=?) AND created_at > ? ORDER BY created_at DESC LIMIT 5`,
+          [uId, wecomUid, rawUid, oneDayAgo]
         );
       } catch (err: any) {
         console.warn('[AgentService] 查询最近附件失败:', err.message);
       }
     }
+
 
     const prefilledFiles = recentFiles.map(f => ({
       id: f.id,

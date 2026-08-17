@@ -58,14 +58,24 @@ const chatRes = await fetch(`${BASE}/api/v1/agent/chat`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    content: '请帮我做一份医学报告解读',
-    source:  'wecom',
+    content:    '请为我创建医学报告解读助手分析工单',
+    source:     'wecom',
+    session_id: testUserId,
+    skill_id:   'bb5585f4-9c7e-4fc1-8b6d-824e61f1c675', // 医学报告解读助手（MD版）
+
     meta: {
       from_name: testUserName,
       user_id:   testUserId,
     },
+    context: {
+      available_apps: ['企业微信'],
+    },
   }),
 });
+
+
+
+
 const chatData = await chatRes.json();
 console.log(c.info(`chat route_type=${chatData.route_type} status=${chatData.status}`));
 console.log(c.info(`reply: ${chatData.reply?.slice(0, 150)}...`));
