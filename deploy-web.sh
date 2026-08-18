@@ -10,6 +10,7 @@ echo "🔨 构建主平台镜像（跳过沙箱）..."
 gcloud builds submit \
   --project "$PROJECT" \
   --region "$REGION" \
+  --account oscarzhangunsw@gmail.com \
   --config cloudbuild-web.yaml \
   .
 
