@@ -50,11 +50,90 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.agentRouter = void 0;
 const express_1 = __importDefault(require("express"));
+const uuid_1 = require("uuid");
 const agentService_1 = require("../agentService");
 const db = __importStar(require("../db"));
 exports.agentRouter = express_1.default.Router();
 // ─── 渠道适配辅助 ─────────────────────────────────────────────────────────────
-const CUA_SEND_URL = process.env.CUA_SEND_URL || ''; // Mac mini 发消息接口（Step 5 用）
+const CUA_SEND_URL = process.env.CUA_SEND_URL || ''; // Mac mini 发消息接口
+const JUHE_SEND_URL = process.env.JUHE_SEND_URL || ''; // juhe-api /api/send 接口
+async function resolveIdentity(channel, channel_uid, from_name, conversation_id) {
+    // 1. 查询当前渠道的映射
+    const row = await db.getAsync(`SELECT ci.unified_id, ci.display_name,
+            jci.conv_id AS juhe_conv_id
+     FROM skill_platform.channel_identities ci
+     LEFT JOIN skill_platform.channel_identities jci
+       ON jci.unified_id = ci.unified_id AND jci.channel = 'juhe'
+     WHERE ci.channel = $1 AND ci.channel_uid = $2`, [channel, channel_uid]);
+    if (row) {
+        // 如果 juhe 渠道且有新 conv_id，更新一下
+        if (channel === 'juhe' && conversation_id && conversation_id !== row.juhe_conv_id) {
+            await db.runAsync(`UPDATE skill_platform.channel_identities SET conv_id=$1, updated_at=now() WHERE channel='juhe' AND channel_uid=$2`, [conversation_id, channel_uid]).catch(() => { });
+        }
+        return {
+            unified_id: row.unified_id,
+            display_name: row.display_name || from_name,
+            juhe_conv_id: channel === 'juhe' ? (conversation_id || row.juhe_conv_id) : row.juhe_conv_id,
+        };
+    }
+    // 2. 新客户：自动创建（unified_id = channel_uid 先用原始 ID，后续关联后替换）
+    const new_unified_id = channel === 'juhe'
+        ? `juhe_${channel_uid}`
+        : `wecom_${channel_uid}`;
+    await db.runAsync(`INSERT INTO skill_platform.channel_identities
+       (unified_id, channel, channel_uid, display_name, conv_id, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,now(),now())
+     ON CONFLICT (channel,channel_uid) DO NOTHING`, [new_unified_id, channel, channel_uid, from_name,
+        channel === 'juhe' ? conversation_id : null]).catch(() => { });
+    console.log(`[Orch/Ingest] 新客户自动注册: channel=${channel} uid=${channel_uid} unified=${new_unified_id}`);
+    return {
+        unified_id: new_unified_id,
+        display_name: from_name,
+        juhe_conv_id: channel === 'juhe' ? conversation_id : null,
+    };
+}
+// 回复优先 juhe，失败再 fallback CUA
+async function sendReply(opts) {
+    const { reply, juhe_conv_id, display_name, request_id, session_id, status, reasoning, delivery } = opts;
+    // ① 优先 juhe（不管消息从哪个渠道来）
+    if (JUHE_SEND_URL && juhe_conv_id) {
+        try {
+            const r = await fetch(`${JUHE_SEND_URL.replace(/\/?$/, '')}/api/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversation_id: juhe_conv_id, content: reply }),
+                signal: AbortSignal.timeout(20_000),
+            });
+            if (r.ok) {
+                console.log(`[Orch/Ingest] juhe send OK conv=${juhe_conv_id}`);
+                return; // 成功，不需要 CUA
+            }
+            console.warn(`[Orch/Ingest] juhe send HTTP ${r.status}, fallback to CUA`);
+        }
+        catch (e) {
+            console.warn(`[Orch/Ingest] juhe send failed: ${e.message}, fallback to CUA`);
+        }
+    }
+    // ② Fallback: CUA（CUA 通过页面搜索人名发送）
+    if (CUA_SEND_URL) {
+        const cuaBody = {
+            request_id,
+            session_id,
+            status: status === 'processing' ? 'done' : status,
+            reply,
+            delivery: delivery || { app: '企业微信', recipient: display_name, action: 'type_and_send' },
+            reasoning,
+        };
+        const label = status === 'processing' ? '安抚' : '回复';
+        fetch(`${CUA_SEND_URL}/api/agent-callback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': process.env.AGENT_SECRET || '' },
+            body: JSON.stringify(cuaBody),
+            signal: AbortSignal.timeout(30_000),
+        }).then(r => console.log(`[Orch/Ingest] CUA fallback(${label}) HTTP ${r.status} recipient=${display_name}`))
+            .catch(e => console.warn(`[Orch/Ingest] CUA fallback failed:`, e.message));
+    }
+}
 /**
  * POST /api/orch/ingest
  * wechat-archiver / 其他渠道 adapter 的统一推送入口
@@ -81,66 +160,120 @@ exports.agentRouter.post('/ingest', async (req, res) => {
         if (!from_user_id) {
             return res.status(400).json({ error: 'from_user_id is required' });
         }
-        // 只处理文字消息，其他类型（图片、语音）暂不处理
-        if (msgtype && msgtype !== 'text') {
-            console.log(`[Orch/Ingest] skip non-text msgtype=${msgtype} from=${from_name}`);
-            return res.json({ ok: true, skipped: true, reason: 'non-text message' });
-        }
         const sessionId = conversation_id || from_user_id;
         const history = Array.isArray(req.body.history) ? req.body.history : [];
         const notes = req.body.notes || '';
-        console.log(`[Orch/Ingest] channel=${channel} from=${from_name}(${from_user_id}) content="${content.slice(0, 80)}" history=${history.length}`);
-        // 构造 AgentChatRequest
-        const agentReq = {
-            content: content.trim(),
-            source: channel,
-            source_channel: channel,
-            session_id: sessionId,
-            meta: {
-                from_name: from_name || from_user_id,
-                user_id: from_user_id,
-            },
-            context: {
-                available_apps: ['企业微信'],
-                current_recipient: from_name || from_user_id,
-            },
-            history,
-            notes,
-            // callback_url：skill 执行完成后通知 Mac mini CUA 发消息
-            callback_url: CUA_SEND_URL ? `${CUA_SEND_URL}/api/agent-callback` : '',
-        };
-        // 立即返回，异步处理
-        res.json({ ok: true, status: 'processing' });
-        // 异步执行（fire and forget），错误只写日志不影响响应
-        (0, agentService_1.processAgentChat)(agentReq).then(result => {
-            console.log(`[Orch/Ingest] done from=${from_name} status=${result.status} reply="${(result.reply || '').slice(0, 60)}"`);
-            // 有回复就推给 CUA 发送（done=同步回复, processing=安抚消息）
-            if (result.reply && CUA_SEND_URL) {
-                const cuaBody = {
-                    request_id: result.request_id,
-                    session_id: sessionId,
-                    status: result.status === 'processing' ? 'done' : result.status, // CUA 不认识 processing，统一用 done
-                    reply: result.reply,
-                    delivery: result.delivery || { app: '企业微信', recipient: from_name, action: 'type_and_send' },
-                    reasoning: result.reasoning,
-                };
-                const label = result.status === 'processing' ? '安抚消息' : '同步回复';
-                fetch(`${CUA_SEND_URL}/api/agent-callback`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': process.env.AGENT_SECRET || '' },
-                    body: JSON.stringify(cuaBody),
-                    signal: AbortSignal.timeout(30_000),
-                }).then(r => console.log(`[Orch/Ingest] CUA ${label} HTTP ${r.status}`))
-                    .catch(e => console.warn(`[Orch/Ingest] CUA ${label} failed:`, e.message));
+        // 身份统一：查 channel_identities，新客户自动注册
+        const identity = await resolveIdentity(channel, from_user_id, from_name || from_user_id, sessionId);
+        const unified_id = identity.unified_id;
+        const display_name = identity.display_name;
+        const juhe_conv_id = identity.juhe_conv_id;
+        // ── 附件暂存：记录用户最近24小时上传的文件 ──────────────────────────────
+        const media_url = req.body.media_url || null;
+        const file_name = req.body.file_name || '';
+        const file_type = req.body.file_type || (msgtype === 'image' ? 'image' : 'file');
+        if (media_url) {
+            const fileId = (0, uuid_1.v4)();
+            const now = Date.now();
+            try {
+                await db.runAsync(`INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, content_hash, created_at)
+           VALUES (?,?,?,?,?,?,NULL,?)`, [fileId, unified_id, media_url, file_name || '未命名附件', file_type, content.slice(0, 500), now]);
+                // 清理超过24小时的过期附件
+                const cutoff24h = now - 24 * 60 * 60 * 1000;
+                await db.runAsync(`DELETE FROM user_recent_files WHERE created_at < ?`, [cutoff24h]);
+                console.log(`[Orch/Ingest] 📎 保存用户 ${unified_id} 最近24小时附件: ${file_name} (${media_url})`);
+                // ── 异步计算文件内容 MD5，用于真正的内容去重 ──────────────────────────
+                // 不阻塞 ingest 响应，后台下载计算
+                (async () => {
+                    try {
+                        const https = await Promise.resolve().then(() => __importStar(require('https')));
+                        const http = await Promise.resolve().then(() => __importStar(require('http')));
+                        const crypto = await Promise.resolve().then(() => __importStar(require('crypto')));
+                        const fetchModule = media_url.startsWith('https') ? https : http;
+                        const hash = crypto.createHash('md5');
+                        await new Promise((resolve, reject) => {
+                            fetchModule.get(media_url, (resp) => {
+                                if (resp.statusCode && resp.statusCode >= 400) {
+                                    reject(new Error(`HTTP ${resp.statusCode}`));
+                                    return;
+                                }
+                                resp.on('data', (chunk) => hash.update(chunk));
+                                resp.on('end', resolve);
+                                resp.on('error', reject);
+                            }).on('error', reject);
+                        });
+                        const md5 = hash.digest('hex');
+                        await db.runAsync(`UPDATE user_recent_files SET content_hash=? WHERE id=?`, [md5, fileId]);
+                        console.log(`[Orch/Ingest] 🔑 MD5 计算完成 file=${file_name} hash=${md5.slice(0, 8)}…`);
+                    }
+                    catch (hashErr) {
+                        console.warn(`[Orch/Ingest] ⚠️ MD5 计算失败 file=${file_name}: ${hashErr.message}`);
+                        // 失败不影响功能，content_hash 保持 NULL，回退到文件名去重
+                    }
+                })();
             }
-        }).catch(err => {
-            console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
-            // 把错误写回 agent_task 记录
-            const reqIdMatch = err.stack ? null : null; // requestId is in agentReq.request_id if set
-            const failedReqId = agentReq._requestId || '';
-            void (0, agentService_1.updateAgentTask)(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
-            void (0, agentService_1.appendTaskEvent)(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
-        });
+            catch (err) {
+                console.warn(`[Orch/Ingest] 保存附件失败:`, err.message);
+            }
+        }
+        // ── 文件消息守卫：文件/图片（不管有没有 AI摘要）不触发 agent，只保存附件 ──────
+        // archiver.js 是第一道拦截；ingest 这里是第二道防线
+        // 规则：msgtype=file/image + media_url → 只存 user_recent_files，不进 processAgentChat
+        //   （即使 Gemini OCR 提取出了 AI摘要，文件消息也不主动触发 agent）
+        //   → 等用户主动发文字消息才触发 agent，届时文件自动挂载到工单
+        const isFileOnlyContent = (msgtype === 'file' || msgtype === 'image') && !!media_url;
+        console.log(`[Orch/Ingest] channel=${channel} from=${display_name}(${from_user_id}) unified=${unified_id} juhe_conv=${juhe_conv_id || 'none'} content="${content.slice(0, 60)}" isFileOnly=${isFileOnlyContent} history=${history.length}`);
+        // 立即返回给 archiver（不阻塞）
+        res.json({ ok: true, status: isFileOnlyContent ? 'file_saved' : 'processing' });
+        if (isFileOnlyContent) {
+            console.log(`[Orch/Ingest] 📎 纯文件消息（无 AI摘要），跳过 agent，仅暂存附件 file="${file_name}"`);
+            // user_recent_files 已在上面保存，不需要额外处理
+        }
+        else {
+            // 构造 AgentChatRequest
+            const agentReq = {
+                content: content.trim(),
+                source: channel,
+                source_channel: channel,
+                session_id: unified_id,
+                meta: {
+                    from_name: display_name,
+                    user_id: unified_id,
+                    channel_uid: from_user_id,
+                    juhe_conv_id: juhe_conv_id || '',
+                },
+                context: {
+                    available_apps: ['企业微信'],
+                    current_recipient: display_name,
+                },
+                history,
+                notes,
+            };
+            const t0Process = Date.now();
+            (0, agentService_1.processAgentChat)(agentReq).then(async (result) => {
+                const processMs = Date.now() - t0Process;
+                console.log(`[Orch/Ingest] done unified=${unified_id} status=${result.status} processMs=${processMs} reply="${(result.reply || '').slice(0, 60)}"`);
+                if (result.reply) {
+                    const t0Send = Date.now();
+                    await sendReply({
+                        reply: result.reply,
+                        juhe_conv_id,
+                        display_name,
+                        request_id: result.request_id || '',
+                        session_id: unified_id,
+                        status: result.status,
+                        reasoning: result.reasoning,
+                        delivery: result.delivery,
+                    }).catch(e => console.warn('[Orch/Ingest] sendReply error:', e.message));
+                    console.log(`[Orch/Ingest] ⏱️ total: process=${processMs}ms send=${Date.now() - t0Send}ms e2e=${Date.now() - t0Process}ms`);
+                }
+            }).catch(err => {
+                console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
+                const failedReqId = agentReq._requestId || '';
+                void (0, agentService_1.updateAgentTask)(failedReqId, { status: 'failed', errorMessage: err.message, endedAt: Date.now() });
+                void (0, agentService_1.appendTaskEvent)(failedReqId, 'task_failed', { error: err.message, stack: (err.stack || '').slice(0, 500) });
+            });
+        }
     }
     catch (err) {
         console.error('[Orch/Ingest] error:', err.message);
@@ -207,6 +340,25 @@ exports.agentRouter.get('/tasks/:id', async (req, res) => {
     }
     catch (err) {
         console.error('[AgentRoute] GET /tasks/:id error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PATCH /api/v1/agent/tasks/:id — 更新任务状态 ───────────────────────────
+exports.agentRouter.patch('/tasks/:id', async (req, res) => {
+    try {
+        const taskId = req.params.id;
+        const { status, errorMessage } = req.body;
+        if (!status)
+            return res.status(400).json({ error: 'status is required' });
+        await (0, agentService_1.updateAgentTask)(taskId, {
+            status,
+            errorMessage,
+            endedAt: (status === 'done' || status === 'failed' || status === 'error') ? Date.now() : undefined,
+        });
+        res.json({ ok: true, taskId, status });
+    }
+    catch (err) {
+        console.error('[AgentRoute] PATCH /tasks/:id error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -518,5 +670,37 @@ exports.agentRouter.get('/skills/available', async (_req, res) => {
     catch (err) {
         console.error('[AgentRoute] GET /skills/available error:', err.message);
         res.status(500).json({ error: 'db_error', message: err.message });
+    }
+});
+// ─── Debug: 守卫状态查看 / 清理（仅供测试使用）────────────────────────────────
+exports.agentRouter.get('/debug/guards', async (req, res) => {
+    try {
+        const userId = req.query.user_id;
+        if (!userId)
+            return res.status(400).json({ error: 'user_id required' });
+        // session_id = user_id for direct /chat requests (processMessage fallback)
+        const guards = await db.allAsync(`SELECT id, session_id, skill_id, skill_name, status, check_count, expires_at, created_at, close_reason
+       FROM skill_confirm_guards
+       WHERE session_id=?
+       ORDER BY created_at DESC LIMIT 20`, [userId]);
+        res.json({ guards, count: guards.length });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.agentRouter.delete('/debug/guards', async (req, res) => {
+    try {
+        const userId = req.query.user_id;
+        if (!userId)
+            return res.status(400).json({ error: 'user_id required' });
+        const result = await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason='debug_cleanup'
+       WHERE session_id=? AND status='active'`, [userId]);
+        const closed = result.changes || 0;
+        console.log(`[Debug] Closed ${closed} active guards for session=${userId}`);
+        res.json({ ok: true, closed });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });

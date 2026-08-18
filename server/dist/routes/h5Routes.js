@@ -81,19 +81,33 @@ exports.h5Router.get('/:token', async (req, res) => {
             return res.status(404).json({ error: 'Invalid link', code: 'NOT_FOUND' });
         if (Date.now() > ticket.expires_at && ticket.status === 'waiting_input')
             return res.status(410).json({ error: 'This link has expired. Please contact the staff.', code: 'EXPIRED' });
-        if (ticket.status === 'submitted' || ticket.status === 'processing' || ticket.status === 'done')
-            return res.json({ already_submitted: true, status: ticket.status, message: '您已成功提交，AI 正在处理或已完成，请耐心等待工作人员反馈。' });
+        if (ticket.status === 'submitted' || ticket.status === 'processing') {
+            return res.json({ already_submitted: true, status: ticket.status, message: '您已成功提交，AI 正在处理，请耐心等待工作人员反馈。' });
+        }
+        if (ticket.status === 'done' || ticket.status === 'patient_confirmed' || ticket.status === 'patient_rejected') {
+            const serviceBase = process.env.SERVICE_URL || process.env.PUBLIC_BASE_URL || '';
+            const report_url = `${serviceBase}/api/results/${ticket.id}/report`;
+            return res.json({ already_submitted: true, status: ticket.status, report_url, message: '报告已生成，点击查看' });
+        }
         if (ticket.status === 'created') {
             await db.runAsync(`UPDATE tickets SET status='waiting_input', updated_at=? WHERE id=?`, [Date.now(), ticket.id]);
         }
         const skill = await db.getAsync('SELECT name, h5_config FROM skills WHERE id=?', [ticket.skill_id]);
         const h5Config = skill?.h5_config ? JSON.parse(skill.h5_config) : null;
+        // 解析预填字段
+        let prefilledValues = {};
+        try {
+            if (ticket.prefilled_values)
+                prefilledValues = JSON.parse(ticket.prefilled_values);
+        }
+        catch { /* ignore */ }
         res.json({
             ticket_id: ticket.id,
             status: ticket.status === 'created' ? 'waiting_input' : ticket.status,
             return_reason: ticket.return_reason,
             skill_name: skill?.name,
             h5_config: h5Config,
+            prefilled_values: prefilledValues,
             expires_at: ticket.expires_at,
         });
     }
@@ -124,6 +138,34 @@ exports.h5Router.post('/:token/submit', upload.array('files', 10), async (req, r
         catch {
             fields = req.body || {};
         }
+        // ── 是否本人校验（is_self=true 且未 force 时，比对预填信息）───────────────
+        const isSelf = req.body.is_self === 'true' || req.body.is_self === true;
+        const isForce = req.body.force === 'true' || req.body.force === true;
+        if (isSelf && !isForce && ticket.prefilled_values) {
+            let prefilled = {};
+            try {
+                prefilled = JSON.parse(ticket.prefilled_values);
+            }
+            catch { /* ignore */ }
+            const mismatches = [];
+            // patient_name 不符：提交的姓名与预填不同（均非空）
+            const subName = String(fields.patient_name || '').trim();
+            const preNames = prefilled.patient_name ? prefilled.patient_name.trim() : '';
+            if (subName && preNames && subName !== preNames)
+                mismatches.push('patient_name');
+            // patient_age 不符：年龄差超过 10 岁
+            const subAge = parseInt(String(fields.patient_age || '0'), 10);
+            const preAge = parseInt(String(prefilled.patient_age || '0'), 10);
+            if (subAge > 0 && preAge > 0 && Math.abs(subAge - preAge) > 10)
+                mismatches.push('patient_age');
+            if (mismatches.length > 0) {
+                return res.status(200).json({
+                    warning: true,
+                    mismatch_fields: mismatches,
+                    message: `您提交的信息与档案中的记录不符（${mismatches.map(f => ({ patient_name: '姓名', patient_age: '年龄' })[f] || f).join('、')}），请确认是否填写正确。如需更新个人档案信息，请联系管理员。`,
+                });
+            }
+        }
         // Delete old inputs if resubmitting after return
         await db.runAsync('DELETE FROM ticket_inputs WHERE ticket_id=?', [ticket.id]);
         // Save text fields
@@ -135,6 +177,20 @@ exports.h5Router.post('/:token/submit', upload.array('files', 10), async (req, r
                 : (typeof value === 'object' ? JSON.stringify(value) : String(value));
             await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, value, created_at)
          VALUES (?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, key, 'text', strValue, now]);
+        }
+        // Save kept prefilled files (from WeChat auto-mount)
+        let keptFiles = [];
+        try {
+            if (req.body.kept_files) {
+                keptFiles = typeof req.body.kept_files === 'string' ? JSON.parse(req.body.kept_files) : req.body.kept_files;
+            }
+        }
+        catch { /* ignore */ }
+        for (const kf of keptFiles) {
+            if (kf && kf.url) {
+                await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
+           VALUES (?,?,?,?,?,?,?,?)`, [(0, uuid_1.v4)(), ticket.id, 'file', 'file', kf.url, kf.name || '附件', kf.type === 'image' ? 'image/jpeg' : 'application/pdf', now]);
+            }
         }
         // Save uploaded files
         const files = req.files || [];

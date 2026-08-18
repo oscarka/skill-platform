@@ -18,6 +18,7 @@ exports.runAsync = runAsync;
 exports.getAsync = getAsync;
 exports.allAsync = allAsync;
 exports.execAsync = execAsync;
+exports.withClient = withClient;
 exports.run = run;
 exports.get = get;
 exports.all = all;
@@ -47,27 +48,91 @@ exports.pool.on('error', (err) => {
     console.error('[DB] Pool error:', err.message);
 });
 console.log(`[DB] PostgreSQL pool initialized → schema: ${DB_SCHEMA}`);
-// ─── Async helpers ─────────────────────────────────────────────────────────────
+// ─── Async helpers (with split-phase timing + slow query log) ────────────────
+const SLOW_QUERY_MS = 500;
+function logQueryTiming(op, sql, connectMs, queryMs) {
+    const totalMs = connectMs + queryMs;
+    const sqlPreview = sql.replace(/\s+/g, ' ').slice(0, 80);
+    if (totalMs > SLOW_QUERY_MS) {
+        const poolStats = `pool(total=${exports.pool.totalCount} idle=${exports.pool.idleCount} waiting=${exports.pool.waitingCount})`;
+        console.warn(`[DB][SLOW] ${op} connect=${connectMs}ms query=${queryMs}ms total=${totalMs}ms ${poolStats} SQL: ${sqlPreview}`);
+    }
+}
 /** Execute INSERT/UPDATE/DELETE */
 async function runAsync(sql, params = []) {
+    const t0 = Date.now();
     const pgSql = toPostgresSql(sql, params);
+    const t1 = Date.now();
     await exports.pool.query(pgSql.sql, pgSql.params);
+    logQueryTiming('RUN', sql, t1 - t0, Date.now() - t1);
 }
 /** Fetch single row */
 async function getAsync(sql, params = []) {
+    const t0 = Date.now();
     const pgSql = toPostgresSql(sql, params);
+    const t1 = Date.now();
     const result = await exports.pool.query(pgSql.sql, pgSql.params);
+    logQueryTiming('GET', sql, t1 - t0, Date.now() - t1);
     return result.rows[0];
 }
 /** Fetch all rows */
 async function allAsync(sql, params = []) {
+    const t0 = Date.now();
     const pgSql = toPostgresSql(sql, params);
+    const t1 = Date.now();
     const result = await exports.pool.query(pgSql.sql, pgSql.params);
+    logQueryTiming('ALL', sql, t1 - t0, Date.now() - t1);
     return result.rows;
 }
 /** Execute raw SQL (for schema creation) */
 async function execAsync(sql) {
     await exports.pool.query(sql);
+}
+/**
+ * withClient: 多个 DB 操作共享同一个连接，只占用 1 个 pool slot。
+ * 解决 ticketRoutes callback 里 N 次串行 runAsync/getAsync 各占 1 个连接导致 pool 打满的问题。
+ * 用法：
+ *   await withClient(async (q) => {
+ *     const row = await q.get<any>('SELECT ...', [id]);
+ *     await q.run('UPDATE ...', [...]);
+ *   });
+ */
+async function withClient(fn) {
+    const t0 = Date.now();
+    const client = await exports.pool.connect();
+    const connectMs = Date.now() - t0;
+    if (connectMs > SLOW_QUERY_MS) {
+        const poolStats = `pool(total=${exports.pool.totalCount} idle=${exports.pool.idleCount} waiting=${exports.pool.waitingCount})`;
+        console.warn(`[DB][SLOW] withClient connect=${connectMs}ms ${poolStats}`);
+    }
+    try {
+        const q = {
+            run: async (sql, params = []) => {
+                const pgSql = toPostgresSql(sql, params);
+                const t1 = Date.now();
+                await client.query(pgSql.sql, pgSql.params);
+                logQueryTiming('RUN', sql, 0, Date.now() - t1);
+            },
+            get: async (sql, params = []) => {
+                const pgSql = toPostgresSql(sql, params);
+                const t1 = Date.now();
+                const result = await client.query(pgSql.sql, pgSql.params);
+                logQueryTiming('GET', sql, 0, Date.now() - t1);
+                return result.rows[0];
+            },
+            all: async (sql, params = []) => {
+                const pgSql = toPostgresSql(sql, params);
+                const t1 = Date.now();
+                const result = await client.query(pgSql.sql, pgSql.params);
+                logQueryTiming('ALL', sql, 0, Date.now() - t1);
+                return result.rows;
+            },
+        };
+        return await fn(q);
+    }
+    finally {
+        client.release();
+    }
 }
 // ─── SQLite → PostgreSQL SQL 转换 ──────────────────────────────────────────────
 // 各表的主键（用于 INSERT OR REPLACE → ON CONFLICT DO UPDATE 转换）
@@ -331,7 +396,19 @@ CREATE TABLE IF NOT EXISTS skill_confirm_guards (
   expires_at      BIGINT NOT NULL         -- created_at + 30分钟
 );
 
-CREATE INDEX IF NOT EXISTS idx_skill_guards_session ON skill_confirm_guards(session_id, status);
+CREATE TABLE IF NOT EXISTS user_recent_files (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  file_url    TEXT NOT NULL,
+  file_name   TEXT NOT NULL,
+  file_type   TEXT NOT NULL DEFAULT 'file',
+  summary     TEXT,
+  content_hash TEXT,  -- MD5 of file content for deduplication; NULL until computed
+  created_at  BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at);
+-- NOTE: idx_user_recent_files_hash is created in migrations (after ALTER TABLE adds content_hash)
 
 `;
 async function initDb() {
@@ -359,11 +436,17 @@ async function initDb() {
             `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
             // request_id: 存储创建工单的原始 agent 任务 ID，用于通知时回写渠道消息日志
             `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS request_id TEXT`,
+            // prefilled_values: 建票时从 wiki 提取的预填字段 JSON（{contact_name,patient_name,patient_age,...}）
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS prefilled_values TEXT`,
             // 架构改造 v2：守卫生命周期字段
             // guard_mode: 守卫的创建模式（new_created=本消息新建 | existing=已有守卫 | closed_by_new_skill=被新skill关闭）
             `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS guard_mode TEXT DEFAULT 'existing'`,
             // closed_reason: 守卫关闭原因（user_declined | user_confirmed | closed_by_new_skill | max_rounds）
             `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS closed_reason TEXT`,
+            // content_hash: 文件内容 MD5，用于去重（异步计算，NULL 表示尚未计算）
+            `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
+            // content_hash 索引：必须在 ALTER TABLE 之后创建（否则列不存在会报错）
+            `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
         ];
         for (const sql of migrations) {
             try {

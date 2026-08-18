@@ -63,11 +63,20 @@ const STATUS_LABEL = {
     processing: 'AI 处理中', done: '已完成', returned: '已打回',
     expired: '已过期', error: '处理出错', patient_confirmed: '患者已确认', patient_rejected: '患者不认可',
 };
+let _h5BaseCache = '';
+let _h5BaseCacheExpire = 0;
 async function h5BaseUrl() {
+    if (_h5BaseCache && Date.now() < _h5BaseCacheExpire)
+        return _h5BaseCache;
     const row = await db.getAsync('SELECT value FROM settings WHERE key=?', ['h5_base_url']);
-    return row?.value || `http://localhost:3100/h5`;
+    _h5BaseCache = row?.value || `http://localhost:3100/h5`;
+    _h5BaseCacheExpire = Date.now() + 60_000; // 60s cache
+    return _h5BaseCache;
 }
 async function ticketToResponse(t, skill) {
+    const h5Base = await h5BaseUrl(); // 缓存命中，单次调用
+    const base = h5Base.replace(/\/h5$/, '');
+    const reportUrl = t.status === 'done' ? `${base}/api/results/${t.id}/report` : null;
     return {
         id: t.id,
         skill_id: t.skill_id,
@@ -82,13 +91,15 @@ async function ticketToResponse(t, skill) {
         status_label: STATUS_LABEL[t.status] || t.status,
         return_reason: t.return_reason,
         return_count: t.return_count,
-        h5_url: `${await h5BaseUrl()}?token=${t.token}`,
+        h5_url: `${h5Base}?token=${t.token}`,
         h5_submitted_at: t.h5_submitted_at,
         ai_started_at: t.ai_started_at,
         ai_completed_at: t.ai_completed_at,
         expires_at: t.expires_at,
         created_at: t.created_at,
         updated_at: t.updated_at,
+        report_url: reportUrl, // done 状态才有值，供前端和测试直接读取
+        request_id: t.request_id || null,
     };
 }
 // ─── POST /api/tickets — Create ticket ────────────────────────────────────────
@@ -243,6 +254,53 @@ exports.ticketRouter.put('/:id/status', async (req, res) => {
             return res.status(404).json({ error: 'Ticket not found' });
         const now = Date.now();
         await db.runAsync(`UPDATE tickets SET status=?, return_reason=COALESCE(?,return_reason), updated_at=? WHERE id=?`, [status, return_reason ?? null, now, ticket.id]);
+        // 同步更新对应的 Agent Task 状态，防止工单已关闭但任务仍显示 processing
+        if (ticket.request_id) {
+            const taskStatus = (status === 'error' || status === 'expired') ? 'failed' : (status === 'done' ? 'done' : status);
+            void (0, agentService_1.updateAgentTask)(ticket.request_id, {
+                status: taskStatus,
+                errorMessage: return_reason || (status === 'error' ? '工单已手动中止/出错' : undefined),
+                endedAt: now,
+            });
+        }
+        const updated = await db.getAsync('SELECT * FROM tickets WHERE id=?', [ticket.id]);
+        res.json({ ticket: await ticketToResponse(updated) });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// ─── PATCH /api/tickets/:id — Admin: update ticket fields (notes, prefilled_values, etc.) ──
+exports.ticketRouter.patch('/:id', async (req, res) => {
+    try {
+        const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [req.params.id]);
+        if (!ticket)
+            return res.status(404).json({ error: 'Ticket not found' });
+        const { notes, title, patient_name, prefilled_values } = req.body;
+        const updates = [];
+        const params = [];
+        if (notes !== undefined) {
+            updates.push('notes=?');
+            params.push(notes);
+        }
+        if (title !== undefined) {
+            updates.push('title=?');
+            params.push(title);
+        }
+        if (patient_name !== undefined) {
+            updates.push('patient_name=?');
+            params.push(patient_name);
+        }
+        if (prefilled_values !== undefined) {
+            updates.push('prefilled_values=?');
+            params.push(prefilled_values);
+        }
+        if (updates.length === 0)
+            return res.status(400).json({ error: 'No updatable fields provided' });
+        const now = Date.now();
+        updates.push('updated_at=?');
+        params.push(now, ticket.id);
+        await db.runAsync(`UPDATE tickets SET ${updates.join(', ')} WHERE id=?`, params);
         const updated = await db.getAsync('SELECT * FROM tickets WHERE id=?', [ticket.id]);
         res.json({ ticket: await ticketToResponse(updated) });
     }

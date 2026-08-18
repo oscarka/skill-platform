@@ -457,9 +457,115 @@ console.log(`通过: ${passedC}  失败: ${failedC}`);
 console.log(c.bold('\n=== Suite D 测试结果 ==='));
 console.log(`通过: ${passedD}  失败: ${failedD}`);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Suite E：先发文件（ingest暂存）→ 再发文字 → 路由应识别报告解读意图建工单
+// 验证「路由上下文注入近期文件摘要」的 fix
+// ─────────────────────────────────────────────────────────────────────────────
+let passedE = 0, failedE = 0;
+function assertE(condition, label) {
+  if (condition) { console.log(c.ok(label)); passedE++; }
+  else            { console.log(c.fail(label)); failedE++; }
+}
+
+// ── 前置：确保医学报告解读 skill 在 profile 中，且等缓存（30s）过期 ───────────
+const REPORT_SKILL_ID = 'bb5585f4-9c7e-4fc1-8b6d-824e61f1c675';
+{
+  const profileRes = await fetch(`${BASE}/api/v1/agent/profile`).then(r => r.json());
+  const hasReportSkill = Array.isArray(profileRes.skill_ids) && profileRes.skill_ids.includes(REPORT_SKILL_ID);
+  if (!hasReportSkill) {
+    console.log(c.info('Suite E 前置：profile 缺少医学报告解读 skill，自动补充...'));
+    const newIds = [...new Set([...(profileRes.skill_ids || []), REPORT_SKILL_ID])];
+    await fetch(`${BASE}/api/v1/agent/profile`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill_ids: newIds }),
+    });
+    // 等服务端缓存（30s）过期
+    console.log(c.info('等待服务端 skill 缓存（35s）过期...'));
+    await new Promise(r => setTimeout(r, 35000));
+  } else {
+    // skill 已在 profile 但仍需等缓存，补等 35s 以防缓存了旧结果
+    console.log(c.info('Suite E 前置：医学报告解读 skill 已在 profile，等 35s 缓存刷新...'));
+    await new Promise(r => setTimeout(r, 35000));
+  }
+}
+
+const userE = `test_file_then_text_${Date.now()}`;
+const nameE = '李女士';
+const fileGcsE = `https://storage.googleapis.com/wechat-archiver-media/2026-08-17/ct_report_${Date.now()}.pdf`;
+const fileSummaryE = '[文件: 影像诊断报告.pdf | AI摘要: 本次胸部CT平扫显示双肺多发微小结节，评定为LUNG-RADS 2类，建议酌情年度复查]';
+
+console.log(c.bold('\n\n═══════════════════════════════════════════════════════'));
+console.log(c.bold('Suite E: 先发文件（ingest暂存）→ 再发文字 → 路由建工单'));
+console.log(c.bold('═══════════════════════════════════════════════════════'));
+
+// Step E1: 通过 ingest 发文件（含AI摘要）→ 应暂存到 user_recent_files
+console.log(c.bold('\n=== Step E1: 通过 ingest 发文件（含AI摘要）→ file_saved 并暂存 ==='));
+const ingestE1 = await fetch(`${BASE}/api/orch/ingest`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    from_user_id: userE,
+    from_name:    nameE,
+    content:      fileSummaryE,
+    msgtype:      'file',
+    media_url:    fileGcsE,
+    file_name:    '影像诊断报告.pdf',
+    file_type:    'pdf',
+    channel:      'wecom',
+  }),
+});
+const ingestE1Data = await ingestE1.json();
+console.log(c.info(`E1 ingest res=${JSON.stringify(ingestE1Data)}`));
+assertE(ingestE1.ok && ingestE1Data.status === 'file_saved',
+  'Step E1: 文件通过 ingest 暂存（file_saved），不触发 agent');
+
+// 等一下让 DB 写入完成
+await new Promise(r => setTimeout(r, 1000));
+
+// Step E2: 用户发文字询问报告分析 → 路由应识别到近期文件，建工单
+console.log(c.bold('\n=== Step E2: 用户发文字「看看我这个报告，能做个报告分析吗」→ 应建工单 ==='));
+const chatE2 = await fetch(`${BASE}/api/v1/agent/chat`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    content:    '看看我这个报告。能做个报告分析吗',
+    source:     'wecom',
+    session_id: userE,
+    meta:       { from_name: nameE, user_id: userE },
+    context:    { available_apps: ['企业微信'] },
+  }),
+});
+const dataE2 = await chatE2.json();
+const replyE2 = dataE2.reply || '';
+console.log(c.info(`E2 route_type=${dataE2.route_type} reply(前120): ${replyE2.slice(0, 120)}`));
+assertE(chatE2.ok, 'Step E2.1: chat 请求返回 200');
+assertE(dataE2.route_type === 'ticket_created',
+  `Step E2.2: 路由正确识别报告分析意图，建工单（route_type=ticket_created，实际=${dataE2.route_type}）`);
+assertE(/token=/.test(replyE2),
+  'Step E2.3: 回复中包含工单填写链接（token=）');
+
+// Step E3: 验证工单预填附件包含该 PDF
+console.log(c.bold('\n=== Step E3: 验证工单预填附件包含上传的 PDF ==='));
+const tokenE = replyE2.match(/token=([a-f0-9]+)/i)?.[1];
+if (tokenE) {
+  const h5E = await fetch(`${BASE}/api/h5/${tokenE}`).then(r => r.json());
+  const files = h5E.prefilled_values?.prefilled_files || [];
+  const hasPdf = files.some(f => f.url === fileGcsE || f.name?.includes('影像诊断'));
+  console.log(c.info(`E3 prefilled_files: ${JSON.stringify(files.map(f => f.name))}`));
+  assertE(hasPdf, 'Step E3.1: 工单预填附件中包含用户上传的 PDF');
+} else {
+  console.log(c.info('E3: 无工单 token，跳过预填验证'));
+  failedE++;
+  console.log(c.fail('Step E3.1: 未能提取 token，无法验证预填'));
+}
+
+console.log(c.bold('\n=== Suite E 测试结果 ==='));
+console.log(`通过: ${passedE}  失败: ${failedE}`);
+
 // ── 总汇 ──────────────────────────────────────────────────────────────────────
-const totalPass = passed + passedB + passedC + passedD;
-const totalFail = failed + failedB + failedC + failedD;
+const totalPass = passed + passedB + passedC + passedD + passedE;
+const totalFail = failed + failedB + failedC + failedD + failedE;
 console.log(c.bold(`\n╔══════════════════════════════════╗`));
 console.log(c.bold(`  总计：通过 ${totalPass}  失败 ${totalFail}`));
 console.log(c.bold(`╚══════════════════════════════════╝`));

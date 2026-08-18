@@ -182,6 +182,22 @@ function initDb() {
         `ALTER TABLE skill_confirm_guards ADD COLUMN check_count INTEGER NOT NULL DEFAULT 0`,
         // 为已有 tickets 表添加 delivery_info 列（存储 callback_url + delivery 供 AI 处理完后通知用户）
         `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS delivery_info TEXT`,
+        // prefilled_values: 建票时从 wiki 提取的预填字段 JSON
+        `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS prefilled_values TEXT`,
+        `CREATE TABLE IF NOT EXISTS user_recent_files (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL,
+      file_url    TEXT NOT NULL,
+      file_name   TEXT NOT NULL,
+      file_type   TEXT NOT NULL DEFAULT 'file',
+      summary     TEXT,
+      content_hash TEXT,
+      created_at  INTEGER NOT NULL
+    )`,
+        `CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at)`,
+        `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
+        // 已存在的表加列迁移
+        `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
     ];
     for (const sql of migrations) {
         try {

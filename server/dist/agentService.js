@@ -61,11 +61,35 @@ const db = __importStar(require("./db"));
 const cloudRunJobsClient_1 = require("./cloudRunJobsClient");
 const sandboxServiceClient_1 = require("./sandboxServiceClient");
 const events_1 = require("events");
-// ─── Agent Task Tracking ─────────────────────────────────────────────────────
+// ─── Agent Task Tracking ──────────────────────────────────────────────────────────
 // 每次外部消息处理都在 agent_tasks 表中生成一条记录，实现日志集中化
 // SSE real-time push via EventEmitter
 exports.taskEventBus = new events_1.EventEmitter();
 exports.taskEventBus.setMaxListeners(50); // allow many SSE connections
+// ─── Fire-and-forget 写入队列 ─────────────────────────────────────────────
+// 核心问题：每次 void appendTaskEvent/updateAgentTask 都 await db.runAsync(),
+// 占用 pool 连接 1-3s（跨太平洋延迟）。并发写入会耗尽连接池，导致主流程的关键查询 timeout。
+// 解决：串行队列，同一时间只用 1 个连接处理非关键写入。
+const _writeQueue = [];
+let _writeQueueRunning = false;
+function enqueueWrite(fn) {
+    _writeQueue.push(fn);
+    if (!_writeQueueRunning)
+        _drainWriteQueue();
+}
+async function _drainWriteQueue() {
+    _writeQueueRunning = true;
+    while (_writeQueue.length > 0) {
+        const fn = _writeQueue.shift();
+        try {
+            await fn();
+        }
+        catch (err) {
+            console.warn('[AgentTask][Queue] write failed:', err.message);
+        }
+    }
+    _writeQueueRunning = false;
+}
 async function createAgentTask(opts) {
     try {
         await db.runAsync(`INSERT INTO agent_tasks (id, session_id, user_id, source_channel, input_content, status, meta)
@@ -76,8 +100,8 @@ async function createAgentTask(opts) {
         console.warn('[AgentTask] createAgentTask failed:', err.message);
     }
 }
-async function updateAgentTask(id, fields) {
-    try {
+function updateAgentTask(id, fields) {
+    enqueueWrite(async () => {
         const sets = [];
         const vals = [];
         if (fields.status !== undefined) {
@@ -124,22 +148,17 @@ async function updateAgentTask(id, fields) {
             return;
         vals.push(id);
         await db.runAsync(`UPDATE agent_tasks SET ${sets.join(',')} WHERE id=?`, vals);
-    }
-    catch (err) {
-        console.warn('[AgentTask] updateAgentTask failed:', err.message);
-    }
+    });
 }
-async function appendTaskEvent(taskId, eventType, payload) {
-    try {
-        const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const ts = Date.now();
+function appendTaskEvent(taskId, eventType, payload) {
+    const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const ts = Date.now();
+    // SSE 推送立即执行（不等 DB 写入），保证前端实时更新
+    exports.taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
+    // DB 写入排队
+    enqueueWrite(async () => {
         await db.runAsync(`INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`, [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, ts]);
-        // Push to SSE subscribers in real-time
-        exports.taskEventBus.emit(`task:${taskId}`, { id: eventId, event_type: eventType, payload, ts });
-    }
-    catch (err) {
-        console.warn('[AgentTask] appendTaskEvent failed:', err.message);
-    }
+    });
 }
 // ─── LLMWiki Integration ──────────────────────────────────────────────────────
 const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
@@ -220,17 +239,18 @@ async function writeWikiLog(userId, content, type = 'wechat', title) {
 function triggerWikiSyncPublic(userId, reason) {
     triggerWikiSync(userId, reason);
 }
-function triggerWikiSync(userId, reason) {
+function triggerWikiSync(userId, reason, maxLogs = 15) {
     if (!LLMWIKI_BASE || !userId) {
         console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
         return;
     }
     const url = `${LLMWIKI_BASE}/api/clients/${userId}/sync`;
-    console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId}`);
+    console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId} maxLogs=${maxLogs}`);
     fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(60_000), // sync 可能需要较长时间（LLM 调用）
+        body: JSON.stringify({ reason, maxLogs }),
+        signal: AbortSignal.timeout(600_000), // 10min: 3-stage LLM pipeline can take 5-10min
     })
         .then(async (res) => {
         const data = await res.json().catch(() => ({}));
@@ -238,15 +258,18 @@ function triggerWikiSync(userId, reason) {
     })
         .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message));
 }
-/**
- * 自动从 LLMWiki 拉取用户的健康上下文（index.md 摘要 + user_profile）
- * 在 processAgentChat 入口处调用，作为公共服务层
- *
- * 当用户不存在时（404），自动在 LLMWiki 创建档案，确保每个聊天用户都有 wiki
- */
+const _wikiCache = new Map();
+const WIKI_CACHE_TTL_MS = 60_000;
 async function fetchWikiContext(userId, query, fromName) {
     if (!LLMWIKI_BASE || !userId) {
         return { user_profile: '', health_wiki: '', mode: 'none' };
+    }
+    // 缓存命中
+    const cacheKey = userId;
+    const cached = _wikiCache.get(cacheKey);
+    if (cached && Date.now() < cached.expireAt) {
+        console.log(`[WikiContext] cache hit userId=${userId} (${Math.round((cached.expireAt - Date.now()) / 1000)}s left)`);
+        return cached.result;
     }
     try {
         const url = `${LLMWIKI_BASE}/api/clients/${userId}/context-inject?query=${encodeURIComponent(query)}`;
@@ -291,7 +314,9 @@ async function fetchWikiContext(userId, query, fromName) {
         }
         const data = await res.json();
         console.log(`[WikiContext] ✓ mode=${data.mode} wiki=${(data.health_wiki || '').length}字 profile=${(data.user_profile || '').length}字`);
-        return { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+        const wikiResult = { user_profile: data.user_profile || '', health_wiki: data.health_wiki || '', mode: data.mode || 'full' };
+        _wikiCache.set(cacheKey, { result: wikiResult, expireAt: Date.now() + WIKI_CACHE_TTL_MS });
+        return wikiResult;
     }
     catch (err) {
         console.warn(`[WikiContext] ✗ 拉取失败（不影响主流程）:`, err.message);
@@ -361,12 +386,14 @@ const pendingRequests = new Map();
 const _ticketCreationLocks = new Set();
 // ─── Agent Profile ────────────────────────────────────────────────────────────
 const DEFAULT_PROFILE_ID = 'default';
+let _profileCache = null;
+let _profileCacheExpire = 0;
 async function loadAgentProfile() {
+    if (_profileCache && Date.now() < _profileCacheExpire)
+        return _profileCache;
     try {
         const row = await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID]);
-        if (!row)
-            return defaultProfile();
-        return {
+        const profile = row ? {
             id: row.id,
             name: row.name || '服务助理',
             role_desc: row.role_desc || '',
@@ -377,10 +404,13 @@ async function loadAgentProfile() {
             reassurance_tpl: row.reassurance_tpl || '',
             skill_mode: (row.skill_mode === 'manual' ? 'manual' : 'auto'),
             skill_ids: safeParseJson(row.skill_ids, []),
-        };
+        } : defaultProfile();
+        _profileCache = profile;
+        _profileCacheExpire = Date.now() + 60_000; // 60s cache
+        return profile;
     }
     catch {
-        return defaultProfile();
+        return _profileCache || defaultProfile();
     }
 }
 async function saveAgentProfile(data) {
@@ -437,12 +467,46 @@ function defaultProfile() {
     };
 }
 // ─── Config helpers ───────────────────────────────────────────────────────────
+// AI 凭证环境变量优先映射（避免 DB 查询，防止连接池耗尽）
+const _settingEnvMap = {
+    'doubao_api_key': process.env.DOUBAO_API_KEY || '',
+    'doubao_base_url': process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3',
+    'deepseek_api_key': process.env.DEEPSEEK_API_KEY || '',
+    'deepseek_base_url': process.env.DEEPSEEK_BASE_URL || '',
+    'gemini_api_key': process.env.GEMINI_API_KEY || '',
+};
+// 凭证结果缓存（60s TTL），避免每次 AI 调用都查 DB
+let _credCache = null;
+let _credCacheExpire = 0;
 async function getSetting(key) {
+    // 凭证 key 永远从 env map 读，不查 DB（即使值为空）
+    // 避免空 env var 导致 DB 查询洪水
+    if (key in _settingEnvMap)
+        return _settingEnvMap[key];
+    // 其他 key 正常走 DB
     const row = await db.getAsync('SELECT value FROM settings WHERE key=?', [key]);
     return row?.value || '';
 }
 async function getGeminiKey() {
     return (await getSetting('gemini_api_key')) || process.env.GEMINI_API_KEY || '';
+}
+async function getAICredentials() {
+    // 60s 缓存，避免每次 AI 调用都触发多个 DB 查询（连接池耗尽的根本原因）
+    if (_credCache && Date.now() < _credCacheExpire)
+        return _credCache;
+    // ARK (DeepSeek) 为默认，Gemini 为 fallback
+    const [doubaoKey, doubaoBase, geminiKey] = await Promise.all([
+        getSetting('doubao_api_key').then((k) => k || getSetting('deepseek_api_key')),
+        getSetting('doubao_base_url').then((u) => u || getSetting('deepseek_base_url')),
+        getGeminiKey(),
+    ]);
+    const result = doubaoKey && doubaoBase
+        ? { apiKey: doubaoKey, baseUrl: doubaoBase.replace(/\/$/, ''), model: 'deepseek-v4-flash-ga-260731', provider: 'ark' }
+        : { apiKey: geminiKey, baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.6-flash', provider: 'gemini' };
+    _credCache = result;
+    _credCacheExpire = Date.now() + 60_000;
+    console.log(`[AI] credentials resolved: provider=${result.provider} model=${result.model}`);
+    return result;
 }
 async function getSandboxSettings() {
     const [model, doubaoKey, doubaoBase, deepseekKey, deepseekBase] = await Promise.all([
@@ -454,20 +518,23 @@ async function getSandboxSettings() {
     ]);
     return { model, doubaoKey, doubaoBase, deepseekKey, deepseekBase };
 }
-// ─── Gemini 3.6 Flash multi-turn call (OpenAI-compat endpoint) ───────────────
+// ─── AI multi-turn call (ARK/DeepSeek 默认，Gemini fallback) ────────────────────
+// 保留 callGeminiMessages 名称硬兼容，内部动态选择 ARK 或 Gemini
 async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 4096, options) {
-    const BASE = 'https://generativelanguage.googleapis.com/v1beta/openai';
+    // 动态获取凭证（忽略外部传入的 apiKey，统一走 settings DB）
+    const creds = await getAICredentials();
+    const BASE = creds.baseUrl;
     const tools = options?.tools;
     const userId = options?.userId || '';
-    // 构造初始消息列表（可变，tool call 循环中会追加）
+    // 构造初始消息列表
     const allMessages = [
         { role: 'system', content: systemPrompt },
         ...messages,
     ];
-    // 最多允许 3 轮 tool call（防止死循环）
+    // 最多 4 轮 tool call
     for (let round = 0; round < 4; round++) {
         const reqBody = {
-            model: 'gemini-3.6-flash',
+            model: creds.model,
             messages: allMessages,
             max_tokens: maxTokens,
             stream: false,
@@ -478,7 +545,7 @@ async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 40
         const res = await fetch(`${BASE}/chat/completions`, {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${apiKey}`,
+                'Authorization': `Bearer ${creds.apiKey}`,
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify(reqBody),
@@ -486,7 +553,7 @@ async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 40
         });
         if (!res.ok) {
             const errText = await res.text();
-            throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
+            throw new Error(`AI API error ${res.status} [${creds.provider}]: ${errText.slice(0, 200)}`);
         }
         const data = await res.json();
         const choice = data.choices?.[0];
@@ -497,9 +564,15 @@ async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 40
         const contentLen = (assistantMsg?.content || '').length;
         const toolCalls = assistantMsg?.tool_calls || [];
         const logLevel = finishReason !== 'stop' && finishReason !== 'tool_calls' ? 'WARN' : 'INFO';
+        // 记录 AI thinking（DeepSeek/ARK 的 reasoning_content 字段）
+        const reasoningContent = assistantMsg?.reasoning_content || '';
+        if (reasoningContent) {
+            console.log(`[Gemini][THINKING] round=${round} len=${reasoningContent.length} preview="${reasoningContent.slice(0, 200).replace(/\n/g, '↵')}"`);
+        }
         console.log(`[Gemini][${logLevel}] round=${round} finish_reason=${finishReason}` +
             ` prompt_tokens=${usage.prompt_tokens ?? '?'}` +
             ` completion_tokens=${usage.completion_tokens ?? '?'}` +
+            ` reasoning_tokens=${usage.completion_tokens_details?.reasoning_tokens ?? 0}` +
             ` content_len=${contentLen} tool_calls=${toolCalls.length}` +
             ` max_tokens=${maxTokens}` +
             (contentLen > 0 ? ` preview="${(assistantMsg?.content || '').slice(0, 60).replace(/\n/g, '↵')}..."` : ''));
@@ -528,21 +601,57 @@ async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 40
                 console.log(`[Gemini] 📄 get_medication_plan → ${result.length}字`);
             }
             else if (fnName === 'query_ticket') {
-                // Step 6 (v2): 查询工单/报告内容
-                const ticket = await db.getAsync(`SELECT id, skill_id, skill_name, status, raw_result, report_url, created_at
-           FROM tickets
-           WHERE created_by=? AND status IN ('done','processing','submitted','waiting_input')
-           ORDER BY created_at DESC LIMIT 1`, [userId || '']).catch(() => null);
+                // Step 6 (v2): 查询工单/报告内容（JOIN skills获取skill_name，JOIN ticket_results获取报告）
+                let ticket = null;
+                try {
+                    ticket = await db.getAsync(`SELECT t.id, t.skill_id, t.token, s.name as skill_name, t.status, t.created_at,
+                    tr.raw_result, tr.report_url
+             FROM tickets t
+             LEFT JOIN ticket_results tr ON tr.ticket_id = t.id
+             LEFT JOIN skills s ON s.id = t.skill_id
+             WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+             ORDER BY t.created_at DESC LIMIT 1`, [userId || '']);
+                }
+                catch (qerr) {
+                    console.error(`[Gemini] ❌ query_ticket SQL error userId=${userId}: ${qerr?.message}`);
+                    // fallback: 无 JOIN 版本（兜底）
+                    try {
+                        ticket = await db.getAsync(`SELECT t.id, t.skill_id, t.token, t.status, t.created_at
+               FROM tickets t
+               WHERE t.created_by=? AND t.status IN ('done','processing','submitted','waiting_input','created')
+               ORDER BY t.created_at DESC LIMIT 1`, [userId || '']);
+                        console.log(`[Gemini] 📋 query_ticket fallback (no JOIN) → ticket_id=${ticket?.id}`);
+                    }
+                    catch (ferr) {
+                        console.error(`[Gemini] ❌ query_ticket fallback error: ${ferr?.message}`);
+                    }
+                }
                 if (ticket) {
+                    const reportContent = ticket.raw_result || null;
+                    // waiting_input 状态：构造 H5 填写链接
+                    let fillUrl = null;
+                    if (ticket.status === 'waiting_input' && ticket.token) {
+                        const h5BaseRow = await db.getAsync('SELECT value FROM settings WHERE key=?', ['h5_base_url']).catch(() => null);
+                        const serviceUrl = process.env.PUBLIC_BASE_URL || '';
+                        const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
+                        fillUrl = `${h5Base}?token=${ticket.token}`;
+                    }
                     result = JSON.stringify({
                         ticket_id: ticket.id,
                         skill_name: ticket.skill_name || ticket.skill_id,
                         status: ticket.status,
-                        report: ticket.raw_result || '（报告尚未生成）',
+                        status_desc: ticket.status === 'waiting_input' ? '工单等待填写。仅当用户明确询问工单填写链接时，才把 fill_url 发给用户，其他情况不要主动推送'
+                            : ticket.status === 'submitted' ? '您已提交，等待分析'
+                                : ticket.status === 'processing' ? 'AI正在分析中'
+                                    : ticket.status === 'done' ? '分析已完成'
+                                        : ticket.status === 'created' ? '已创建待处理'
+                                            : ticket.status,
+                        fill_url: fillUrl,
+                        report: reportContent || '（报告尚未生成）',
                         report_url: ticket.report_url || null,
                         created_at: ticket.created_at,
                     });
-                    console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} report_len=${ticket.raw_result?.length || 0}`);
+                    console.log(`[Gemini] 📋 query_ticket → ticket_id=${ticket.id} status=${ticket.status} fill_url=${fillUrl ? '有' : '无'} report_len=${reportContent?.length || 0}`);
                 }
                 else {
                     result = JSON.stringify({ found: false, message: '未找到近期工单' });
@@ -607,7 +716,7 @@ async function routeMessage(content, notes, history, apiKey) {
         const match = result.match(/"type"\s*:\s*"(chat|health)"/);
         const type = match?.[1];
         console.log(`[AgentService] Route result raw="${result.trim()}" → type=${type || 'chat(fallback)'} (${durationMs}ms)`);
-        const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+        const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731'; // ARK 기본 모델
         return { type: type || 'chat', durationMs, systemPrompt, userMsg, rawResult: result.trim(), model };
     }
     catch (err) {
@@ -617,18 +726,28 @@ async function routeMessage(content, notes, history, apiKey) {
     }
 }
 // ─── 2. 自动 Skill 路由（从可用 skill 中选最合适的一个）────────────────────────
+let _skillsCache = null;
+let _skillsCacheExpire = 0;
 async function getAvailableSkills(profile) {
+    if (_skillsCache && Date.now() < _skillsCacheExpire)
+        return _skillsCache;
     let skills;
     if (profile.skill_mode === 'auto') {
         skills = await db.allAsync("SELECT id, name, description FROM skills WHERE status = 'published' ORDER BY name", []);
     }
     else {
-        if (!profile.skill_ids.length)
+        if (!profile.skill_ids.length) {
+            _skillsCache = [];
+            _skillsCacheExpire = Date.now() + 30_000;
             return [];
+        }
         const placeholders = profile.skill_ids.map(() => '?').join(',');
         skills = await db.allAsync(`SELECT id, name, description FROM skills WHERE status = 'published' AND id IN (${placeholders}) ORDER BY name`, profile.skill_ids);
     }
-    return skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
+    const result = skills.map(s => ({ id: s.id, name: s.name, description: s.description || '' }));
+    _skillsCache = result;
+    _skillsCacheExpire = Date.now() + 30_000; // 30s cache
+    return result;
 }
 async function routeSkill(content, availableSkills, history, apiKey) {
     if (!availableSkills.length) {
@@ -676,17 +795,21 @@ ${skillList}
         return { skillId: null, skillName: null, reason: '路由失败，降级直接回复', confidence: 'low' };
     }
 }
-/**
- * 合并路由：一次 AI 调用同时完成"是否需要skill"和"哪个skill"的判断。
- * 替代旧的 routeMessage() + routeSkill() 两次调用。
- *
- * 输出：
- *   confidence=none  → 普通聊天，agent 直接回复
- *   confidence=low   → 健康问题但无明确 skill 意图，agent 直接回复（带健康知识）
- *   confidence=high  → 用户明确要用某个 skill，进入守卫流程
- */
+const _routeCache = new Map();
+const ROUTE_CACHE_TTL_MS = 30_000;
+function _routeCacheKey(content, skillIds) {
+    const contentSnip = content.trim().slice(0, 80);
+    return `${contentSnip}||${skillIds.sort().join(',')}`;
+}
 async function routeDecision(content, history, notes, availableSkills, apiKey) {
-    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731';
+    // 缓存命中时直接返回
+    const cacheKey = _routeCacheKey(content, availableSkills.map(s => s.id));
+    const cached = _routeCache.get(cacheKey);
+    if (cached && Date.now() < cached.expireAt) {
+        console.log(`[RouteDecision] cache hit (${Math.round((cached.expireAt - Date.now()) / 1000)}s left): confidence=${cached.result.confidence}`);
+        return cached.result;
+    }
     // 无可用 skill 时降级
     if (!availableSkills.length) {
         return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'low',
@@ -739,8 +862,11 @@ ${skillList}
             console.warn(`[RouteDecision] 路由返回了未知 skill_id=${skill_id}，降级 null`);
         }
         console.log(`[RouteDecision] skill=${finalSkillName || 'none'} confidence=${confidence} reason=${parsed.reason} (${durationMs}ms)`);
-        return { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
+        const rdResult = { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
             confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim() };
+        // 写入缓存
+        _routeCache.set(cacheKey, { result: rdResult, expireAt: Date.now() + ROUTE_CACHE_TTL_MS });
+        return rdResult;
     }
     catch (err) {
         const durationMs = Date.now() - t0;
@@ -774,9 +900,13 @@ function assembleAgentContext(params) {
     // ── directive 生成（代码 if-else，不依赖 AI）─────────────────────────────────
     let directive = '';
     if (guardStatus === 'new_created' && routeSkillName) {
-        directive = `用户表达了对「${routeSkillName}」服务的意向，守卫已创建。`
-            + `请向用户介绍该服务，并自然地询问是否确认使用。`
-            + (routeSkillDesc ? `\n服务描述：${routeSkillDesc.slice(0, 200)}` : '');
+        // V3.5：信息式提示 + 括号简介 + 明确不要求确认 + 用户拒绝时的保护语
+        const shortDesc = routeSkillDesc ? `（${routeSkillDesc.slice(0, 60)}）` : '';
+        directive = `[服务匹配提示] 系统检测到用户可能对「${routeSkillName}」感兴趣（置信度：高）。`
+            + `如果当前对话场景自然合适，可顺带提及${shortDesc}；`
+            + `不必要求用户确认，感兴趣自然会主动询问。`
+            + `若用户正在聊别的事，正常回答即可。`
+            + `若用户明确表示不需要推荐、或已有专业服务，不必提及。`;
     }
     else if (guardStatus === 'confirmed_ticket' && ticketUrl) {
         directive = `用户已确认使用「${guardSkillName || routeSkillName || ''}」，工单已建立。`
@@ -793,9 +923,9 @@ function assembleAgentContext(params) {
                 + `本次消息话题指向其他方向，请先回答用户的问题，不必重复推荐服务。`;
         }
         else if (params.isFirstClarify) {
-            // 首次模糊确认（守卫首轮unclear，用户没有在提问）→ Agent 必须主动引导确认
-            directive = `用户刚才的回复意向不明确，是否要使用「${guardSkillName}」服务尚未确认。`
-                + `\n请先简短回答用户的问题，然后**在回复末尾自然地询问**：「您是想现在使用「${guardSkillName}」服务吗？」（语气自然，不要强迫）。`;
+            // 首次模糊确认 → 软提示，不强制追问
+            directive = `[服务匹配提示] 用户此前对「${guardSkillName}」有一定意向，但尚未明确确认。`
+                + `先回答用户的问题；如果回复末尾有自然的空间，可以轻轻问一句是否想使用，不必强求。`;
         }
         else {
             // 已追问过或用户在提问 → 先回答，顺带引导
@@ -805,20 +935,36 @@ function assembleAgentContext(params) {
     }
     else if (guardStatus === 'none' && existingTicket) {
         if (existingTicket.status === 'processing' || existingTicket.status === 'submitted') {
-            directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
-                + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
+            // 只有当前意向 skill 与进行中工单一致时才注入 directive
+            if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+                directive = `用户有一个进行中的「${existingTicket.skillName}」工单（状态：处理中）。`
+                    + `如果用户在询问进度，告知「正在分析，完成后会通知您」。`;
+            }
         }
         else if (existingTicket.status === 'done' && existingTicket.reportContent) {
-            directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告（报告内容见下方）。`
-                + `如用户询问报告细节，请结合报告内容具体回答。`;
+            // 报告已完成且有内容：主动告知用户报告已生成
+            if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+                directive = `用户的「${existingTicket.skillName}」分析报告已完成，请直接告知用户报告已生成（报告原文见下方）。`
+                    + `如用户询问具体建议或细节，请结合下方报告内容回答；`
+                    + (existingTicket.reportUrl ? `如用户询问报告在哪查看，提供此链接：${existingTicket.reportUrl}` : `告知报告内容已在此对话中呈现`);
+            }
         }
         else if (existingTicket.status === 'done') {
-            directive = `用户有一份已完成的「${existingTicket.skillName}」分析报告。`
-                + (existingTicket.reportUrl ? `\n报告链接：${existingTicket.reportUrl}` : '');
+            if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+                directive = `用户的「${existingTicket.skillName}」分析报告已完成，请告知用户报告已生成。`
+                    + (existingTicket.reportUrl ? `\n报告查看链接：${existingTicket.reportUrl}` : '');
+            }
         }
-        else if (existingTicket.status === 'waiting_input' && existingTicket.h5Url) {
-            directive = `用户有一个未填写的「${existingTicket.skillName}」工单。`
-                + `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`;
+        else if (existingTicket.status === 'waiting_input') {
+            // ⚠️ 关键：只有当前意向 skill 与待填写工单 skill 一致时才提示填写
+            // 如果用户正在问别的 skill，不应用旧工单打断用户意图
+            if (!routeSkillId || existingTicket.skillId === routeSkillId) {
+                directive = `用户有一个待填写的「${existingTicket.skillName}」工单。`
+                    + (existingTicket.h5Url
+                        ? `\n请提示用户点击以下链接完成填写：${existingTicket.h5Url}`
+                        : `\n请告知用户工单已创建，稍后会收到填写链接通知。`);
+            }
+            // routeSkillId 与 existingTicket.skillId 不同时 → directive 为空，Agent 正常按新意向回答
         }
     }
     // guardStatus=none + 无工单 → directive 为空，Agent 正常回答
@@ -867,12 +1013,12 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 任务：用自然、亲切的语气回复客户消息。
 要求：
 - 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
-- 直接称呼客户为"${fromName}"
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
 - 绝对不要自己生成任何链接（URL），尤其不要生成 h5?token= 类的工单链接。如果客户想使用分析服务，告知"好的，为您安排"即可，系统会自动处理
-- 只有当客户**明确提到曾经提交过某项分析服务**（如"我提交的报告"、"之前做的营养分析"、"我的工单结果"、"分析报告出来了吗"等），才调用 query_ticket 工具查询；如果客户只是泛泛询问进度但**没有任何提交过服务的上下文**，直接正常回答，不要调用工具；工单状态处理规则：
-  「waiting_input」= 用户已有待填写工单，必须直接把 fill_url 链接发给用户引导他们填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
+- 客户发送文件/图片时（消息包含 [文件:] 或 [图片]），先简单确认收到并询问需求，**不要主动调用 query_ticket 工具、不要主动提及或推送任何已有工单链接**
+- 只有当客户**明确询问**工单进度、报告状态（如"工单进行到哪了"、"报告出来了吗"、"之前提交的分析怎么样了"）时，才调用 query_ticket 工具查询，再据实回答；工单状态处理规则：
+  「waiting_input」= 用户已有待填写工单，把 fill_url 链接发给用户引导填写（绝对不要再问用户是否想用该服务，他们已经确认过了）；如 fill_url 为 null 则告知工单已建但链接加载失败
   「submitted/processing」= AI 分析中，告知预计时间
   「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
   「created」= 已创建待处理，告知工单已建即可
@@ -882,7 +1028,24 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
         ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
         { role: 'user', content },
     ];
-    const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, { tools: WIKI_TOOLS, userId: meta.user_id }); // 始终传入，含 query_ticket
+    const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
+        tools: WIKI_TOOLS, // 含 query_ticket，让 AI 按需查工单
+        userId: meta.user_id,
+        onToolCall: (name, _args, result) => {
+            if (name === 'query_ticket') {
+                void appendTaskEvent(requestId, 'tool_query_ticket', {
+                    userId: meta.user_id,
+                    result: (() => { try {
+                        return JSON.parse(result);
+                    }
+                    catch {
+                        return result;
+                    } })(),
+                });
+                console.log(`[AgentService] 🔧 [Chat] tool_query_ticket 已触发 userId=${meta.user_id}`);
+            }
+        },
+    });
     // ── LLMWiki: 后台写日志 ──
     backgroundPostLog(meta.user_id, content, reply.trim());
     return {
@@ -894,19 +1057,24 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
     };
 }
 // ─── 5. 健康咨询（无匹配 skill）：带档案的直接 AI 回复 ──────────────────────
-async function handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog) {
+async function handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog, agentCtxPkg) {
     const { content, meta, history = [], notes = '' } = req;
     const wikiCtx = req._wikiContext;
     const fromName = meta.from_name || '您';
     const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
     const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
     const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
+    // ── 工单 / 守卫 directive 块（来自 agentCtxPkg）────────────────────────────────────────
+    const directiveBlock = agentCtxPkg?.directive
+        ? `\n\n【当前任务指令】\n${agentCtxPkg.directive}`
+        : '';
+    // 注意：不在 prompt 中注入报告原文（reportBlock），让 AI 通过 query_ticket 工具获取报告
+    // 这样可确保 tool_query_ticket 事件被记录，保证日志链完整性
     const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
-回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}
+回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
 - 不要使用 Markdown 格式
-- 亲切专业，直接称呼客户为"${fromName}"
 - 如无健康档案，基于对话内容给出通用建议`;
     const contextBlock = [
         notes ? `【客户备注】\n${notes}` : '',
@@ -974,7 +1142,8 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
         const h5Base = h5BaseRow?.value || `${serviceUrl}/h5`;
         if (meta.user_id) {
             const existing = await db.getAsync(`SELECT * FROM tickets WHERE created_by=? AND skill_id=? AND created_at > ?
-         ORDER BY created_at DESC LIMIT 1`, [meta.user_id, skillId, oneHourAgo]);
+         AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1`, [meta.user_id, skillId, oneHourAgo, Date.now()]);
             if (existing && existing.status !== 'error') {
                 const exUrl = `${h5Base}?token=${existing.token}`;
                 const baseUrl = h5Base.replace(/\/h5$/, '');
@@ -984,17 +1153,42 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
                     reply = `${fromName}，您已有一个等待填写的「${skillName}」工单，请点击链接填写：\n\n${exUrl}`;
                 }
                 else if (existing.status === 'submitted' || existing.status === 'processing') {
-                    reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳`;
+                    reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳\n\n如工单长时间未完成，请联系管理员处理。`;
                 }
                 else if (existing.status === 'done') {
-                    reply = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看报告：\n${reportUrl}`;
+                    // Bug2 修复：检测重做意图（「重来/再做」等）→ expire 旧工单，fall-through 新建
+                    const wantsRedo = /重新|再做|再来|新的|重来|重做/.test(content);
+                    if (wantsRedo) {
+                        await db.runAsync(`UPDATE tickets SET status='expired', updated_at=? WHERE id=?`, [Date.now(), existing.id]);
+                        console.log(`[AgentService] 🔄 用户要求重做，旧工单 ${existing.id} → expired，将新建工单`);
+                        // reply 为空 → 跳过 if(reply) 块，继续新建工单
+                    }
+                    else {
+                        reply = `${fromName}，您的「${skillName}」分析报告已生成 🎉\n\n点击查看报告：\n${reportUrl}`;
+                    }
                 }
                 else if (existing.status === 'returned') {
                     const reason = existing.return_reason ? `\n原因：${existing.return_reason}\n\n` : '\n\n';
                     reply = `${fromName}，工作人员已审阅并打回您的「${skillName}」工单，请重新填写：${reason}${exUrl}`;
                 }
                 if (reply) {
+                    // 把当前 requestId 写入票据，供后续回调写 AgentLogs 使用
+                    void db.runAsync(`UPDATE tickets SET request_id=?, updated_at=? WHERE id=?`, [requestId, Date.now(), existing.id]);
                     void appendTaskEvent(requestId, 'ticket_reused', { ticketId: existing.id, status: existing.status });
+                    // done 状态：立即写 skill_done + reply_sent（不等回调）
+                    if (existing.status === 'done') {
+                        void appendTaskEvent(requestId, 'skill_done', {
+                            ticketId: existing.id, skillName,
+                            outputLen: (existing.raw_result || reply).length,
+                            output_preview: reply.slice(0, 200),
+                            report_url: reportUrl,
+                        });
+                        void appendTaskEvent(requestId, 'reply_sent', {
+                            reply: reply.slice(0, 300),
+                            channel: delivery?.app, recipient: delivery?.recipient,
+                            note: 'ticket_reused_done',
+                        });
+                    }
                     const endMs = Date.now();
                     void updateAgentTask(requestId, {
                         status: 'done', routeType: 'ticket_reused', skillId,
@@ -1005,6 +1199,16 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
                 }
                 // status='error' → 不复用，继续新建
             }
+            // ── 跨 skill 重做：同 skill 没找到 done 工单，但用户有重做意图 → 查所有 skill 的 done 工单并 expire ──
+            const wantsRedoCross = /重新|再做|再来|新的|重来|重做/.test(content);
+            if (wantsRedoCross) {
+                const doneTickets = await db.allAsync(`SELECT id, skill_id FROM tickets WHERE created_by=? AND status='done' AND created_at > ?
+           ORDER BY created_at DESC`, [meta.user_id, oneHourAgo]).catch(() => []);
+                for (const dt of doneTickets) {
+                    await db.runAsync(`UPDATE tickets SET status='expired', updated_at=? WHERE id=?`, [Date.now(), dt.id]);
+                    console.log(`[AgentService] 🔄 跨skill重做，旧工单 ${dt.id} (skill=${dt.skill_id}) → expired`);
+                }
+            }
         }
         // ── 新建工单 ──────────────────────────────────────────────────────────────
         console.log(`[AgentService] 📋 External skill「${skillName}」→ 创建工单`);
@@ -1014,25 +1218,102 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
             wikiCtx?.user_profile ? `【用户画像】${wikiCtx.user_profile.slice(0, 300)}` : '',
             content ? `【用户问题】${content}` : '',
         ].filter(Boolean).join('\n\n').slice(0, 800) || null;
+        // ── 从 wiki 提取 H5 表单预填字段 ─────────────────────────────────────────
+        const wikiText = [wikiCtx?.user_profile || '', wikiCtx?.health_wiki || ''].join('\n');
+        const ageMatch = wikiText.match(/(\d{1,3})\s*(?:岁|歲|years?\s*old)/i);
+        const phoneMatch = wikiText.match(/1[3-9]\d{9}/);
+        const now = Date.now();
+        // ── 系统自动查询 24 小时内用户发送的附件 ─────────────────────────────────
+        const oneDayAgo = now - 24 * 60 * 60 * 1000;
+        let recentFiles = [];
+        if (meta.user_id) {
+            try {
+                const uId = String(meta.user_id);
+                const wecomUid = uId.startsWith('wecom_') ? uId : `wecom_${uId}`;
+                const rawUid = uId.replace(/^wecom_/, '');
+                recentFiles = await db.allAsync(`SELECT * FROM user_recent_files WHERE (user_id=? OR user_id=? OR user_id=?) AND created_at > ? ORDER BY created_at DESC LIMIT 5`, [uId, wecomUid, rawUid, oneDayAgo]);
+            }
+            catch (err) {
+                console.warn('[AgentService] 查询最近附件失败:', err.message);
+            }
+        }
+        // 去重：优先用 content_hash（MD5），同时也追踪文件名
+        // 防止 A 有 hash、B 同内容但 hash 未计算完，两个都通过的情况
+        const seenKeys = new Set();
+        const seenNames = new Set();
+        const uniqueRecentFiles = recentFiles.filter((f) => {
+            const name = (f.file_name || '').trim().toLowerCase();
+            const key = f.content_hash || name || f.file_url;
+            // 有 hash：按 hash 去重；无 hash：按文件名去重
+            // 但不论有没有 hash，只要文件名已出现过就跳过（防止 hash/no-hash 混合漏检）
+            if (seenKeys.has(key) || (name && seenNames.has(name)))
+                return false;
+            seenKeys.add(key);
+            if (name)
+                seenNames.add(name);
+            return true;
+        });
+        const prefilledFiles = uniqueRecentFiles.map((f) => ({
+            id: f.id,
+            name: f.file_name || '附件',
+            url: f.file_url,
+            type: f.file_type || 'file',
+            summary: f.summary || '',
+        }));
+        const prefilledValues = {
+            contact_name: meta.from_name || '',
+            patient_name: meta.from_name || '',
+            patient_age: ageMatch ? ageMatch[1] : '',
+            contact_phone: phoneMatch ? phoneMatch[0] : '',
+            additional_health_info: (() => {
+                if (!wikiCtx?.health_wiki)
+                    return '';
+                let info = wikiCtx.health_wiki;
+                // 截断内部AI指令（用户不应看到 📋 工具调用提示、get_medication_plan 等）
+                // 通常以 '---\n📋' 或 '📋 **可按需调用' 或 '（最近30轮' 为分隔符
+                const cutMarkers = ['\n---\n📋', '\n📋 **可按需调用', '\n（最近30轮', '\nprompt_tokens'];
+                for (const marker of cutMarkers) {
+                    const idx = info.indexOf(marker);
+                    if (idx !== -1) {
+                        info = info.slice(0, idx);
+                        break;
+                    }
+                }
+                // 再移除引用链接 [🔗 溯源](...) 和过长内容
+                return info.replace(/\[🔗.*?\]\(.*?\)/g, '').trim().slice(0, 500);
+            })(),
+            prefilled_files: prefilledFiles,
+        };
+        const prefilledValuesJson = JSON.stringify(prefilledValues);
         const ticketId = require('crypto').randomUUID();
         const token = require('crypto').randomUUID().replace(/-/g, '');
-        const now = Date.now();
-        const expiresAt = now + 60 * 60 * 1000; // 1小时有效（与复用窗口一致）
+        const expiresAt = now + 60 * 60 * 1000; // 1小时有效
         const deliveryInfo = JSON.stringify({
             callback_url: req.callback_url || '',
             app: delivery.app,
             recipient: delivery.recipient,
             action: delivery.action,
+            source_channel: req.source_channel || req.source || '',
+            juhe_conv_id: req.meta?.juhe_conv_id || '',
         });
         await db.runAsync(`INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [ticketId, skillId, token,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [ticketId, skillId, token,
             `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
             patientName, prefilledNotes,
-            meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId]);
+            meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson]);
+        // ── 将最近附件默认写入 ticket_inputs（系统自动挂载）───────────────────────
+        for (const f of prefilledFiles) {
+            await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
+         VALUES (?,?,?,?,?,?,?,?)`, [require('crypto').randomUUID(), ticketId, 'file', 'file', f.url, f.name, f.type === 'image' ? 'image/jpeg' : 'application/pdf', now]);
+        }
+        if (prefilledFiles.length > 0) {
+            console.log(`[AgentService] 📎 系统自动挂载 ${prefilledFiles.length} 份24小时内附件到工单 ${ticketId}: ${prefilledFiles.map(f => f.name).join(', ')}`);
+        }
         const ticketUrl = `${h5Base}?token=${token}`;
-        const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了部分信息，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
+        const fileHint = prefilledFiles.length > 0 ? `（已为您自动载入：${prefilledFiles.map(f => f.name).join('、')}）` : '';
+        const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了信息${fileHint}，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}\n\n完成提交后 AI 将开始分析，完成后将通知您 ✅ 如长时间未收到结果，请联系管理员处理。`;
         void appendTaskEvent(requestId, 'ticket_created', {
             ticketId, skillId, skillName,
             token: token.slice(0, 8) + '...',
@@ -1090,7 +1371,7 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
         ? `${serviceUrl}/api/v1/agent/job-callback/${requestId}`
         : '';
     const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL || '';
-    const effectiveModel = skillRow?.preferred_model || 'gemini-3.6-flash';
+    const effectiveModel = skillRow?.preferred_model || 'deepseek-v4-flash-ga-260731';
     const isApproved = skillRow?.status === 'approved' || skillRow?.status === 'published';
     try {
         if (isApproved && sandboxServiceUrl) {
@@ -1244,9 +1525,11 @@ async function handleJobCallback(requestId, jobResult) {
 }
 // ─── 主入口 ───────────────────────────────────────────────────────────────────
 async function processAgentChat(req) {
-    const apiKey = await getGeminiKey();
-    if (!apiKey)
-        throw new Error('Gemini API key not configured. Please set it in Settings.');
+    // 凭证通过 getAICredentials() 缓存获取，不重复查 DB
+    const creds = await getAICredentials();
+    if (!creds.apiKey)
+        throw new Error('AI credentials not configured. Set DOUBAO_API_KEY or GEMINI_API_KEY.');
+    const apiKey = creds.apiKey; // 保持下方代码兼容
     const requestId = `req_${(0, uuid_1.v4)().replace(/-/g, '').slice(0, 10)}`;
     const serviceUrl = process.env.SERVICE_URL || '';
     const taskStartMs = Date.now();
@@ -1256,12 +1539,18 @@ async function processAgentChat(req) {
     const userId = req.meta?.user_id || '';
     const sessionId = req.session_id || userId;
     const srcChannel = req.source_channel || req.source || 'wecom';
+    // juhe channel: agent_tasks 存原始 channel_uid（vid），
+    // 方便 JUHE-3 测试通过 JUHE_USER_ID 查到任务；
+    // wiki/tickets 仍用 unified_id（req.meta.user_id）
+    const taskUserId = srcChannel === 'juhe' && req.meta?.channel_uid
+        ? req.meta.channel_uid
+        : userId;
     console.log(`[AgentService] request_id=${requestId} session=${sessionId} source=${srcChannel}`);
     // ── 创建 agent_task 记录（await 确保写入，不受 fire-and-forget 影响）──────────
     await createAgentTask({
-        id: requestId, sessionId, userId, sourceChannel: srcChannel,
+        id: requestId, sessionId, userId: taskUserId, sourceChannel: srcChannel,
         inputContent: req.content,
-        meta: { from_name: req.meta?.from_name, employee: req.meta?.employee },
+        meta: { from_name: req.meta?.from_name, employee: req.meta?.employee, channel_uid: req.meta?.channel_uid },
     });
     // ── 存完整上下文快照（历史、备注）供日志查看 ─────────────────────────────────
     void updateAgentTask(requestId, {
@@ -1280,6 +1569,17 @@ async function processAgentChat(req) {
         history_count: (req.history || []).length,
         has_notes: !!(req.notes),
     });
+    // ── 第三道防线：纯文件占位内容不回复 ────────────────────────────────────────
+    // 正常流程下文件消息被 ingest 守卫拦截（第二道），archiver 拦截（第一道）
+    // 但如果消息意外到达这里（直接调 /api/v1/agent/chat），也要保持静默
+    // 判断：content 以 [文件: 开头 且 不包含用户文字（无换行/空格后跟正文）
+    const isFileOnlyContent = /^\[文件:/.test(req.content.trim()) && !req.content.includes('\n');
+    if (isFileOnlyContent) {
+        console.log(`[AgentService][FileGuard] ${requestId} content is file-only placeholder, returning silent`);
+        void updateAgentTask(requestId, { status: 'done', routeType: 'file_saved', replyContent: '(file-only: silent)', endedAt: Date.now(), durationMs: 0 });
+        void appendTaskEvent(requestId, 'file_only_silent', { reason: '纯文件占位符，不回复用户' });
+        return { request_id: requestId, status: 'done', reply: '', delivery, skill_route: undefined };
+    }
     // ── 立即触发 CUA 预热（并行于后续处理，不阻塞）─────────────────────────
     const cuaSendUrl = process.env.CUA_SEND_URL || '';
     if (cuaSendUrl && req.meta?.from_name) {
@@ -1421,21 +1721,20 @@ async function processAgentChat(req) {
         ticketAge: ctxSnapshot.recentTicket ? Math.round((Date.now() - Number(ctxSnapshot.recentTicket.created_at)) / 60000) + 'min' : null,
     });
     console.log(`[AgentService] 📸 context_snapshot: guard=${ctxSnapshot.activeGuard?.skill_name || 'none'} ticket=${ctxSnapshot.recentTicket?.status || 'none'}`);
-    // ── Step 0.9: Skill 确认守卫前置检查 ─────────────────────────────────────────
-    // 在 routeMessage 之前检查：当前 session 是否有激活的 skill_suggest 守卫？
-    // 如果有，运行三值判断（感兴趣/确认），跳过或改写后续路由
-    let guardHint = ''; // 往后传递的提示词（如「用户对推荐 skill 不感兴趣」）
+    // ── Step 0.9: Skill 确认守卫存在性检查（AI判断移至路由后 Step 4，plan 1.2/1.3）────
+    // 只检查守卫是否存在 + 轮次限制，不在路由前做 AI 判断。
+    // 守卫 AI 判断（yes/unclear/no）在 routeDecision 之后、Step 4 里运行。
     let currentGuardStatus = 'none'; // Step 5 (v2): 追踪守卫状态
     let currentGuardSkillName = null; // Step 5 (v2): 守卫对应的 skill
-    let isFirstClarify = false; // Step 7fix: 首次 unclear 需要 Agent 主动引导
+    let isFirstClarify = false; // 首次 unclear → Agent 主动引导
+    let activeGuardRow = null; // 非 null = 守卫有效且未超轮次，留给 Step 4
     if (sessionId) {
         const nowMs = Date.now();
         const activeGuard = await db.getAsync(`SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>?
        ORDER BY created_at DESC LIMIT 1`, [sessionId, nowMs]);
         if (activeGuard) {
-            const MAX_GUARD_ROUNDS = 10; // 超过 10 轮未确认则自动关闭守卫
-            // 每次检查都递增 check_count
+            const MAX_GUARD_ROUNDS = 10;
             const newCheckCount = (activeGuard.check_count || 0) + 1;
             await db.runAsync(`UPDATE skill_confirm_guards SET check_count=? WHERE id=?`, [newCheckCount, activeGuard.id]);
             console.log(`[SkillGuard] 🔍 发现活跃守卫 id=${activeGuard.id} skill=${activeGuard.skill_name} round=${newCheckCount}/${MAX_GUARD_ROUNDS}`);
@@ -1448,7 +1747,6 @@ async function processAgentChat(req) {
                 maxRounds: MAX_GUARD_ROUNDS,
                 userMsg: req.content.slice(0, 200),
             });
-            // ── Step 4 (v2): guard_lifecycle=existing 事件 ─────────────────────────
             void appendTaskEvent(requestId, 'guard_lifecycle', {
                 action: 'existing',
                 guardId: activeGuard.id,
@@ -1456,7 +1754,6 @@ async function processAgentChat(req) {
                 skillName: activeGuard.skill_name,
                 round: newCheckCount,
             });
-            // 超过轮数限制→自动关闭，往下游传 hint
             if (newCheckCount > MAX_GUARD_ROUNDS) {
                 await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason='round_limit' WHERE id=?`, [activeGuard.id]);
                 console.log(`[SkillGuard] ⏱️ 超过 ${MAX_GUARD_ROUNDS} 轮限制，守卫已关闭`);
@@ -1466,145 +1763,13 @@ async function processAgentChat(req) {
                     reason: 'round_limit',
                     checkCount: newCheckCount,
                 });
-                guardHint = `[守卫提示：用户连续${MAX_GUARD_ROUNDS}轮没有确认「${activeGuard.skill_name}」服务，守卫已自动关闭，请正常回答]`;
+                // 超轮后守卫关闭，activeGuardRow 保持 null，后续按无守卫处理
             }
             else {
-                // 截取 suggest_ts 之后的对话（让 AI 看到完整上下文，而非只看最后一条）
-                const historyAfterSuggest = (req.history || [])
-                    .filter((h) => !h.ts || h.ts >= activeGuard.suggest_ts)
-                    .map((h) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
-                    .join('\n');
-                // 守卫 AI 判断：用 callGeminiMessages，明确禁止推理过程，max_tokens 足够大确保 JSON 不被截断
-                const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
-
-背景：AI助手之前向用户推荐了「${activeGuard.skill_name}」服务。
-
-对话记录：
-${historyAfterSuggest || '（推荐后暂无其他对话）'}
-
-用户最新消息：「${req.content}」
-
-请判断：
-- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
-- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
-  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
-
-输出示例：
-- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
-
-只输出 JSON，不输出任何其他文字：`;
-                const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
-                let guardResult = { interest: 'yes', confirm: 'unclear' };
-                try {
-                    const t0 = Date.now();
-                    const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
-                    const durationMs = Date.now() - t0;
-                    // 支持模型输出 {"interest":...} 或前缀文字 + {"interest":...}
-                    // 去除 markdown 代码块后提取 JSON（支持模型在 JSON 前后有额外文字）
-                    const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-                    const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
-                    let parsed = {};
-                    if (jsonMatch) {
-                        try {
-                            parsed = JSON.parse(jsonMatch[0]);
-                        }
-                        catch { /* keep {} */ }
-                    }
-                    guardResult = {
-                        interest: parsed.interest === 'no' ? 'no' : 'yes',
-                        confirm: ['yes', 'no', 'unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
-                    };
-                    console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0, 100)}"`);
-                    void appendTaskEvent(requestId, 'skill_guard_judgment', {
-                        guardId: activeGuard.id,
-                        skillName: activeGuard.skill_name,
-                        interest: guardResult.interest,
-                        confirm: guardResult.confirm,
-                        durationMs,
-                        rawResult: raw.slice(0, 300),
-                    });
-                }
-                catch (e) {
-                    console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
-                    void appendTaskEvent(requestId, 'skill_guard_judgment', {
-                        guardId: activeGuard.id,
-                        error: e.message,
-                        interest: 'yes',
-                        confirm: 'unclear',
-                    });
-                }
-                const closeGuard = async (reason) => {
-                    await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason=? WHERE id=?`, [reason, activeGuard.id]);
-                    console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuard.id} reason=${reason}`);
-                    void appendTaskEvent(requestId, 'skill_guard_closed', {
-                        guardId: activeGuard.id,
-                        skillName: activeGuard.skill_name,
-                        reason,
-                    });
-                };
-                if (guardResult.interest === 'no') {
-                    // ─ 用户不感兴趣 → 关闭守卫，往下游传 hint，走正常路由 ─
-                    await closeGuard('user_declined');
-                    guardHint = `[守卫提示：用户之前对「${activeGuard.skill_name}」服务不感兴趣，本轮消息与此无关，请正常回答]`;
-                    currentGuardStatus = 'declined'; // Step 5
-                    currentGuardSkillName = activeGuard.skill_name; // Step 5
-                }
-                else if (guardResult.confirm === 'yes') {
-                    // ─ 明确确认 → 关闭守卫，直接执行 skill（跳过 routeMessage）─
-                    await closeGuard('user_confirmed');
-                    console.log(`[SkillGuard] ✅ 用户确认，直接执行 skill ${activeGuard.skill_id}`);
-                    currentGuardStatus = 'confirmed_ticket'; // Step 5（工单将在 handleHealthSkill 创建）
-                    currentGuardSkillName = activeGuard.skill_name; // Step 5
-                    // 将 skill_id 注入 req，让后续代码当作「前端强制指定」处理
-                    req.skill_id = activeGuard.skill_id;
-                }
-                else if (guardResult.confirm === 'unclear') {
-                    // ─ 模糊确认 → 检查是否已经追问过 ─
-                    // 如果用户在提问（消息较长/含问号），让正常路由回答，守卫继续等
-                    // 只有用户发了短暂模糊回复（如「好的」「嗯」）且本次 guard 还没追问过，才触发追问
-                    const isUserAsking = req.content.includes('？') || req.content.includes('?');
-                    // 查是否已对此 guard 追问过
-                    const prevClarifyCount = await db.getAsync(`SELECT COUNT(*) as cnt FROM agent_task_events
-           WHERE event_type='skill_guard_clarify'
-             AND JSON_EXTRACT(payload,'$.guardId')=?`, [activeGuard.id]).then((r) => r?.cnt || 0).catch(() => 0);
-                    if (isUserAsking || prevClarifyCount > 0) {
-                        // 用户在提问，或已追问过 → 走正常路由，守卫保持
-                        console.log(`[SkillGuard] ❓ unclear 但用户在提问或已追问过(${prevClarifyCount}次)，走正常路由`);
-                        void appendTaskEvent(requestId, 'skill_guard_judgment', {
-                            guardId: activeGuard.id,
-                            note: `unclear→正常路由 isUserAsking=${isUserAsking} prevClarify=${prevClarifyCount}`,
-                        });
-                        currentGuardStatus = 'pending_unclear'; // Step 5
-                        currentGuardSkillName = activeGuard.skill_name; // Step 5
-                        // guardHint 不设置，直接 fall through 到正常路由
-                    }
-                    else {
-                        // 用户发了短暂模糊词 且 尚未追问过 → 不再直接发守卫消息，改走 Agent
-                        // Agent 会通过 directive(pending_unclear+isFirstClarify) 自然地引导用户确认
-                        console.log(`[SkillGuard] ❓ 首次模糊确认，交给 Agent 引导（不再守卫直接发消息）`);
-                        void appendTaskEvent(requestId, 'skill_guard_clarify', {
-                            guardId: activeGuard.id,
-                            skillName: activeGuard.skill_name,
-                            note: '首次unclear→交给Agent引导',
-                        });
-                        currentGuardStatus = 'pending_unclear'; // Step 5: Agent 将收到 pending_unclear directive
-                        currentGuardSkillName = activeGuard.skill_name;
-                        isFirstClarify = true; // 首次 unclear → Agent 需要主动引导
-                        // fall through → Agent 根据 directive 生成自然的引导回复
-                    }
-                }
-                else {
-                    // ─ confirm=no（明确不用）→ 关闭守卫，走正常路由 ─
-                    await closeGuard('user_declined_explicit');
-                    guardHint = `[守卫提示：用户明确不使用「${activeGuard.skill_name}」服务，请正常回答]`;
-                    currentGuardStatus = 'declined'; // Step 5
-                    currentGuardSkillName = activeGuard.skill_name; // Step 5
-                }
-            } // end: else(未超轮数)
+                activeGuardRow = activeGuard; // 守卫有效，留给 Step 4 路由后判断
+                currentGuardStatus = 'pending_unclear'; // 预设；Step 4 判断后会更新
+                currentGuardSkillName = activeGuard.skill_name;
+            }
         }
     }
     // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
@@ -1626,6 +1791,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     let selectedSkillId = null;
     let selectedSkillName = null;
     let selectedSkillDesc = null;
+    let routingContent = req.content; // 路由上下文（可能含近期文件摘要）
     let routeConfidence = 'none';
     let routeReason = '';
     if (forcedSkillId) {
@@ -1637,12 +1803,32 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         routeReason = `守卫确认/前端强制 skill_id=${forcedSkillId}`;
         void appendTaskEvent(requestId, 'route_decided', {
             confidence: 'high', skill_id: selectedSkillId, skill_name: selectedSkillName,
-            reason: routeReason, forced: true, durationMs: 0, guardHint: guardHint || null,
+            reason: routeReason, forced: true, durationMs: 0,
         });
     }
     else {
         // 正常路由：单次 AI 调用（v2）
-        const rdResult = await routeDecision(guardHint ? `${req.content}\n${guardHint}` : req.content, req.history || [], req.notes || '', availableSkills, apiKey);
+        // ── 路由前查最近 24h 文件，让路由器知道用户有上传文件 ──────────────────────
+        routingContent = req.content; // 重置（else 分支内会注入文件摘要）
+        if (userId) {
+            try {
+                const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+                const uId = String(userId);
+                const wecomUid = uId.startsWith('wecom_') ? uId : `wecom_${uId}`;
+                const rawUid = uId.replace(/^wecom_/, '');
+                const recentFilesForRoute = await db.allAsync(`SELECT file_name, summary FROM user_recent_files WHERE (user_id=? OR user_id=? OR user_id=?) AND created_at > ? ORDER BY created_at DESC LIMIT 3`, [uId, wecomUid, rawUid, oneDayAgo]);
+                if (recentFilesForRoute.length > 0) {
+                    const fileSummaries = recentFilesForRoute
+                        .map(f => `[文件: ${f.file_name || '附件'} | ${(f.summary || '').slice(0, 80)}]`)
+                        .join('；');
+                    routingContent = `${req.content}\n（用户近期上传的文件：${fileSummaries}）`;
+                    console.log(`[AgentService][RouteContext] 注入 ${recentFilesForRoute.length} 个近期文件到路由上下文`);
+                }
+            }
+            catch { /* 查询失败不影响路由 */ }
+        }
+        const rdResult = await routeDecision(routingContent, // 含文件摘要的路由上下文
+        req.history || [], req.notes || '', availableSkills, apiKey);
         selectedSkillId = rdResult.skill_id;
         selectedSkillName = rdResult.skill_name;
         selectedSkillDesc = rdResult.skill_desc;
@@ -1657,7 +1843,6 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
             durationMs: rdResult.durationMs,
             model: rdResult.model,
             rawResult: rdResult.rawResult?.slice(0, 200),
-            guardHint: guardHint || null,
         });
     }
     // ── Step 3 (v2): confidence=none → 普通聊天，直接 Agent 回复 ─────────────────
@@ -1682,23 +1867,41 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         void appendTaskEvent(requestId, 'reply_sent', { replyLen: chatResult.reply?.length, reply: chatResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
         return chatResult;
     }
-    // ── Step 4 (v2): confidence=high → skill_suggest 推荐流程（v2 暂保留模板，Step8改为Agent）
-    if (routeConfidence === 'high' && selectedSkillId && selectedSkillName && !forcedSkillId) {
-        console.log(`[AgentService] 💡 skill_suggest: skill=${selectedSkillName}(${selectedSkillId}) 高置信度，向用户介绍并询问确认`);
-        currentGuardStatus = 'new_created'; // Step 5: 标记守卫状态
-        currentGuardSkillName = selectedSkillName;
-        // ── Step 4 (v2): 跨skill守卫切换 ─────────────────────────────────────────
-        // 若当前有活跃守卫且是【不同 skill】，先关闭旧守卫，再建新守卫
-        if (ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id !== selectedSkillId) {
-            const oldGuard = ctxSnapshot.activeGuard;
+    // ── Step 4 (v2): 路由后守卫管理 + 守卫 AI 判断（plan 1.2 规则A/B）────────────────────
+    // 规则 A：有活跃守卫 → 无条件运行守卫判断（不依赖 routeConfidence）
+    //   「好的」「不用了」等确认/拒绝消息路由往往返回 none，
+    //   守卫判断必须独立于路由结果运行，才能正确检测 confirm=yes/no。
+    //   例外：跨 skill（routing=high 且指向不同 skill）→ 关闭旧守卫，走规则 B 建新守卫。
+    // 规则 B：无守卫 + routing=high → 新建守卫（Agent 介绍服务）
+    // 1小时内同skill有活跃工单 → 跳过守卫介绍轮，直接走 handleHealthSkill 的状态判断
+    // 覆盖所有非 error/expired 状态：
+    //   waiting_input   → 固定话术「已有工单，点击填写」
+    //   submitted       → 固定话术「处理中」
+    //   processing      → 固定话术「处理中」
+    //   done            → 固定话术「报告已生成」或重做意图→expire→新建
+    //   returned        → 固定话术「已打回，重新填写」
+    //   patient_rejected/patient_confirmed → reply='' → fall-through → 新建工单
+    const oneHourAgoForGuard = Date.now() - 60 * 60 * 1000;
+    const recentTicketStatus = ctxSnapshot.recentTicket?.status || '';
+    const recentTicketSkillId = ctxSnapshot.recentTicket?.skill_id || '';
+    const recentTicketAge = Number(ctxSnapshot.recentTicket?.created_at || 0);
+    const ticketBlocked = !!(ctxSnapshot.recentTicket
+        && recentTicketAge > oneHourAgoForGuard
+        && recentTicketSkillId === selectedSkillId
+        && !['error', 'expired'].includes(recentTicketStatus));
+    // ── 规则 A: 有活跃守卫 → 判断（不管 routing 结果）──────────────────────────────
+    if (activeGuardRow && !forcedSkillId && !ticketBlocked) {
+        // 跨 skill 切换：routing=high 且指向不同 skill → 关闭旧守卫，走规则 B 建新守卫
+        const crossSkill = routeConfidence === 'high' && selectedSkillId && selectedSkillId !== activeGuardRow.skill_id;
+        if (crossSkill) {
             try {
-                await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`, [oldGuard.id]);
-                console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${oldGuard.id} skill=${oldGuard.skill_name}`);
+                await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason='closed_by_new_skill' WHERE id=?`, [activeGuardRow.id]);
+                console.log(`[SkillGuard] 🔄 跨skill切换：关闭旧守卫 id=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
                 void appendTaskEvent(requestId, 'guard_lifecycle', {
                     action: 'closed_by_new_skill',
-                    guardId: oldGuard.id,
-                    oldSkillId: oldGuard.skill_id,
-                    oldSkillName: oldGuard.skill_name,
+                    guardId: activeGuardRow.id,
+                    oldSkillId: activeGuardRow.skill_id,
+                    oldSkillName: activeGuardRow.skill_name,
                     newSkillId: selectedSkillId,
                     newSkillName: selectedSkillName,
                 });
@@ -1706,64 +1909,175 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
             catch (e) {
                 console.warn(`[SkillGuard] ⚠️ 关闭旧守卫失败: ${e.message}`);
             }
+            // currentGuardStatus 保持 'none'，允许规则 B 建新守卫
         }
-        // 若当前已有相同 skill 的活跃守卫，不重复创建
-        const existingSameGuard = ctxSnapshot.activeGuard && ctxSnapshot.activeGuard.skill_id === selectedSkillId
-            ? ctxSnapshot.activeGuard : null;
-        if (existingSameGuard) {
-            console.log(`[SkillGuard] ♻️ 同skill守卫已存在 id=${existingSameGuard.id}，不重复创建`);
-            void appendTaskEvent(requestId, 'guard_lifecycle', {
-                action: 'existing',
-                guardId: existingSameGuard.id,
-                skillId: selectedSkillId,
-                skillName: selectedSkillName,
-                note: 'skill_suggest重入：同skill守卫已存在',
-            });
+        else {
+            // ─ 同 skill 守卫 OR 确认/拒绝消息（routing=none/low）→ 守卫 AI 判断 ────
+            console.log(`[SkillGuard] 🔍 守卫判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name} routeConf=${routeConfidence}`);
+            const historyAfterSuggest = (req.history || [])
+                .filter((h) => !h.ts || h.ts >= activeGuardRow.suggest_ts)
+                .map((h) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
+                .join('\n');
+            const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
+
+背景：AI助手之前向用户推荐了「${activeGuardRow.skill_name}」服务。
+
+对话记录：
+${historyAfterSuggest || '（推荐后暂无其他对话）'}
+
+用户最新消息：「${req.content}」
+
+请判断：
+- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
+- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
+  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
+
+输出示例：
+- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
+- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
+- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
+
+只输出 JSON，不输出任何其他文字：`;
+            const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
+            let guardResult = { interest: 'yes', confirm: 'unclear' };
+            try {
+                const t0 = Date.now();
+                const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
+                const durationMs = Date.now() - t0;
+                const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
+                const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
+                let parsed = {};
+                if (jsonMatch) {
+                    try {
+                        parsed = JSON.parse(jsonMatch[0]);
+                    }
+                    catch { /* keep {} */ }
+                }
+                guardResult = {
+                    interest: parsed.interest === 'no' ? 'no' : 'yes',
+                    confirm: ['yes', 'no', 'unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
+                };
+                console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0, 100)}"`);
+                void appendTaskEvent(requestId, 'skill_guard_judgment', {
+                    guardId: activeGuardRow.id,
+                    skillName: activeGuardRow.skill_name,
+                    interest: guardResult.interest,
+                    confirm: guardResult.confirm,
+                    durationMs,
+                    rawResult: raw.slice(0, 300),
+                });
+            }
+            catch (e) {
+                console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
+                void appendTaskEvent(requestId, 'skill_guard_judgment', {
+                    guardId: activeGuardRow.id,
+                    error: e.message,
+                    interest: 'yes',
+                    confirm: 'unclear',
+                });
+            }
+            const closeGuard = async (reason) => {
+                await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason=? WHERE id=?`, [reason, activeGuardRow.id]);
+                console.log(`[SkillGuard] 🔒 守卫已关闭 id=${activeGuardRow.id} reason=${reason}`);
+                void appendTaskEvent(requestId, 'skill_guard_closed', {
+                    guardId: activeGuardRow.id,
+                    skillName: activeGuardRow.skill_name,
+                    reason,
+                });
+            };
+            if (guardResult.interest === 'no') {
+                await closeGuard('user_declined');
+                currentGuardStatus = 'declined';
+                currentGuardSkillName = activeGuardRow.skill_name;
+                selectedSkillId = null;
+            }
+            else if (guardResult.confirm === 'yes') {
+                await closeGuard('user_confirmed');
+                console.log(`[SkillGuard] ✅ 用户确认，执行 skill ${activeGuardRow.skill_id}`);
+                currentGuardStatus = 'confirmed_ticket';
+                currentGuardSkillName = activeGuardRow.skill_name;
+                // 确认消息本身 routing 可能是 none → 强制注入守卫的 skill
+                selectedSkillId = activeGuardRow.skill_id;
+                selectedSkillName = activeGuardRow.skill_name;
+                selectedSkillDesc = availableSkills.find(s => s.id === activeGuardRow.skill_id)?.description || null;
+            }
+            else if (guardResult.confirm === 'no') {
+                await closeGuard('user_declined_explicit');
+                currentGuardStatus = 'declined';
+                currentGuardSkillName = activeGuardRow.skill_name;
+                selectedSkillId = null;
+            }
+            else {
+                // unclear
+                const isUserAsking = req.content.includes('？') || req.content.includes('?');
+                const prevClarifyCount = await db.getAsync(`SELECT COUNT(*) as cnt FROM agent_task_events
+           WHERE event_type='skill_guard_clarify'
+             AND JSON_EXTRACT(payload,'$.guardId')=?`, [activeGuardRow.id]).then((r) => r?.cnt || 0).catch(() => 0);
+                if (!isUserAsking && prevClarifyCount === 0) {
+                    void appendTaskEvent(requestId, 'skill_guard_clarify', {
+                        guardId: activeGuardRow.id,
+                        skillName: activeGuardRow.skill_name,
+                        note: '首次unclear→交给Agent引导',
+                    });
+                    isFirstClarify = true;
+                }
+                currentGuardStatus = 'pending_unclear';
+                currentGuardSkillName = activeGuardRow.skill_name;
+                selectedSkillId = null;
+            }
         }
-        const fromName = req.meta.from_name || '您';
-        const skillDescText = selectedSkillDesc || '';
-        const suggestMsg = `${fromName}，根据您的需求，我们有一项「${selectedSkillName}」服务可能适合您。\n\n${skillDescText ? `📋 ${skillDescText.slice(0, 100)}${skillDescText.length > 100 ? '…' : ''}\n\n` : ''}请问您需要使用这项服务吗？`;
-        void appendTaskEvent(requestId, 'skill_suggest', {
-            skillId: selectedSkillId, skillName: selectedSkillName, reason: routeReason, suggestMsg,
-        });
-        void appendTaskEvent(requestId, 'reply_sent', {
-            replyLen: suggestMsg.length, reply: suggestMsg.slice(0, 300),
-            channel: delivery.app, recipient: delivery.recipient, note: 'skill_suggest',
-        });
-        const nowTs = Date.now();
-        void updateAgentTask(requestId, {
-            status: 'done', routeType: 'skill_suggest', skillId: selectedSkillId,
-            replyContent: suggestMsg.slice(0, 500), endedAt: nowTs, durationMs: nowTs - taskStartMs,
-        });
-        // 激活守卫
+    }
+    // ── 规则 B: 无守卫（或刚跨skill关闭）+ routing=high → 新建守卫 ──────────────────────────
+    if (currentGuardStatus === 'none'
+        && routeConfidence === 'high' && selectedSkillId && selectedSkillName
+        && !forcedSkillId && !ticketBlocked) {
+        const newGuardSkillId = selectedSkillId;
+        const newGuardSkillName = selectedSkillName;
         const guardId = `guard_${(0, uuid_1.v4)().replace(/-/g, '').slice(0, 12)}`;
+        const nowTs = Date.now();
         try {
             await db.runAsync(`INSERT INTO skill_confirm_guards
           (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`, [guardId, sessionId, userId, selectedSkillId, selectedSkillName,
-                suggestMsg, nowTs, nowTs, nowTs + 30 * 60 * 1000]);
-            console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${selectedSkillName} session=${sessionId}`);
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`, [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
+                '', nowTs, nowTs, nowTs + 30 * 60 * 1000]);
+            console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
             void appendTaskEvent(requestId, 'skill_guard_activated', {
-                guardId, skillId: selectedSkillId, skillName: selectedSkillName,
+                guardId, skillId: newGuardSkillId, skillName: newGuardSkillName,
                 expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
             });
-            // ── Step 4 (v2): guard_lifecycle=new_created 标准事件 ─────────────────
             void appendTaskEvent(requestId, 'guard_lifecycle', {
-                action: 'new_created',
-                guardId,
-                skillId: selectedSkillId,
-                skillName: selectedSkillName,
+                action: 'new_created', guardId,
+                skillId: newGuardSkillId, skillName: newGuardSkillName,
                 expiresAt: new Date(nowTs + 30 * 60 * 1000).toISOString(),
+            });
+            void appendTaskEvent(requestId, 'skill_suggest', {
+                skillId: newGuardSkillId, skillName: newGuardSkillName, reason: routeReason,
             });
         }
         catch (e) {
             console.warn(`[SkillGuard] ⚠️ guard 创建失败: ${e.message}`);
         }
-        return {
-            request_id: requestId, status: 'done', reply: suggestMsg, delivery,
-            reasoning: `Skill「${selectedSkillName}」高置信度匹配，询问用户确认`,
-            route_type: 'skill_suggest',
-        };
+        currentGuardStatus = 'new_created';
+        currentGuardSkillName = newGuardSkillName;
+        // ── 快捷路径：用户已上传文件 + 明确要求分析 → 跳过介绍轮，直接建工单 ──────
+        // 场景：用户先发 PDF（ingest 暂存），再发「能做报告分析吗」
+        // routingContent 里含「用户近期上传的文件」说明文件上下文已注入，
+        // 用户明确要分析，不需要再走一轮「介绍服务→等确认」的守卫流程
+        const hasFileContext = routingContent.includes('用户近期上传的文件');
+        if (hasFileContext) {
+            console.log(`[SkillGuard] ⚡ 文件+分析意图快捷路径：跳过介绍轮，直接建工单 skill=${newGuardSkillName}`);
+            // 关闭刚建的守卫（不需要它了）
+            await db.runAsync(`UPDATE skill_confirm_guards SET status='closed', close_reason='file_direct_ticket' WHERE id=?`, [guardId]).catch(() => { });
+            currentGuardStatus = 'confirmed_ticket';
+            selectedSkillId = newGuardSkillId;
+            selectedSkillName = newGuardSkillName;
+            selectedSkillDesc = availableSkills.find(s => s.id === newGuardSkillId)?.description || null;
+        }
+        else {
+            selectedSkillId = null; // → handleHealthDirect（Agent 通过 directive 介绍服务）
+        }
     }
     const skillRouteLog = {
         available_skills: availableSkills,
@@ -1779,8 +2093,8 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         available_skills: availableSkills.map(s => ({ id: s.id, name: s.name, description: s.description?.slice(0, 100) || '' })),
     });
     // ── confidence=low 时不执行 skill，走 Gemini 直接回复 ──
-    // 只有前端强制指定 skill_id 或 skill_suggest 确认后才执行
-    if (routeConfidence === 'low' && selectedSkillId) {
+    // 例外：守卫已确认（confirmed_ticket）→ 必须执行，不受 confidence=low 影响
+    if (routeConfidence === 'low' && selectedSkillId && currentGuardStatus !== 'confirmed_ticket') {
         console.log(`[AgentService] 📊 confidence=low, 不自动执行 skill「${selectedSkillName}」, 走 Gemini 直接回复`);
         void appendTaskEvent(requestId, 'skill_skipped_low_confidence', {
             skippedSkillId: selectedSkillId,
@@ -1795,6 +2109,15 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     if (selectedSkillId && selectedSkillName) {
         const skillDesc = availableSkills.find(s => s.id === selectedSkillId);
         const _wikiForLog = req._wikiContext;
+        // INT-8 fix: handleHealthSkill 路径也发 agent_context_assembled（便于日志链完整性检查）
+        void appendTaskEvent(requestId, 'agent_context_assembled', {
+            guardStatus: currentGuardStatus,
+            routeSkill: selectedSkillName,
+            confidence: routeConfidence,
+            hasTicket: !!ctxSnapshot.recentTicket,
+            ticketStatus: ctxSnapshot.recentTicket?.status || null,
+            directive: 'handleHealthSkill path',
+        });
         void appendTaskEvent(requestId, 'skill_started', {
             skillId: selectedSkillId,
             skillName: selectedSkillName,
@@ -1813,9 +2136,10 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         // ── Step 5 (v2): 组装 Agent 上下文包 + directive（直接回复路径）──────────────
         // guardStatus 说明：
         //   none           = 无守卫，无工单
-        //   pending_unclear= 守卫存在但用户未确认（保留守卫，继续追问）
+        //   pending_unclear= 守卫存在但用户未确认（保留守卫，Agent 引导确认）
         //   declined       = 用户拒绝了守卫，正常回答
-        //   new_created    = 守卫被新建（但此路径是已跳过 skill_suggest 的 fallthrough，很少见）
+        //   new_created    = 守卫刚新建（Agent 介绍服务，询问是否确认），是正常的首次推荐路径
+        //   confirmed_ticket= 用户已确认 → 走 handleHealthSkill，不到这里
         const agentCtxPkg = assembleAgentContext({
             req,
             routeSkillId: selectedSkillId,
@@ -1838,7 +2162,7 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
             directive: agentCtxPkg.directive?.slice(0, 200) || '',
         });
         console.log(`[AgentService] 📦 agent_context_assembled: guardStatus=${agentCtxPkg.guardStatus} directive=${agentCtxPkg.directive?.slice(0, 50) || '(none)'}`);
-        const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog);
+        const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog, agentCtxPkg);
         const endMs = Date.now();
         void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
         void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });
