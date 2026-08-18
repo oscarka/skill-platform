@@ -1401,7 +1401,7 @@ async function handleHealthSkill(
         if (existing.status === 'waiting_input') {
           reply = `${fromName}，您已有一个等待填写的「${skillName}」工单，请点击链接填写：\n\n${exUrl}`;
         } else if (existing.status === 'submitted' || existing.status === 'processing') {
-          reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳`;
+          reply = `${fromName}，您的「${skillName}」分析正在处理中，请稍候，完成后将通知您 ⏳\n\n如工单长时间未完成，请联系管理员处理。`;
         } else if (existing.status === 'done') {
           // Bug2 修复：检测重做意图（「重来/再做」等）→ expire 旧工单，fall-through 新建
           const wantsRedo = /重新|再做|再来|新的|重来|重做/.test(content);
@@ -1590,7 +1590,7 @@ async function handleHealthSkill(
 
     const ticketUrl  = `${h5Base}?token=${token}`;
     const fileHint = prefilledFiles.length > 0 ? `（已为您自动载入：${prefilledFiles.map(f => f.name).join('、')}）` : '';
-    const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了信息${fileHint}，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}`;
+    const replyToUser = `${fromName}，已为您创建「${skillName}」分析工单 🎉\n\n我们已根据您的健康档案预填了信息${fileHint}，请点击以下链接确认并补充，提交后 AI 将为您生成专属分析报告：\n\n${ticketUrl}\n\n完成提交后 AI 将开始分析，完成后将通知您 ✅ 如长时间未收到结果，请联系管理员处理。`;
 
 
     void appendTaskEvent(requestId, 'ticket_created', {
