@@ -456,25 +456,23 @@ async function submitTicketToSandboxService(
   // 附件处理（支持本地文件上传GCS及已有GCS链接直接透传）
   const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path);
   if (fileInputs.length > 0) {
-    // 用对象数组传附件，包含 url 和 name 字段，让 sandbox 知道文件名/扩展名
-    const attachments: Array<{ url: string; name: string }> = [];
+    const urlList: string[] = [];
     for (const fi of fileInputs) {
       const p = fi.file_path!;
-      const name = (fi.file_name as string | undefined) || 'attachment';
       if (p.startsWith('gs://')) {
-        attachments.push({ url: p, name });
-      } else if (p.startsWith('https://storage.googleapis.com/')) {
-        // ⚠️ 不转成 gs://（sandbox SA 可能没有 wechat-archiver-media 等 bucket 的读权限）
-        // 直接用 HTTPS URL，sandbox 用 wget/requests 下载，无需 GCS 凭据
-        attachments.push({ url: p, name });
+        urlList.push(p);
+      } else if (p.startsWith('https://')) {
+        // ⚠️ 不转成 gs://（sandbox 可能没有对应 bucket 的读权限）
+        // 直接传 HTTPS URL，runner.py 支持 https:// 下载
+        urlList.push(p);
       } else if (fs.existsSync(p)) {
         const gcsPath = await uploadFileToGcs(p, ticketId);
-        if (gcsPath) attachments.push({ url: gcsPath, name });
+        if (gcsPath) urlList.push(gcsPath);
       }
     }
-    if (attachments.length > 0) {
-      testInputs['__attachments__'] = attachments;
-      console.log(`[SandboxService] Injecting ${attachments.length} attachment(s) for ticket ${ticketId}: ${attachments.map(a => a.name).join(', ')}`);
+    if (urlList.length > 0) {
+      testInputs['__attachments__'] = urlList;
+      console.log(`[SandboxService] Injecting ${urlList.length} attachment(s) for ticket ${ticketId}: ${urlList.map(u => u.split('/').pop()).join(', ')}`);
     }
   }
 

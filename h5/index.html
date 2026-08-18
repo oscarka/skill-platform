@@ -221,6 +221,11 @@
       renderFileList();
     };
 
+    window.removePrefilledFile = function(idx) {
+      prefilledFiles.splice(idx, 1);
+      renderFileList();
+    };
+
     // Key alias: skill H5 config may use short keys, backend stores canonical keys
     const PREFILL_ALIAS = {
       name:      ['contact_name', 'patient_name', 'name'],

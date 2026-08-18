@@ -2122,21 +2122,38 @@ def main():
 
     # ── 解析附件内容 ──────────────────────────────────────────────────────────
     def _extract_attachment_content(gcs_path: str) -> str:
-        """从 GCS 下载文件并提取文本内容，返回格式化字符串"""
+        """从 GCS 或 HTTPS URL 下载文件并提取文本内容，返回格式化字符串
+        gcs_path: gs://... 或 https://... URL 字符串
+        """
         import os as _os, tempfile as _tmp
         filename = gcs_path.split("/")[-1]
         ext = _os.path.splitext(filename)[1].lower()
         tmp_path = _os.path.join(_tmp.gettempdir(), f"_attach_{filename}")
         try:
-            from google.cloud import storage as gcs_lib
-            client = gcs_lib.Client()
-            bucket_name = gcs_path.replace("gs://", "").split("/")[0]
-            blob_name = "/".join(gcs_path.replace("gs://", "").split("/")[1:])
-            blob = client.bucket(bucket_name).blob(blob_name)
-            blob.download_to_filename(tmp_path)
-            print(f"[attachment] downloaded {filename} ({_os.path.getsize(tmp_path)} bytes)", flush=True)
+            if gcs_path.startswith('https://'):
+                # HTTPS URL：用 requests 或 urllib 下载（无需 GCS 凭据）
+                try:
+                    import requests as _req
+                    resp = _req.get(gcs_path, timeout=60, stream=True)
+                    resp.raise_for_status()
+                    with open(tmp_path, 'wb') as _f:
+                        for chunk in resp.iter_content(65536):
+                            _f.write(chunk)
+                except ImportError:
+                    import urllib.request as _urlreq
+                    _urlreq.urlretrieve(gcs_path, tmp_path)
+                print(f"[attachment] downloaded via HTTPS {filename} ({_os.path.getsize(tmp_path)} bytes)", flush=True)
+            else:
+                # GCS URL (gs://)
+                from google.cloud import storage as gcs_lib
+                client = gcs_lib.Client()
+                bucket_name = gcs_path.replace("gs://", "").split("/")[0]
+                blob_name = "/".join(gcs_path.replace("gs://", "").split("/")[1:])
+                blob = client.bucket(bucket_name).blob(blob_name)
+                blob.download_to_filename(tmp_path)
+                print(f"[attachment] downloaded via GCS {filename} ({_os.path.getsize(tmp_path)} bytes)", flush=True)
         except Exception as _e:
-            print(f"[attachment] GCS download failed for {filename}: {_e}", flush=True)
+            print(f"[attachment] download failed for {filename}: {_e}", flush=True)
             return f"[附件 {filename} 下载失败: {_e}]"
         try:
             if ext == ".pdf":
@@ -2148,7 +2165,7 @@ def main():
                         text = page.extract_text() or ""
                         if text.strip():
                             pages_text.append(f"--- 第 {i}/{total} 页 ---\n{text.strip()}")
-                content = "\n\n".join(pages_text) or "[PDF 内容为空或无法提取文字]"
+                content = "\n\n".join(pages_text) or "[PDF 内容为空或无法提取文字（可能是扫描件）]"
                 return f"【PDF 文件：{filename}，共 {total} 页】\n{content}"
             elif ext == ".docx":
                 import docx as _docx
