@@ -456,23 +456,28 @@ async function submitTicketToSandboxService(
   // 附件处理（支持本地文件上传GCS及已有GCS链接直接透传）
   const fileInputs = inputs.filter(i => i.field_type === 'file' && i.file_path);
   if (fileInputs.length > 0) {
-    const gcsPaths: string[] = [];
+    // 用对象数组传附件，包含 url 和 name 字段，让 sandbox 知道文件名/扩展名
+    const attachments: Array<{ url: string; name: string }> = [];
     for (const fi of fileInputs) {
       const p = fi.file_path!;
+      const name = (fi.file_name as string | undefined) || 'attachment';
       if (p.startsWith('gs://')) {
-        gcsPaths.push(p);
+        attachments.push({ url: p, name });
       } else if (p.startsWith('https://storage.googleapis.com/')) {
-        gcsPaths.push(p.replace(/^https:\/\/storage\.googleapis\.com\//, 'gs://'));
+        // ⚠️ 不转成 gs://（sandbox SA 可能没有 wechat-archiver-media 等 bucket 的读权限）
+        // 直接用 HTTPS URL，sandbox 用 wget/requests 下载，无需 GCS 凭据
+        attachments.push({ url: p, name });
       } else if (fs.existsSync(p)) {
         const gcsPath = await uploadFileToGcs(p, ticketId);
-        if (gcsPath) gcsPaths.push(gcsPath);
+        if (gcsPath) attachments.push({ url: gcsPath, name });
       }
     }
-    if (gcsPaths.length > 0) {
-      testInputs['__attachments__'] = gcsPaths;
-      console.log(`[SandboxService] Injecting ${gcsPaths.length} GCS attachment(s) for ticket ${ticketId}`);
+    if (attachments.length > 0) {
+      testInputs['__attachments__'] = attachments;
+      console.log(`[SandboxService] Injecting ${attachments.length} attachment(s) for ticket ${ticketId}: ${attachments.map(a => a.name).join(', ')}`);
     }
   }
+
 
 
   const svcUrl = process.env.SERVICE_URL || '';
