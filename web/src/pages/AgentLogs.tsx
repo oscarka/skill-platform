@@ -155,6 +155,10 @@ function AgentTasksPanel() {
   const [tasks, setTasks] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  // Person-centric: selected user, and which task card is expanded (detail view)
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  // selected/events kept for expanded-task detail (timeline rendering reuse)
   const [selected, setSelected] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [filter, setFilter] = useState({ channel: '', status: '' });
@@ -247,6 +251,50 @@ function AgentTasksPanel() {
     const t = setInterval(loadTasks, 8000);
     return () => clearInterval(t);
   }, [filter]);
+
+  // When expandedTaskId changes, load that task's detail + start SSE
+  const loadAndExpand = async (taskId: string | null) => {
+    setExpandedTaskId(taskId);
+    if (!taskId) { setSelected(null); setEvents([]); return; }
+    await loadTaskDetail(taskId);
+  };
+
+  // Toggle a conversation card: if same task clicked again → collapse
+  const toggleCard = (taskId: string) => {
+    if (expandedTaskId === taskId) {
+      loadAndExpand(null);
+    } else {
+      loadAndExpand(taskId);
+    }
+  };
+
+  // Auto-expand processing tasks when user selects a person
+  const selectUser = (userId: string) => {
+    setSelectedUserId(userId);
+    setExpandedTaskId(null);
+    setSelected(null);
+    setEvents([]);
+    // auto-expand the first active (processing/routing/executing) task for this user
+    const active = tasks.find(t => t.user_id === userId &&
+      (t.status === 'executing' || t.status === 'routing'));
+    if (active) loadAndExpand(active.id);
+  };
+
+  // Group tasks by user_id for left panel
+  const userGroups: { userId: string; tasks: any[] }[] = [];
+  const seenUsers = new Set<string>();
+  for (const t of tasks) {
+    const uid = t.user_id || 'unknown';
+    if (!seenUsers.has(uid)) {
+      seenUsers.add(uid);
+      userGroups.push({ userId: uid, tasks: tasks.filter(x => (x.user_id || 'unknown') === uid) });
+    }
+  }
+
+  // Tasks for the selected user (newest first)
+  const userTasks = selectedUserId
+    ? tasks.filter(t => (t.user_id || 'unknown') === selectedUserId)
+    : [];
 
   // Event polling fallback for ticket tasks — catches ticket_result_sent if SSE dropped
   const eventsRef = useRef<any[]>(events);
@@ -344,66 +392,53 @@ function AgentTasksPanel() {
   return (
     <div style={{ display: 'flex', gap: 0, flex: 1, minHeight: 0, overflow: 'hidden', height: '100%' }}>
 
-      {/* ── LEFT PANEL (CUA log style) ──────────────────────────────────────── */}
-      <div style={{ width: 320, display: 'flex', flexDirection: 'column', borderRight: '1px solid #e2e8f0', overflow: 'hidden', background: '#fafafa' }}>
+      {/* ── LEFT PANEL: 人员列表 ─────────────────────────────────────────────── */}
+      <div style={{ width: 240, display: 'flex', flexDirection: 'column', borderRight: '1px solid #e2e8f0', overflow: 'hidden', background: '#fafafa' }}>
         {/* Filter bar */}
         <div style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 6, flexShrink: 0 }}>
           <select value={filter.channel} onChange={e => setFilter(f => ({ ...f, channel: e.target.value }))}
-            style={{ flex: 1, fontSize: '.78rem', padding: '4px 7px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}>
+            style={{ flex: 1, fontSize: '.75rem', padding: '3px 6px', border: '1px solid #d1d5db', borderRadius: 5, background: '#fff' }}>
             <option value="">全部渠道</option>
             <option value="wecom">企业微信</option>
             <option value="api">API</option>
           </select>
-          <select value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))}
-            style={{ flex: 1, fontSize: '.78rem', padding: '4px 7px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}>
-            <option value="">全部状态</option>
-            <option value="done">已完成</option>
-            <option value="failed">失败</option>
-            <option value="executing">执行中</option>
-          </select>
-          <button onClick={loadTasks} style={{ border: '1px solid #d1d5db', background: '#fff', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: '.9rem' }}>↻</button>
+          <button onClick={loadTasks} style={{ border: '1px solid #d1d5db', background: '#fff', borderRadius: 5, padding: '3px 8px', cursor: 'pointer', fontSize: '.9rem' }}>↻</button>
         </div>
-        <div style={{ padding: '4px 12px 6px', fontSize: '.72rem', color: '#9ca3af', flexShrink: 0 }}>共 {total} 条</div>
+        <div style={{ padding: '4px 12px 6px', fontSize: '.7rem', color: '#9ca3af', flexShrink: 0 }}>{userGroups.length} 人 · 共 {total} 条</div>
 
-        {/* Task list */}
+        {/* 人员列表 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {loading && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8' }}>加载中...</div>}
-          {!loading && tasks.length === 0 && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>暂无数据</div>}
-          {tasks.map((t: any) => {
-            const sc = statusCfg[t.status] || { label: t.status, dot: '#94a3b8', bg: '#f1f5f9', text: '#475569' };
-            const isActive = selected?.id === t.id;
-            const initial = (t.user_id || '?')[0].toUpperCase();
+          {loading && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>加载中...</div>}
+          {!loading && userGroups.length === 0 && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>暂无数据</div>}
+          {userGroups.map(({ userId, tasks: uTasks }) => {
+            const isActive = selectedUserId === userId;
+            const hasProcessing = uTasks.some(t => t.status === 'executing' || t.status === 'routing');
+            const initial = (userId || '?')[0].toUpperCase();
+            const latest = uTasks[0];
             return (
-              <div key={t.id} onClick={() => loadTaskDetail(t.id)} style={{
+              <div key={userId} onClick={() => selectUser(userId)} style={{
                 padding: '11px 14px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer',
                 background: isActive ? '#eff6ff' : '#fafafa',
                 borderLeft: `3px solid ${isActive ? '#3b82f6' : 'transparent'}`,
                 transition: 'all .12s',
               }}>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                  {/* Avatar */}
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                   <div style={{
-                    flexShrink: 0, width: 36, height: 36, borderRadius: '50%',
+                    flexShrink: 0, width: 36, height: 36, borderRadius: '50%', position: 'relative',
                     background: isActive ? '#3b82f6' : '#e2e8f0',
                     color: isActive ? '#fff' : '#475569',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontWeight: 700, fontSize: '.9rem',
-                  }}>{initial}</div>
+                  }}>
+                    {initial}
+                    {hasProcessing && <span style={{ position: 'absolute', top: 0, right: 0, width: 9, height: 9, borderRadius: '50%', background: '#3b82f6', border: '2px solid #fafafa' }} />}
+                  </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
-                      <span style={{ fontSize: '.85rem', fontWeight: 600, color: '#1e293b' }}>{t.user_id || '-'}</span>
-                      <span style={{ fontSize: '.68rem', padding: '2px 6px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
-                        <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: sc.dot, marginRight: 3, verticalAlign: 'middle' }} />
-                        {sc.label}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '.78rem', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>
-                      {t.input_content?.slice(0, 45) || '-'}
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, fontSize: '.7rem', color: '#9ca3af' }}>
-                      <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3, fontSize: '.67rem' }}>{t.source_channel || '-'}</span>
-                      {t.route_type && <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3, fontSize: '.67rem' }}>{t.route_type}</span>}
-                      <span style={{ marginLeft: 'auto' }}>{fmtTime(t.started_at)}</span>
+                    <div style={{ fontSize: '.85rem', fontWeight: 600, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userId}</div>
+                    <div style={{ fontSize: '.72rem', color: '#9ca3af', display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 }}>
+                      <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{uTasks.length} 条</span>
+                      {hasProcessing && <span style={{ color: '#3b82f6', fontWeight: 600 }}>⏳ 处理中</span>}
+                      {!hasProcessing && latest && <span>{fmtTime(latest.started_at)}</span>}
                     </div>
                   </div>
                 </div>
@@ -413,58 +448,105 @@ function AgentTasksPanel() {
         </div>
       </div>
 
-      {/* ── RIGHT PANEL: unified timeline ───────────────────────────────────── */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#fff' }}>
-        {!selected && (
+      {/* ── RIGHT PANEL: 对话卡片流 ───────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#f8fafc' }}>
+        {!selectedUserId && (
           <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}>
-            <div style={{ fontSize: 44, marginBottom: 12 }}>💬</div>
-            <div style={{ fontSize: '.9rem' }}>选择左侧会话查看完整链路日志</div>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>👤</div>
+            <div style={{ fontSize: '.9rem' }}>选择左侧人员查看对话记录</div>
           </div>
         )}
-        {selected && <>
-          {/* ── Session header bar ──────────────────────────────────────────── */}
-          <div style={{ padding: '14px 20px', borderBottom: '1px solid #e2e8f0', background: '#fafafa', flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-              {/* Avatar */}
-              <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#3b82f6', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '1rem', flexShrink: 0 }}>
-                {(selected.user_id || '?')[0].toUpperCase()}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                  <span style={{ fontWeight: 700, fontSize: '.95rem', color: '#111827' }}>{selected.user_id}</span>
-                  <span style={{ fontSize: '.72rem', padding: '1px 7px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600 }}>{selected.source_channel}</span>
-                  {(() => {
-                    const sc = statusCfg[selected.status] || { label: selected.status, bg: '#f1f5f9', text: '#64748b' };
-                    return <span style={{ fontSize: '.72rem', padding: '1px 7px', borderRadius: 4, background: sc.bg, color: sc.text, fontWeight: 600 }}>{sc.label}</span>;
-                  })()}
-                  {selected.duration_ms && <span style={{ fontSize: '.72rem', color: '#6b7280' }}>⏱ {fmtDur(selected.duration_ms)}</span>}
-                </div>
-                <div style={{ fontSize: '.85rem', color: '#374151' }}>{selected.input_content}</div>
-              </div>
-              <div style={{ textAlign: 'right', fontSize: '.7rem', color: '#9ca3af', flexShrink: 0 }}>
-                <div><code>{selected.id?.slice(0, 14)}</code></div>
-                {selected.route_type && <div>{selected.route_type}</div>}
-              </div>
-            </div>
-            {/* Failure banner */}
-            {selected.status === 'failed' && selected.error_message && (
-              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 7, padding: '8px 12px', marginTop: 6 }}>
-                <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#dc2626' }}>❌ 失败原因: </span>
-                <span style={{ fontSize: '.78rem', color: '#7f1d1d', fontFamily: 'monospace' }}>{selected.error_message}</span>
-              </div>
-            )}
-            {/* Stats row */}
-            <div style={{ display: 'flex', gap: 12, marginTop: 8, fontSize: '.72rem', color: '#6b7280' }}>
-              <span>📋 事件 {events.length}</span>
-              {selected.job_transcript && <span>🎬 AI步骤 {(selected.job_transcript || []).length}</span>}
-              {selected.context_snapshot?.history_count > 0 && <span>📜 历史 {selected.context_snapshot.history_count} 条</span>}
-              {selected.cua_events?.events && <span style={{ color: selected.cua_events.success !== false ? '#15803d' : '#dc2626' }}>{selected.cua_events.success !== false ? '🤖 CUA 已送达' : '⚠️ CUA 送达异常'} ({selected.cua_events.events.length} 步)</span>}
-            </div>
-          </div>
+        {selectedUserId && (
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无对话记录</div>}
+            {userTasks.map((task: any) => {
+              const isExpanded = expandedTaskId === task.id;
+              const isActive = task.status === 'executing' || task.status === 'routing';
+              const isDone = task.status === 'done';
+              const sc = statusCfg[task.status] || { label: task.status, dot: '#94a3b8', bg: '#f1f5f9', text: '#475569' };
+              // Find reply from events if this is the expanded task
+              const taskEvents = isExpanded ? events : [];
+              const replyEv = taskEvents.find((e: any) => e.event_type === 'reply_sent');
+              const replyText = replyEv?.payload?.reply || (isExpanded ? selected?.reply_content : null);
+              // For collapsed done tasks, try to use stored reply_content
+              const collapsedReply = isDone ? (task.reply_content || null) : null;
 
-          {/* ── Unified timeline scroll area ────────────────────────────────── */}
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 20px' }}>
-            {timeline.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无日志数据</div>}
+              return (
+                <div key={task.id} style={{
+                  background: '#fff',
+                  border: `1px solid ${isActive ? '#bfdbfe' : isExpanded ? '#c7d2fe' : '#e2e8f0'}`,
+                  borderRadius: 12,
+                  overflow: 'hidden',
+                  boxShadow: isExpanded ? '0 2px 12px rgba(59,130,246,.08)' : '0 1px 3px rgba(0,0,0,.04)',
+                  transition: 'all .15s',
+                }}>
+                  {/* Card header — always visible */}
+                  <div
+                    onClick={() => toggleCard(task.id)}
+                    style={{
+                      padding: '12px 16px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 10,
+                      background: isActive ? '#eff6ff' : isExpanded ? '#f5f3ff' : '#fff',
+                      borderBottom: isExpanded ? '1px solid #e2e8f0' : 'none',
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {/* User input */}
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
+                        <span style={{ fontSize: '13px', flexShrink: 0 }}>👤</span>
+                        <span style={{ fontSize: '.85rem', color: '#1e293b', lineHeight: 1.5, fontWeight: 500 }}>
+                          {task.input_content || '-'}
+                        </span>
+                      </div>
+                      {/* Reply preview — show when collapsed or when expanded and reply known */}
+                      {((!isExpanded && collapsedReply) || (isExpanded && replyText)) && (
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                          <span style={{ fontSize: '13px', flexShrink: 0 }}>🤖</span>
+                          <span style={{ fontSize: '.8rem', color: '#374151', lineHeight: 1.5,
+                            overflow: isExpanded ? 'visible' : 'hidden',
+                            display: isExpanded ? 'block' : '-webkit-box',
+                            WebkitLineClamp: isExpanded ? undefined : 2,
+                            WebkitBoxOrient: 'vertical' as any,
+                          }}>
+                            {(isExpanded ? replyText : collapsedReply) || ''}
+                          </span>
+                        </div>
+                      )}
+                      {/* Meta row */}
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '.68rem', padding: '1px 6px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
+                          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: sc.dot, marginRight: 3, verticalAlign: 'middle' }} />
+                          {sc.label}
+                        </span>
+                        {task.source_channel && <span style={{ fontSize: '.67rem', background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{task.source_channel}</span>}
+                        {task.route_type && <span style={{ fontSize: '.67rem', background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{task.route_type}</span>}
+                        {task.duration_ms && <span style={{ fontSize: '.67rem', color: '#9ca3af' }}>⏱ {fmtDur(task.duration_ms)}</span>}
+                        <span style={{ fontSize: '.67rem', color: '#9ca3af', marginLeft: 'auto' }}>{fmtTime(task.started_at)}</span>
+                      </div>
+                    </div>
+                    {/* Expand/collapse toggle */}
+                    <div style={{ flexShrink: 0, width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, background: isExpanded ? '#e0e7ff' : '#f1f5f9', color: isExpanded ? '#4338ca' : '#64748b', fontSize: 11, fontWeight: 700, transition: 'all .15s' }}>
+                      {isExpanded ? '▼' : '▶'}
+                    </div>
+                  </div>
+
+                  {/* Expanded detail: full timeline */}
+                  {isExpanded && selected?.id === task.id && (
+                    <div style={{ padding: '16px 20px' }}>
+                      {/* Stats row */}
+                      <div style={{ display: 'flex', gap: 12, marginBottom: 14, fontSize: '.72rem', color: '#6b7280', flexWrap: 'wrap' }}>
+                        <span>📋 事件 {events.length}</span>
+                        {selected.job_transcript && <span>🎬 AI步骤 {(selected.job_transcript || []).length}</span>}
+                        {selected.context_snapshot?.history_count > 0 && <span>📜 历史 {selected.context_snapshot.history_count} 条</span>}
+                        {selected.cua_events?.events && <span style={{ color: selected.cua_events.success !== false ? '#15803d' : '#dc2626' }}>{selected.cua_events.success !== false ? '🤖 CUA 已送达' : '⚠️ CUA 送达异常'} ({selected.cua_events.events.length} 步)</span>}
+                        {selected.status === 'failed' && selected.error_message && (
+                          <span style={{ color: '#dc2626' }}>❌ {selected.error_message?.slice(0, 60)}</span>
+                        )}
+                      </div>
+                      {timeline.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 24 }}>暂无日志数据</div>}
 
             {timeline.map((item: any, idx: number) => {
               /* ── Context / History item ──────────────────────────────────── */
@@ -1076,7 +1158,7 @@ function AgentTasksPanel() {
               return null;
             })}
 
-            {/* Final reply */}
+            {/* Final reply — show inside expanded card */}
             {selected.reply_content && (
               <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
                 <div style={{ flexShrink: 0, width: 32, height: 32, borderRadius: '50%', background: '#16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px' }}>💬</div>
@@ -1090,12 +1172,18 @@ function AgentTasksPanel() {
                 </div>
               </div>
             )}
+            </div>
+          )}
+                </div>
+              );
+            })}
           </div>
-        </>}
+        )}
       </div>
     </div>
   );
 }
+
 
 
 // ─── Component State ─────────────────────────────────────────────────────────
