@@ -1506,17 +1506,21 @@ async function handleHealthSkill(
     }
 
 
-    // 去重：优先用 content_hash（MD5），hash 未计算完时回退文件名
-    // 同一内容的文件只保留最新一次（LIMIT 5 已按 created_at DESC，first-seen wins）
+    // 去重：优先用 content_hash（MD5），同时也追踪文件名
+    // 防止 A 有 hash、B 同内容但 hash 未计算完，两个都通过的情况
     const seenKeys = new Set<string>();
+    const seenNames = new Set<string>();
     const uniqueRecentFiles = recentFiles.filter((f: any) => {
-      // content_hash 已计算：用 hash 去重（最准确，即使文件名不同）
-      // content_hash 为 null：用文件名去重（兜底，hash 异步计算中）
-      const key = f.content_hash || (f.file_name || '').trim().toLowerCase() || f.file_url;
-      if (seenKeys.has(key)) return false;
+      const name = (f.file_name || '').trim().toLowerCase();
+      const key  = f.content_hash || name || f.file_url;
+      // 有 hash：按 hash 去重；无 hash：按文件名去重
+      // 但不论有没有 hash，只要文件名已出现过就跳过（防止 hash/no-hash 混合漏检）
+      if (seenKeys.has(key) || (name && seenNames.has(name))) return false;
       seenKeys.add(key);
+      if (name) seenNames.add(name);
       return true;
     });
+
 
     const prefilledFiles = uniqueRecentFiles.map((f: any) => ({
       id: f.id,
