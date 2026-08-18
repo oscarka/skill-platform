@@ -449,7 +449,7 @@ function AgentTasksPanel() {
       </div>
 
       {/* ── RIGHT PANEL: 对话卡片流 ───────────────────────────────────────────── */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#f8fafc' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', background: '#f8fafc' }}>
         {!selectedUserId && (
           <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}>
             <div style={{ fontSize: 44, marginBottom: 12 }}>👤</div>
@@ -457,7 +457,7 @@ function AgentTasksPanel() {
           </div>
         )}
         {selectedUserId && (
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
             {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无对话记录</div>}
             {userTasks.map((task: any) => {
               const isExpanded = expandedTaskId === task.id;
@@ -476,59 +476,59 @@ function AgentTasksPanel() {
                   background: '#fff',
                   border: `1px solid ${isActive ? '#bfdbfe' : isExpanded ? '#c7d2fe' : '#e2e8f0'}`,
                   borderRadius: 12,
-                  overflow: 'hidden',
-                  boxShadow: isExpanded ? '0 2px 12px rgba(59,130,246,.08)' : '0 1px 3px rgba(0,0,0,.04)',
+                  boxShadow: isExpanded ? '0 2px 16px rgba(59,130,246,.10)' : '0 1px 4px rgba(0,0,0,.05)',
                   transition: 'all .15s',
+                  flexShrink: 0,
                 }}>
                   {/* Card header — always visible */}
                   <div
                     onClick={() => toggleCard(task.id)}
                     style={{
-                      padding: '12px 16px',
+                      padding: '14px 18px',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'flex-start',
-                      gap: 10,
+                      gap: 12,
                       background: isActive ? '#eff6ff' : isExpanded ? '#f5f3ff' : '#fff',
                       borderBottom: isExpanded ? '1px solid #e2e8f0' : 'none',
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {/* User input */}
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
-                        <span style={{ fontSize: '13px', flexShrink: 0 }}>👤</span>
-                        <span style={{ fontSize: '.85rem', color: '#1e293b', lineHeight: 1.5, fontWeight: 500 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8 }}>
+                        <span style={{ fontSize: '14px', flexShrink: 0, marginTop: 1 }}>👤</span>
+                        <span style={{ fontSize: '.88rem', color: '#1e293b', lineHeight: 1.6, fontWeight: 500 }}>
                           {task.input_content || '-'}
                         </span>
                       </div>
-                      {/* Reply preview — show when collapsed or when expanded and reply known */}
-                      {((!isExpanded && collapsedReply) || (isExpanded && replyText)) && (
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                          <span style={{ fontSize: '13px', flexShrink: 0 }}>🤖</span>
-                          <span style={{ fontSize: '.8rem', color: '#374151', lineHeight: 1.5,
-                            overflow: isExpanded ? 'visible' : 'hidden',
-                            display: isExpanded ? 'block' : '-webkit-box',
-                            WebkitLineClamp: isExpanded ? undefined : 2,
+                      {/* Reply preview — collapsed: show stored reply; expanded: show live reply from events */}
+                      {(!isExpanded && collapsedReply) && (
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', paddingTop: 6, borderTop: '1px solid #f1f5f9', marginTop: 4 }}>
+                          <span style={{ fontSize: '14px', flexShrink: 0, marginTop: 1 }}>🤖</span>
+                          <span style={{ fontSize: '.82rem', color: '#475569', lineHeight: 1.6,
+                            overflow: 'hidden',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
                             WebkitBoxOrient: 'vertical' as any,
                           }}>
-                            {(isExpanded ? replyText : collapsedReply) || ''}
+                            {collapsedReply}
                           </span>
                         </div>
                       )}
                       {/* Meta row */}
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: '.68rem', padding: '1px 6px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' as const }}>
+                        <span style={{ fontSize: '.7rem', padding: '2px 7px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
                           <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: sc.dot, marginRight: 3, verticalAlign: 'middle' }} />
                           {sc.label}
                         </span>
-                        {task.source_channel && <span style={{ fontSize: '.67rem', background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{task.source_channel}</span>}
-                        {task.route_type && <span style={{ fontSize: '.67rem', background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{task.route_type}</span>}
-                        {task.duration_ms && <span style={{ fontSize: '.67rem', color: '#9ca3af' }}>⏱ {fmtDur(task.duration_ms)}</span>}
-                        <span style={{ fontSize: '.67rem', color: '#9ca3af', marginLeft: 'auto' }}>{fmtTime(task.started_at)}</span>
+                        {task.source_channel && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4 }}>{task.source_channel}</span>}
+                        {task.route_type && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4 }}>{task.route_type}</span>}
+                        {task.duration_ms && <span style={{ fontSize: '.68rem', color: '#9ca3af' }}>⏱ {fmtDur(task.duration_ms)}</span>}
+                        <span style={{ fontSize: '.68rem', color: '#9ca3af', marginLeft: 'auto' }}>{fmtTime(task.started_at)}</span>
                       </div>
                     </div>
                     {/* Expand/collapse toggle */}
-                    <div style={{ flexShrink: 0, width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, background: isExpanded ? '#e0e7ff' : '#f1f5f9', color: isExpanded ? '#4338ca' : '#64748b', fontSize: 11, fontWeight: 700, transition: 'all .15s' }}>
+                    <div style={{ flexShrink: 0, width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, background: isExpanded ? '#e0e7ff' : '#f1f5f9', color: isExpanded ? '#4338ca' : '#64748b', fontSize: 12, fontWeight: 700, transition: 'all .15s', marginTop: 2 }}>
                       {isExpanded ? '▼' : '▶'}
                     </div>
                   </div>
