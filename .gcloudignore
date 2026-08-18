@@ -18,6 +18,13 @@ uploads/
 reports/
 server/logs/
 
+# 大型临时目录（不需要上传）
+.tmp_hermes/
+.git/
+.agents/
+tests/
+*.md
+*.log
 # 测试脚本
 test_matrix.sh
 /tmp/
