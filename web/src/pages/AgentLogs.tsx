@@ -393,23 +393,26 @@ function AgentTasksPanel() {
     <div style={{ display: 'flex', gap: 0, flex: 1, minHeight: 0, overflow: 'hidden', height: '100%' }}>
 
       {/* ── LEFT PANEL: 人员列表 ─────────────────────────────────────────────── */}
-      <div style={{ width: 240, display: 'flex', flexDirection: 'column', borderRight: '1px solid #e2e8f0', overflow: 'hidden', background: '#fafafa' }}>
+      <div style={{ width: 260, display: 'flex', flexDirection: 'column', borderRight: '1px solid #e2e8f0', overflow: 'hidden', background: '#f8fafc' }}>
         {/* Filter bar */}
-        <div style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 6, flexShrink: 0 }}>
+        <div style={{ padding: '12px 14px', borderBottom: '1px solid #e2e8f0', background: '#fff', display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
           <select value={filter.channel} onChange={e => setFilter(f => ({ ...f, channel: e.target.value }))}
-            style={{ flex: 1, fontSize: '.75rem', padding: '3px 6px', border: '1px solid #d1d5db', borderRadius: 5, background: '#fff' }}>
+            style={{ flex: 1, fontSize: '.8rem', padding: '6px 10px', border: '1px solid #cbd5e1', borderRadius: 8, background: '#fff', color: '#334155', outline: 'none', cursor: 'pointer' }}>
             <option value="">全部渠道</option>
             <option value="wecom">企业微信</option>
-            <option value="api">API</option>
+            <option value="api">API 接口</option>
           </select>
-          <button onClick={loadTasks} style={{ border: '1px solid #d1d5db', background: '#fff', borderRadius: 5, padding: '3px 8px', cursor: 'pointer', fontSize: '.9rem' }}>↻</button>
+          <button onClick={loadTasks} title="刷新" style={{ border: '1px solid #cbd5e1', background: '#fff', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontSize: '.9rem', color: '#475569', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>↻</button>
         </div>
-        <div style={{ padding: '4px 12px 6px', fontSize: '.7rem', color: '#9ca3af', flexShrink: 0 }}>{userGroups.length} 人 · 共 {total} 条</div>
+        <div style={{ padding: '8px 14px 4px', fontSize: '.72rem', color: '#64748b', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+          <span>人员列表 ({userGroups.length})</span>
+          <span style={{ fontSize: '.7rem', color: '#94a3b8', fontWeight: 400 }}>共 {total} 次对话</span>
+        </div>
 
         {/* 人员列表 */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {loading && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>加载中...</div>}
-          {!loading && userGroups.length === 0 && <div style={{ textAlign: 'center', padding: 24, color: '#94a3b8', fontSize: '.82rem' }}>暂无数据</div>}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0' }}>
+          {loading && <div style={{ textAlign: 'center', padding: 32, color: '#94a3b8', fontSize: '.84rem' }}>加载中...</div>}
+          {!loading && userGroups.length === 0 && <div style={{ textAlign: 'center', padding: 32, color: '#94a3b8', fontSize: '.84rem' }}>暂无数据</div>}
           {userGroups.map(({ userId, tasks: uTasks }) => {
             const isActive = selectedUserId === userId;
             const hasProcessing = uTasks.some(t => t.status === 'executing' || t.status === 'routing');
@@ -417,28 +420,37 @@ function AgentTasksPanel() {
             const latest = uTasks[0];
             return (
               <div key={userId} onClick={() => selectUser(userId)} style={{
-                padding: '11px 14px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer',
-                background: isActive ? '#eff6ff' : '#fafafa',
-                borderLeft: `3px solid ${isActive ? '#3b82f6' : 'transparent'}`,
-                transition: 'all .12s',
+                margin: '3px 8px', padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
+                background: isActive ? '#eff6ff' : '#fff',
+                border: `1px solid ${isActive ? '#bfdbfe' : '#e2e8f0'}`,
+                boxShadow: isActive ? '0 1px 4px rgba(59,130,246,.12)' : '0 1px 2px rgba(0,0,0,.02)',
+                transition: 'all .15s ease',
               }}>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                   <div style={{
-                    flexShrink: 0, width: 36, height: 36, borderRadius: '50%', position: 'relative',
-                    background: isActive ? '#3b82f6' : '#e2e8f0',
+                    flexShrink: 0, width: 38, height: 38, borderRadius: '50%', position: 'relative',
+                    background: isActive ? 'linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)' : '#e2e8f0',
                     color: isActive ? '#fff' : '#475569',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontWeight: 700, fontSize: '.9rem',
+                    fontWeight: 700, fontSize: '.95rem',
+                    boxShadow: isActive ? '0 2px 6px rgba(59,130,246,.25)' : 'none',
                   }}>
                     {initial}
-                    {hasProcessing && <span style={{ position: 'absolute', top: 0, right: 0, width: 9, height: 9, borderRadius: '50%', background: '#3b82f6', border: '2px solid #fafafa' }} />}
+                    {hasProcessing && (
+                      <span style={{
+                        position: 'absolute', top: -1, right: -1, width: 10, height: 10, borderRadius: '50%',
+                        background: '#3b82f6', border: '2px solid #fff', boxShadow: '0 0 0 2px rgba(59,130,246,.25)'
+                      }} />
+                    )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '.85rem', fontWeight: 600, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userId}</div>
-                    <div style={{ fontSize: '.72rem', color: '#9ca3af', display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 }}>
-                      <span style={{ background: '#f1f5f9', color: '#64748b', padding: '0 5px', borderRadius: 3 }}>{uTasks.length} 条</span>
-                      {hasProcessing && <span style={{ color: '#3b82f6', fontWeight: 600 }}>⏳ 处理中</span>}
-                      {!hasProcessing && latest && <span>{fmtTime(latest.started_at)}</span>}
+                    <div style={{ fontSize: '.88rem', fontWeight: 600, color: isActive ? '#1d4ed8' : '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>
+                      {userId}
+                    </div>
+                    <div style={{ fontSize: '.72rem', color: '#64748b', display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span style={{ background: isActive ? '#dbeafe' : '#f1f5f9', color: isActive ? '#1e40af' : '#475569', padding: '1px 6px', borderRadius: 4, fontWeight: 500 }}>{uTasks.length} 条</span>
+                      {hasProcessing && <span style={{ color: '#d97706', fontWeight: 600, background: '#fef3c7', padding: '1px 6px', borderRadius: 4 }}>⏳ 处理中</span>}
+                      {!hasProcessing && latest && <span style={{ color: '#94a3b8' }}>{fmtTime(latest.started_at)}</span>}
                     </div>
                   </div>
                 </div>
@@ -452,8 +464,9 @@ function AgentTasksPanel() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', background: '#f8fafc' }}>
         {!selectedUserId && (
           <div style={{ margin: 'auto', textAlign: 'center', color: '#94a3b8' }}>
-            <div style={{ fontSize: 44, marginBottom: 12 }}>👤</div>
-            <div style={{ fontSize: '.9rem' }}>选择左侧人员查看对话记录</div>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>💬</div>
+            <div style={{ fontSize: '.95rem', fontWeight: 600, color: '#64748b' }}>请选择左侧人员</div>
+            <div style={{ fontSize: '.82rem', color: '#94a3b8', marginTop: 4 }}>点击人员查看完整的对话流与全链路日志</div>
           </div>
         )}
         {selectedUserId && (() => {
@@ -463,53 +476,71 @@ function AgentTasksPanel() {
           const activeCount = userTasks.filter((t: any) => t.status === 'executing' || t.status === 'routing').length;
           const failedCount = userTasks.filter((t: any) => t.status === 'failed').length;
           const latestTask = userTasks[0];
-          const channel = latestTask?.source_channel || '-';
+          const channel = latestTask?.source_channel === 'wecom' ? '企业微信' : (latestTask?.source_channel || '未知渠道');
           return (
             <>
               {/* ── User summary header ───────────────────────────────────── */}
-              <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', background: '#fff', flexShrink: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
+              <div style={{ padding: '18px 24px', borderBottom: '1px solid #e2e8f0', background: '#fff', flexShrink: 0, boxShadow: '0 1px 3px rgba(0,0,0,.02)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
                   {/* Avatar */}
-                  <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '1.1rem', flexShrink: 0, boxShadow: '0 2px 8px rgba(99,102,241,.25)' }}>
+                  <div style={{
+                    width: 48, height: 48, borderRadius: '50%',
+                    background: 'linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%)',
+                    color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontWeight: 700, fontSize: '1.25rem', flexShrink: 0,
+                    boxShadow: '0 4px 12px rgba(99,102,241,.25)',
+                  }}>
                     {initial}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                      <span style={{ fontWeight: 700, fontSize: '1rem', color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedUserId}</span>
-                      <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600, flexShrink: 0 }}>{channel}</span>
-                      {activeCount > 0 && <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#fef3c7', color: '#d97706', fontWeight: 600, flexShrink: 0 }}>⏳ {activeCount} 处理中</span>}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
+                      <span style={{ fontWeight: 700, fontSize: '1.1rem', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedUserId}</span>
+                      <span style={{ fontSize: '.74rem', padding: '2px 9px', borderRadius: 6, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #dbeafe', fontWeight: 600, flexShrink: 0 }}>
+                        {latestTask?.source_channel === 'wecom' ? '💬 ' : '🌐 '}{channel}
+                      </span>
+                      {activeCount > 0 && (
+                        <span style={{ fontSize: '.74rem', padding: '2px 9px', borderRadius: 6, background: '#fffbeb', color: '#b45309', border: '1px solid #fef3c7', fontWeight: 600, flexShrink: 0 }}>
+                          ⏳ {activeCount} 个任务正在处理
+                        </span>
+                      )}
                     </div>
                     {latestTask?.started_at && (
-                      <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>最近活跃：{fmtTime(latestTask.started_at)}</div>
+                      <div style={{ fontSize: '.78rem', color: '#94a3b8' }}>
+                        最近一次互动：<span style={{ color: '#475569', fontWeight: 500 }}>{fmtTime(latestTask.started_at)}</span>
+                      </div>
                     )}
                   </div>
                 </div>
+
                 {/* Stats row */}
-                <div style={{ display: 'flex', gap: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 12 }}>
                   {[
-                    { label: '全部对话', value: totalCount, color: '#6366f1', bg: '#f5f3ff' },
-                    { label: '已完成', value: doneCount, color: '#16a34a', bg: '#f0fdf4' },
-                    ...(activeCount > 0 ? [{ label: '处理中', value: activeCount, color: '#d97706', bg: '#fffbeb' }] : []),
-                    ...(failedCount > 0 ? [{ label: '失败', value: failedCount, color: '#dc2626', bg: '#fef2f2' }] : []),
+                    { label: '全部对话', value: totalCount, color: '#4f46e5', bg: '#f5f3ff', border: '#ede9fe' },
+                    { label: '已完成', value: doneCount, color: '#16a34a', bg: '#f0fdf4', border: '#dcfce7' },
+                    ...(activeCount > 0 ? [{ label: '处理中', value: activeCount, color: '#d97706', bg: '#fffbeb', border: '#fef3c7' }] : []),
+                    ...(failedCount > 0 ? [{ label: '失败', value: failedCount, color: '#dc2626', bg: '#fef2f2', border: '#fee2e2' }] : []),
                   ].map(s => (
-                    <div key={s.label} style={{ flex: 1, background: s.bg, borderRadius: 10, padding: '10px 14px', textAlign: 'center' }}>
-                      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.value}</div>
-                      <div style={{ fontSize: '.7rem', color: '#6b7280', marginTop: 3 }}>{s.label}</div>
+                    <div key={s.label} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 10, padding: '10px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '1.45rem', fontWeight: 800, color: s.color, lineHeight: 1.1 }}>{s.value}</div>
+                      <div style={{ fontSize: '.72rem', color: '#64748b', marginTop: 4, fontWeight: 500 }}>{s.label}</div>
                     </div>
                   ))}
                 </div>
+
                 {/* Latest message */}
                 {latestTask?.input_content && (
-                  <div style={{ marginTop: 12, padding: '9px 12px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-                    <div style={{ fontSize: '.68rem', color: '#9ca3af', marginBottom: 3 }}>最近一条消息</div>
-                    <div style={{ fontSize: '.82rem', color: '#374151', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{latestTask.input_content}</div>
+                  <div style={{ marginTop: 14, padding: '10px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0', borderLeft: '3px solid #3b82f6' }}>
+                    <div style={{ fontSize: '.7rem', color: '#64748b', fontWeight: 600, marginBottom: 4 }}>💬 最近提问</div>
+                    <div style={{ fontSize: '.84rem', color: '#1e293b', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>
+                      {latestTask.input_content}
+                    </div>
                   </div>
                 )}
               </div>
 
               {/* ── Conversation cards ──────────────────────────────────── */}
-              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无对话记录</div>}
+              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 40 }}>暂无对话记录</div>}
             {userTasks.map((task: any) => {
               const isExpanded = expandedTaskId === task.id;
               const isActive = task.status === 'executing' || task.status === 'routing';
@@ -525,76 +556,115 @@ function AgentTasksPanel() {
               return (
                 <div key={task.id} style={{
                   background: '#fff',
-                  border: `1px solid ${isActive ? '#bfdbfe' : isExpanded ? '#c7d2fe' : '#e2e8f0'}`,
-                  borderRadius: 12,
-                  boxShadow: isExpanded ? '0 2px 16px rgba(59,130,246,.10)' : '0 1px 4px rgba(0,0,0,.05)',
-                  transition: 'all .15s',
+                  border: isExpanded ? '1.5px solid #818cf8' : isActive ? '1.5px solid #93c5fd' : '1px solid #e2e8f0',
+                  borderRadius: 14,
+                  boxShadow: isExpanded ? '0 8px 24px -4px rgba(99,102,241,.12)' : '0 1px 3px rgba(0,0,0,.04)',
+                  transition: 'all .2s ease',
                   flexShrink: 0,
+                  overflow: 'hidden',
                 }}>
                   {/* Card header — always visible */}
                   <div
                     onClick={() => toggleCard(task.id)}
                     style={{
-                      padding: '14px 18px',
+                      padding: '16px 20px',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'flex-start',
-                      gap: 12,
-                      background: isActive ? '#eff6ff' : isExpanded ? '#f5f3ff' : '#fff',
+                      gap: 14,
+                      background: isActive ? '#f0f7ff' : isExpanded ? '#faf5ff' : '#fff',
                       borderBottom: isExpanded ? '1px solid #e2e8f0' : 'none',
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {/* User input */}
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8 }}>
-                        <span style={{ fontSize: '14px', flexShrink: 0, marginTop: 1 }}>👤</span>
-                        <span style={{ fontSize: '.88rem', color: '#1e293b', lineHeight: 1.6, fontWeight: 500 }}>
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 10 }}>
+                        <span style={{
+                          flexShrink: 0, width: 26, height: 26, borderRadius: 6,
+                          background: '#e0e7ff', color: '#4338ca',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '13px', marginTop: 1
+                        }}>👤</span>
+                        <span style={{ fontSize: '.92rem', color: '#0f172a', lineHeight: 1.6, fontWeight: 600 }}>
                           {task.input_content || '-'}
                         </span>
                       </div>
+
                       {/* Reply preview — collapsed: show stored reply; expanded: show live reply from events */}
                       {(!isExpanded && collapsedReply) && (
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', paddingTop: 6, borderTop: '1px solid #f1f5f9', marginTop: 4 }}>
-                          <span style={{ fontSize: '14px', flexShrink: 0, marginTop: 1 }}>🤖</span>
-                          <span style={{ fontSize: '.82rem', color: '#475569', lineHeight: 1.6,
+                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', paddingTop: 8, borderTop: '1px solid #f1f5f9', marginTop: 6 }}>
+                          <span style={{
+                            flexShrink: 0, width: 26, height: 26, borderRadius: 6,
+                            background: '#dcfce7', color: '#15803d',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: '13px', marginTop: 1
+                          }}>🤖</span>
+                          <span style={{
+                            fontSize: '.84rem', color: '#334155', lineHeight: 1.6,
                             overflow: 'hidden',
                             display: '-webkit-box',
                             WebkitLineClamp: 2,
                             WebkitBoxOrient: 'vertical' as any,
+                            background: '#f8fafc', padding: '8px 12px', borderRadius: 8, border: '1px solid #f1f5f9',
+                            flex: 1,
                           }}>
                             {collapsedReply}
                           </span>
                         </div>
                       )}
+
                       {/* Meta row */}
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' as const }}>
-                        <span style={{ fontSize: '.7rem', padding: '2px 7px', borderRadius: 10, background: sc.bg, color: sc.text, fontWeight: 600 }}>
-                          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: sc.dot, marginRight: 3, verticalAlign: 'middle' }} />
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' as const }}>
+                        <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 12, background: sc.bg, color: sc.text, fontWeight: 600 }}>
+                          <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: sc.dot, marginRight: 4, verticalAlign: 'middle' }} />
                           {sc.label}
                         </span>
-                        {task.source_channel && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4 }}>{task.source_channel}</span>}
-                        {task.route_type && <span style={{ fontSize: '.68rem', background: '#f1f5f9', color: '#64748b', padding: '1px 6px', borderRadius: 4 }}>{task.route_type}</span>}
-                        {task.duration_ms && <span style={{ fontSize: '.68rem', color: '#9ca3af' }}>⏱ {fmtDur(task.duration_ms)}</span>}
-                        <span style={{ fontSize: '.68rem', color: '#9ca3af', marginLeft: 'auto' }}>{fmtTime(task.started_at)}</span>
+                        {task.source_channel && (
+                          <span style={{ fontSize: '.7rem', background: '#f1f5f9', color: '#475569', padding: '2px 7px', borderRadius: 5, fontWeight: 500 }}>
+                            {task.source_channel === 'wecom' ? '企业微信' : task.source_channel}
+                          </span>
+                        )}
+                        {task.route_type && (
+                          <span style={{ fontSize: '.7rem', background: task.route_type === 'health' ? '#f5f3ff' : '#f1f5f9', color: task.route_type === 'health' ? '#6d28d9' : '#475569', padding: '2px 7px', borderRadius: 5, fontWeight: 500 }}>
+                            {task.route_type === 'health' ? '🏥 健康咨询' : task.route_type}
+                          </span>
+                        )}
+                        {task.duration_ms && <span style={{ fontSize: '.7rem', color: '#94a3b8' }}>⏱ {fmtDur(task.duration_ms)}</span>}
+                        <span style={{ fontSize: '.7rem', color: '#94a3b8', marginLeft: 'auto', fontFamily: 'monospace' }}>{fmtTime(task.started_at)}</span>
                       </div>
                     </div>
+
                     {/* Expand/collapse toggle */}
-                    <div style={{ flexShrink: 0, width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, background: isExpanded ? '#e0e7ff' : '#f1f5f9', color: isExpanded ? '#4338ca' : '#64748b', fontSize: 12, fontWeight: 700, transition: 'all .15s', marginTop: 2 }}>
+                    <div style={{
+                      flexShrink: 0, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      borderRadius: '50%',
+                      background: isExpanded ? '#4f46e5' : '#f1f5f9',
+                      color: isExpanded ? '#fff' : '#64748b',
+                      fontSize: 11, fontWeight: 700, transition: 'all .2s ease',
+                      boxShadow: isExpanded ? '0 2px 6px rgba(79,70,229,.3)' : 'none',
+                      marginTop: 2,
+                    }}>
                       {isExpanded ? '▼' : '▶'}
                     </div>
                   </div>
 
                   {/* Expanded detail: full timeline */}
                   {isExpanded && selected?.id === task.id && (
-                    <div style={{ padding: '16px 20px' }}>
+                    <div style={{ padding: '20px 24px', background: '#fafbfc', borderTop: '1px solid #f1f5f9' }}>
                       {/* Stats row */}
-                      <div style={{ display: 'flex', gap: 12, marginBottom: 14, fontSize: '.72rem', color: '#6b7280', flexWrap: 'wrap' }}>
-                        <span>📋 事件 {events.length}</span>
-                        {selected.job_transcript && <span>🎬 AI步骤 {(selected.job_transcript || []).length}</span>}
-                        {selected.context_snapshot?.history_count > 0 && <span>📜 历史 {selected.context_snapshot.history_count} 条</span>}
-                        {selected.cua_events?.events && <span style={{ color: selected.cua_events.success !== false ? '#15803d' : '#dc2626' }}>{selected.cua_events.success !== false ? '🤖 CUA 已送达' : '⚠️ CUA 送达异常'} ({selected.cua_events.events.length} 步)</span>}
+                      <div style={{ display: 'flex', gap: 10, marginBottom: 16, fontSize: '.74rem', color: '#64748b', flexWrap: 'wrap' }}>
+                        <span style={{ background: '#fff', padding: '3px 8px', borderRadius: 6, border: '1px solid #e2e8f0' }}>📋 事件 {events.length}</span>
+                        {selected.job_transcript && <span style={{ background: '#fff', padding: '3px 8px', borderRadius: 6, border: '1px solid #e2e8f0' }}>🎬 AI步骤 {(selected.job_transcript || []).length}</span>}
+                        {selected.context_snapshot?.history_count > 0 && <span style={{ background: '#fff', padding: '3px 8px', borderRadius: 6, border: '1px solid #e2e8f0' }}>📜 历史 {selected.context_snapshot.history_count} 条</span>}
+                        {selected.cua_events?.events && (
+                          <span style={{ background: '#fff', padding: '3px 8px', borderRadius: 6, border: '1px solid #e2e8f0', color: selected.cua_events.success !== false ? '#15803d' : '#dc2626' }}>
+                            {selected.cua_events.success !== false ? '🤖 CUA 已送达' : '⚠️ CUA 送达异常'} ({selected.cua_events.events.length} 步)
+                          </span>
+                        )}
                         {selected.status === 'failed' && selected.error_message && (
-                          <span style={{ color: '#dc2626' }}>❌ {selected.error_message?.slice(0, 60)}</span>
+                          <span style={{ color: '#dc2626', background: '#fef2f2', padding: '3px 8px', borderRadius: 6, border: '1px solid #fecaca' }}>
+                            ❌ {selected.error_message?.slice(0, 60)}
+                          </span>
                         )}
                       </div>
                       {timeline.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 24 }}>暂无日志数据</div>}
