@@ -456,9 +456,60 @@ function AgentTasksPanel() {
             <div style={{ fontSize: '.9rem' }}>选择左侧人员查看对话记录</div>
           </div>
         )}
-        {selectedUserId && (
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无对话记录</div>}
+        {selectedUserId && (() => {
+          const initial = (selectedUserId || '?')[0].toUpperCase();
+          const totalCount = userTasks.length;
+          const doneCount = userTasks.filter((t: any) => t.status === 'done').length;
+          const activeCount = userTasks.filter((t: any) => t.status === 'executing' || t.status === 'routing').length;
+          const failedCount = userTasks.filter((t: any) => t.status === 'failed').length;
+          const latestTask = userTasks[0];
+          const channel = latestTask?.source_channel || '-';
+          return (
+            <>
+              {/* ── User summary header ───────────────────────────────────── */}
+              <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', background: '#fff', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
+                  {/* Avatar */}
+                  <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '1.1rem', flexShrink: 0, boxShadow: '0 2px 8px rgba(99,102,241,.25)' }}>
+                    {initial}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontWeight: 700, fontSize: '1rem', color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedUserId}</span>
+                      <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#dbeafe', color: '#1d4ed8', fontWeight: 600, flexShrink: 0 }}>{channel}</span>
+                      {activeCount > 0 && <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#fef3c7', color: '#d97706', fontWeight: 600, flexShrink: 0 }}>⏳ {activeCount} 处理中</span>}
+                    </div>
+                    {latestTask?.started_at && (
+                      <div style={{ fontSize: '.75rem', color: '#9ca3af' }}>最近活跃：{fmtTime(latestTask.started_at)}</div>
+                    )}
+                  </div>
+                </div>
+                {/* Stats row */}
+                <div style={{ display: 'flex', gap: 16 }}>
+                  {[
+                    { label: '全部对话', value: totalCount, color: '#6366f1', bg: '#f5f3ff' },
+                    { label: '已完成', value: doneCount, color: '#16a34a', bg: '#f0fdf4' },
+                    ...(activeCount > 0 ? [{ label: '处理中', value: activeCount, color: '#d97706', bg: '#fffbeb' }] : []),
+                    ...(failedCount > 0 ? [{ label: '失败', value: failedCount, color: '#dc2626', bg: '#fef2f2' }] : []),
+                  ].map(s => (
+                    <div key={s.label} style={{ flex: 1, background: s.bg, borderRadius: 10, padding: '10px 14px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.value}</div>
+                      <div style={{ fontSize: '.7rem', color: '#6b7280', marginTop: 3 }}>{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Latest message */}
+                {latestTask?.input_content && (
+                  <div style={{ marginTop: 12, padding: '9px 12px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                    <div style={{ fontSize: '.68rem', color: '#9ca3af', marginBottom: 3 }}>最近一条消息</div>
+                    <div style={{ fontSize: '.82rem', color: '#374151', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{latestTask.input_content}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Conversation cards ──────────────────────────────────── */}
+              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 32 }}>暂无对话记录</div>}
             {userTasks.map((task: any) => {
               const isExpanded = expandedTaskId === task.id;
               const isActive = task.status === 'executing' || task.status === 'routing';
@@ -1177,9 +1228,11 @@ function AgentTasksPanel() {
                 </div>
               );
             })}
-          </div>
-        )}
-      </div>
+              </div> {/* end cards scroll div */}
+            </>
+          );
+        })()} {/* end IIFE for selectedUserId */}
+      </div> {/* end right panel */}
     </div>
   );
 }
