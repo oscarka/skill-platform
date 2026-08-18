@@ -369,6 +369,25 @@ agentRouter.get('/tasks/:id', async (req, res) => {
   }
 });
 
+// ─── PATCH /api/v1/agent/tasks/:id — 更新任务状态 ───────────────────────────
+
+agentRouter.patch('/tasks/:id', async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const { status, errorMessage } = req.body;
+    if (!status) return res.status(400).json({ error: 'status is required' });
+    await updateAgentTask(taskId, {
+      status,
+      errorMessage,
+      endedAt: (status === 'done' || status === 'failed' || status === 'error') ? Date.now() : undefined,
+    });
+    res.json({ ok: true, taskId, status });
+  } catch (err: any) {
+    console.error('[AgentRoute] PATCH /tasks/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── GET /api/v1/agent/tasks/:id/stream — SSE 实时事件推送 ───────────────────
 
 agentRouter.get('/tasks/:id/stream', async (req, res) => {

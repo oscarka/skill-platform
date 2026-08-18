@@ -383,10 +383,16 @@ function AgentTasksPanel() {
 
   // ── Status config ────────────────────────────────────────────────────────────
   const statusCfg: Record<string, { label: string; dot: string; bg: string; text: string }> = {
-    done:      { label: '完成', dot: '#22c55e', bg: '#dcfce7', text: '#15803d' },
-    failed:    { label: '失败', dot: '#ef4444', bg: '#fee2e2', text: '#dc2626' },
-    executing: { label: '执行中', dot: '#f59e0b', bg: '#fef3c7', text: '#d97706' },
-    routing:   { label: '路由中', dot: '#8b5cf6', bg: '#ede9fe', text: '#6d28d9' },
+    done:          { label: '已完成', dot: '#22c55e', bg: '#dcfce7', text: '#15803d' },
+    failed:        { label: '失败',   dot: '#ef4444', bg: '#fee2e2', text: '#dc2626' },
+    error:         { label: '失败',   dot: '#ef4444', bg: '#fee2e2', text: '#dc2626' },
+    executing:     { label: '执行中', dot: '#3b82f6', bg: '#eff6ff', text: '#1d4ed8' },
+    processing:    { label: '处理中', dot: '#3b82f6', bg: '#eff6ff', text: '#1d4ed8' },
+    routing:       { label: '路由中', dot: '#8b5cf6', bg: '#ede9fe', text: '#6d28d9' },
+    submitted:     { label: '已提交', dot: '#6366f1', bg: '#e0e7ff', text: '#4338ca' },
+    waiting_input: { label: '待填写', dot: '#f59e0b', bg: '#fef3c7', text: '#d97706' },
+    returned:      { label: '已打回', dot: '#f59e0b', bg: '#fef3c7', text: '#d97706' },
+    expired:       { label: '已过期', dot: '#94a3b8', bg: '#f1f5f9', text: '#64748b' },
   };
 
   return (
@@ -415,7 +421,7 @@ function AgentTasksPanel() {
           {!loading && userGroups.length === 0 && <div style={{ textAlign: 'center', padding: 32, color: '#94a3b8', fontSize: '.84rem' }}>暂无数据</div>}
           {userGroups.map(({ userId, tasks: uTasks }) => {
             const isActive = selectedUserId === userId;
-            const hasProcessing = uTasks.some(t => t.status === 'executing' || t.status === 'routing');
+            const hasProcessing = uTasks.some(t => t.status === 'executing' || t.status === 'routing' || t.status === 'processing');
             const initial = (userId || '?')[0].toUpperCase();
             const latest = uTasks[0];
             return (
@@ -473,77 +479,71 @@ function AgentTasksPanel() {
           const initial = (selectedUserId || '?')[0].toUpperCase();
           const totalCount = userTasks.length;
           const doneCount = userTasks.filter((t: any) => t.status === 'done').length;
-          const activeCount = userTasks.filter((t: any) => t.status === 'executing' || t.status === 'routing').length;
-          const failedCount = userTasks.filter((t: any) => t.status === 'failed').length;
+          const activeCount = userTasks.filter((t: any) => t.status === 'executing' || t.status === 'routing' || t.status === 'processing').length;
+          const failedCount = userTasks.filter((t: any) => t.status === 'failed' || t.status === 'error').length;
           const latestTask = userTasks[0];
           const channel = latestTask?.source_channel === 'wecom' ? '企业微信' : (latestTask?.source_channel || '未知渠道');
           return (
             <>
-              {/* ── User summary header ───────────────────────────────────── */}
-              <div style={{ padding: '18px 24px', borderBottom: '1px solid #e2e8f0', background: '#fff', flexShrink: 0, boxShadow: '0 1px 3px rgba(0,0,0,.02)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-                  {/* Avatar */}
+              {/* ── User summary header (Compact & Sleek) ───────────────────── */}
+              <div style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0', background: '#fff', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, boxShadow: '0 1px 2px rgba(0,0,0,.02)' }}>
+                {/* Left: Avatar + User Info */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <div style={{
-                    width: 48, height: 48, borderRadius: '50%',
+                    width: 38, height: 38, borderRadius: '50%',
                     background: 'linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%)',
                     color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontWeight: 700, fontSize: '1.25rem', flexShrink: 0,
-                    boxShadow: '0 4px 12px rgba(99,102,241,.25)',
+                    fontWeight: 700, fontSize: '1rem', flexShrink: 0,
+                    boxShadow: '0 2px 6px rgba(99,102,241,.2)',
                   }}>
                     {initial}
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
-                      <span style={{ fontWeight: 700, fontSize: '1.1rem', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedUserId}</span>
-                      <span style={{ fontSize: '.74rem', padding: '2px 9px', borderRadius: 6, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #dbeafe', fontWeight: 600, flexShrink: 0 }}>
-                        {latestTask?.source_channel === 'wecom' ? '💬 ' : '🌐 '}{channel}
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontWeight: 700, fontSize: '.95rem', color: '#0f172a' }}>{selectedUserId}</span>
+                      <span style={{ fontSize: '.72rem', padding: '1px 7px', borderRadius: 4, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #dbeafe', fontWeight: 500 }}>
+                        {latestTask?.source_channel === 'wecom' ? '企业微信' : channel}
                       </span>
-                      {activeCount > 0 && (
-                        <span style={{ fontSize: '.74rem', padding: '2px 9px', borderRadius: 6, background: '#fffbeb', color: '#b45309', border: '1px solid #fef3c7', fontWeight: 600, flexShrink: 0 }}>
-                          ⏳ {activeCount} 个任务正在处理
-                        </span>
-                      )}
                     </div>
                     {latestTask?.started_at && (
-                      <div style={{ fontSize: '.78rem', color: '#94a3b8' }}>
-                        最近一次互动：<span style={{ color: '#475569', fontWeight: 500 }}>{fmtTime(latestTask.started_at)}</span>
+                      <div style={{ fontSize: '.72rem', color: '#94a3b8', marginTop: 1 }}>
+                        最近活跃：{fmtTime(latestTask.started_at)}
                       </div>
                     )}
                   </div>
                 </div>
 
-                {/* Stats row */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 12 }}>
-                  {[
-                    { label: '全部对话', value: totalCount, color: '#4f46e5', bg: '#f5f3ff', border: '#ede9fe' },
-                    { label: '已完成', value: doneCount, color: '#16a34a', bg: '#f0fdf4', border: '#dcfce7' },
-                    ...(activeCount > 0 ? [{ label: '处理中', value: activeCount, color: '#d97706', bg: '#fffbeb', border: '#fef3c7' }] : []),
-                    ...(failedCount > 0 ? [{ label: '失败', value: failedCount, color: '#dc2626', bg: '#fef2f2', border: '#fee2e2' }] : []),
-                  ].map(s => (
-                    <div key={s.label} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 10, padding: '10px 14px', textAlign: 'center' }}>
-                      <div style={{ fontSize: '1.45rem', fontWeight: 800, color: s.color, lineHeight: 1.1 }}>{s.value}</div>
-                      <div style={{ fontSize: '.72rem', color: '#64748b', marginTop: 4, fontWeight: 500 }}>{s.label}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Latest message */}
-                {latestTask?.input_content && (
-                  <div style={{ marginTop: 14, padding: '10px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0', borderLeft: '3px solid #3b82f6' }}>
-                    <div style={{ fontSize: '.7rem', color: '#64748b', fontWeight: 600, marginBottom: 4 }}>💬 最近提问</div>
-                    <div style={{ fontSize: '.84rem', color: '#1e293b', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>
-                      {latestTask.input_content}
-                    </div>
+                {/* Right: Inline Compact Stat Pills */}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: '.76rem' }}>
+                    <span style={{ color: '#64748b' }}>全部</span>
+                    <strong style={{ color: '#4f46e5', fontWeight: 700 }}>{totalCount}</strong>
                   </div>
-                )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8, background: '#f0fdf4', border: '1px solid #dcfce7', fontSize: '.76rem' }}>
+                    <span style={{ color: '#166534' }}>已完成</span>
+                    <strong style={{ color: '#16a34a', fontWeight: 700 }}>{doneCount}</strong>
+                  </div>
+                  {activeCount > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fef3c7', fontSize: '.76rem' }}>
+                      <span style={{ color: '#92400e' }}>处理中</span>
+                      <strong style={{ color: '#d97706', fontWeight: 700 }}>{activeCount}</strong>
+                    </div>
+                  )}
+                  {failedCount > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8, background: '#fef2f2', border: '1px solid #fee2e2', fontSize: '.76rem' }}>
+                      <span style={{ color: '#991b1b' }}>失败</span>
+                      <strong style={{ color: '#dc2626', fontWeight: 700 }}>{failedCount}</strong>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* ── Conversation cards ──────────────────────────────────── */}
-              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {userTasks.length === 0 && <div style={{ color: '#94a3b8', textAlign: 'center', padding: 40 }}>暂无对话记录</div>}
             {userTasks.map((task: any) => {
               const isExpanded = expandedTaskId === task.id;
-              const isActive = task.status === 'executing' || task.status === 'routing';
+              const isActive = task.status === 'executing' || task.status === 'routing' || task.status === 'processing';
               const isDone = task.status === 'done';
               const sc = statusCfg[task.status] || { label: task.status, dot: '#94a3b8', bg: '#f1f5f9', text: '#475569' };
               // Find reply from events if this is the expanded task
@@ -629,10 +629,13 @@ function AgentTasksPanel() {
                             {task.route_type === 'health' ? '🏥 健康咨询' : task.route_type}
                           </span>
                         )}
-                        {task.duration_ms && <span style={{ fontSize: '.7rem', color: '#94a3b8' }}>⏱ {fmtDur(task.duration_ms)}</span>}
+                        {typeof task.duration_ms === 'number' && task.duration_ms > 0 ? (
+                          <span style={{ fontSize: '.7rem', color: '#94a3b8' }}>⏱ {fmtDur(task.duration_ms)}</span>
+                        ) : null}
                         <span style={{ fontSize: '.7rem', color: '#94a3b8', marginLeft: 'auto', fontFamily: 'monospace' }}>{fmtTime(task.started_at)}</span>
                       </div>
                     </div>
+
 
                     {/* Expand/collapse toggle */}
                     <div style={{

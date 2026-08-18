@@ -238,6 +238,17 @@ ticketRouter.put('/:id/status', async (req, res) => {
       `UPDATE tickets SET status=?, return_reason=COALESCE(?,return_reason), updated_at=? WHERE id=?`,
       [status, return_reason ?? null, now, ticket.id]
     );
+
+    // 同步更新对应的 Agent Task 状态，防止工单已关闭但任务仍显示 processing
+    if (ticket.request_id) {
+      const taskStatus = (status === 'error' || status === 'expired') ? 'failed' : (status === 'done' ? 'done' : status);
+      void updateAgentTask(ticket.request_id, {
+        status: taskStatus as any,
+        errorMessage: return_reason || (status === 'error' ? '工单已手动中止/出错' : undefined),
+        endedAt: now,
+      });
+    }
+
     const updated = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [ticket.id]);
     res.json({ ticket: await ticketToResponse(updated!) });
   } catch (err: any) {
