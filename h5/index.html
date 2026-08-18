@@ -266,14 +266,22 @@
       isSelf = (val === 'self');
       const fields = h5Config?.fields || [];
       const prefill = isSelf ? prefilledValues : {
-        // 家人时保留联系人姓名，其余清空
-        contact_name: prefilledValues.contact_name || '',
+        // 家人时保留联系人信息，患者信息清空
+        contact_name:  prefilledValues.contact_name || '',
         contact_phone: prefilledValues.contact_phone || '',
+        name:          '',   // 清空患者姓名（两种 key 都处理）
+        phone:         prefilledValues.contact_phone || '',  // 联系方式保留
       };
       fields.forEach(f => {
         const el = document.getElementById('f_' + f.key);
         if (!el) return;
-        el.value = prefill[f.key] || '';
+        // 患者年龄/体重/身高等个人数据在家人模式下清空
+        const patientOnlyKeys = ['age', 'patient_age', 'patient_name', 'height', 'weight', 'gender'];
+        if (!isSelf && patientOnlyKeys.includes(f.key)) {
+          el.value = '';
+        } else {
+          el.value = resolvePrefilledVal(f.key, prefill) || '';
+        }
       });
     };
 
@@ -285,8 +293,8 @@
       const daysLeft = Math.ceil(expiryMs / 86400000);
       const isReturned = data.status === 'returned';
 
-      // 本人/家人选择器（当 h5_config 有 patient_name 字段时才显示）
-      const hasPatient = fields.some(f => f.key === 'patient_name' || f.key === 'patient_age');
+      // 本人/家人选择器（有姓名/年龄类字段时显示）
+      const hasPatient = fields.some(f => ['patient_name', 'patient_age', 'name', 'age'].includes(f.key));
       const identityToggle = hasPatient ? `
         <div class="card" style="margin-bottom:12px">
           <div class="form-label" style="margin-bottom:8px">👤 这份表单是谁的？</div>
