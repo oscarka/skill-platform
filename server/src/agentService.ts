@@ -926,6 +926,7 @@ async function queryContextSnapshot(
       `SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>?
        ORDER BY created_at DESC LIMIT 1`,
+      // Note: agent_id filter not applied here (agentContextPackage doesn't know profile yet)
       [sessionId, nowMs],
     ).catch(() => null);
   }
@@ -1762,15 +1763,16 @@ async function handleHealthSkill(
       juhe_conv_id:   (req as any).meta?.juhe_conv_id || '',
     });
 
+    // Phase C: 工单记录 agent_id，供异步回发时按对应 Agent 人设组装通知消息
     await db.runAsync(
       `INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values, agent_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [ticketId, skillId, token,
        `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
        patientName, prefilledNotes,
-       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson],
+       meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson, profile.id],
     );
 
     // ── 将最近附件默认写入 ticket_inputs（系统自动挂载）───────────────────────
@@ -2239,11 +2241,14 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   if (sessionId) {
     const nowMs = Date.now();
+    // Phase C: 加 agent_id 过滤，防止不同 Agent 的守卫相互干扰
+    // 此处 profile 尚未加载，直接从 req 读取 agent_id（未传则 'default'）
+    const _reqAgentId = req.agent_id || 'default';
     const activeGuard = await db.getAsync<any>(
       `SELECT * FROM skill_confirm_guards
-       WHERE session_id=? AND status='active' AND expires_at>?
+       WHERE session_id=? AND status='active' AND expires_at>? AND (agent_id=? OR agent_id IS NULL OR agent_id='')
        ORDER BY created_at DESC LIMIT 1`,
-      [sessionId, nowMs],
+      [sessionId, nowMs, _reqAgentId],
     );
     if (activeGuard) {
       const MAX_GUARD_ROUNDS = 10;
@@ -2292,6 +2297,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
 
   // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
   // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
+  // 注：守卫查询时使用的是 req.agent_id（上面 _reqAgentId），不依赖此 profile
   void updateAgentTask(requestId, { status: 'routing' });
   const profile = await loadAgentProfile(req.agent_id);
   console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
@@ -2587,12 +2593,13 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     const guardId = `guard_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
     const nowTs = Date.now();
     try {
+      // Phase C: 写入 agent_id，保证守卫与创建它的 Agent 实例绑定
       await db.runAsync(
         `INSERT INTO skill_confirm_guards
-          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
         [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
-         '', nowTs, nowTs, nowTs + 30 * 60 * 1000],
+         '', nowTs, nowTs, nowTs + 30 * 60 * 1000, profile.id],
       );
       console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
       void appendTaskEvent(requestId, 'skill_guard_activated', {
