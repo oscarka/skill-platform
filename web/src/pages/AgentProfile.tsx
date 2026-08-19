@@ -9,6 +9,27 @@ interface PublishedSkill {
   category:    string;
 }
 
+// ── 新增：分诊示例配置 ────────────────────────────────────────────────────────
+interface RoutingExamples {
+  high_desc:     string;   // 高置信度说明
+  low_desc:      string;   // 低置信度说明
+  examples_high: string[]; // 高置信度例句
+  examples_low:  string[]; // 低置信度例句
+  examples_none: string[]; // 无意图例句
+}
+
+// ── 新增：知识库工具配置 ───────────────────────────────────────────────────────
+interface KnowledgeTool {
+  name:         string;  // function call 名称（英文）
+  display_name: string;  // 显示名称（中文）
+  when_to_call: string;  // 调用时机描述
+  target_page:  string;  // 对应知识库页面文件名
+}
+interface KnowledgeConfig {
+  type:  string;         // 知识库类型标识
+  tools: KnowledgeTool[];
+}
+
 interface AgentProfile {
   name:             string;
   role_desc:        string;
@@ -19,6 +40,8 @@ interface AgentProfile {
   reassurance_tpl:  string;
   skill_mode:       'auto' | 'manual';
   skill_ids:        string[];
+  routing_examples: RoutingExamples | null;  // null = 使用系统默认分诊提示词
+  knowledge_config: KnowledgeConfig | null;  // null = 使用系统默认知识库逻辑
 }
 
 const DEFAULT_PROFILE: AgentProfile = {
@@ -31,6 +54,30 @@ const DEFAULT_PROFILE: AgentProfile = {
   reassurance_tpl:  '',
   skill_mode:       'auto',
   skill_ids:        [],
+  routing_examples: null,
+  knowledge_config: null,
+};
+
+// 新建 Agent 时的分诊配置模板（用户可在此基础上修改）
+const ROUTING_TEMPLATE: RoutingExamples = {
+  high_desc:     '用户明确表达了要使用某个服务或有明确需求',
+  low_desc:      '用户有相关问题但未明确要求使用服务，直接用AI知识回答即可',
+  examples_high: ['帮我分析', '我想了解具体方案', '开始使用'],
+  examples_low:  ['这个怎么回事', '有什么影响', '需要注意什么'],
+  examples_none: ['你好', '在吗', '谢谢'],
+};
+
+// 新建知识库工具模板
+const KNOWLEDGE_TEMPLATE: KnowledgeConfig = {
+  type:  'wiki',
+  tools: [
+    {
+      name:         'get_wiki_page',
+      display_name: '知识库查询',
+      when_to_call: '用户询问相关知识或需要参考资料时调用',
+      target_page:  'index.md',
+    },
+  ],
 };
 
 export default function AgentProfilePage() {
@@ -40,6 +87,11 @@ export default function AgentProfilePage() {
   const [saveMsg,       setSaveMsg]       = useState('');
   const [newTaboo,      setNewTaboo]      = useState('');
   const [loading,       setLoading]       = useState(true);
+
+  // ── 分诊配置编辑临时状态 ──────────────────────────────────────────────────────
+  const [newExHigh, setNewExHigh] = useState('');
+  const [newExLow,  setNewExLow]  = useState('');
+  const [newExNone, setNewExNone] = useState('');
 
   // ── 加载 ─────────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -89,6 +141,38 @@ export default function AgentProfilePage() {
       ? profile.skill_ids.filter(s => s !== id)
       : [...profile.skill_ids, id];
     updateField('skill_ids', ids);
+  };
+
+  // ── 分诊配置辅助函数 ──────────────────────────────────────────────────────────
+  const re = profile.routing_examples;
+  const updateRe = (key: keyof RoutingExamples, val: any) => {
+    if (!re) return;
+    updateField('routing_examples', { ...re, [key]: val });
+  };
+  const addReExample = (field: 'examples_high' | 'examples_low' | 'examples_none', val: string, clear: () => void) => {
+    if (!val.trim() || !re) return;
+    updateRe(field, [...re[field], val.trim()]);
+    clear();
+  };
+  const removeReExample = (field: 'examples_high' | 'examples_low' | 'examples_none', i: number) => {
+    if (!re) return;
+    updateRe(field, re[field].filter((_: any, idx: number) => idx !== i));
+  };
+
+  // ── 知识库工具辅助函数 ────────────────────────────────────────────────────────
+  const kc = profile.knowledge_config;
+  const updateTool = (i: number, key: keyof KnowledgeTool, val: string) => {
+    if (!kc) return;
+    const tools = kc.tools.map((t, idx) => idx === i ? { ...t, [key]: val } : t);
+    updateField('knowledge_config', { ...kc, tools });
+  };
+  const addTool = () => {
+    const newTool: KnowledgeTool = { name: '', display_name: '', when_to_call: '', target_page: '' };
+    updateField('knowledge_config', { ...(kc ?? KNOWLEDGE_TEMPLATE), tools: [...(kc?.tools ?? []), newTool] });
+  };
+  const removeTool = (i: number) => {
+    if (!kc) return;
+    updateField('knowledge_config', { ...kc, tools: kc.tools.filter((_: any, idx: number) => idx !== i) });
   };
 
   if (loading) return <div className="page-loading">加载中…</div>;
@@ -271,6 +355,182 @@ export default function AgentProfilePage() {
         )}
       </Section>
 
+      {/* ── 🎯 分诊配置 ──────────────────────────────────────────────────────────── */}
+      <Section title="🎯 分诊配置">
+        <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 14px' }}>
+          告诉 Agent 如何判断用户消息的意图置信度。
+          <strong style={{ color: '#94a3b8' }}> 不配置则使用系统默认分诊逻辑（推荐默认 Agent 保持不变）。</strong>
+        </p>
+
+        {/* 开关：启用 / 使用默认 */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+          <button
+            className={`btn ${re === null ? 'btn-secondary' : 'btn-primary'}`}
+            style={{ fontSize: '.82rem', padding: '5px 14px', opacity: re === null ? 0.5 : 1 }}
+            onClick={() => {
+              if (re === null) updateField('routing_examples', ROUTING_TEMPLATE);
+              else updateField('routing_examples', null);
+            }}
+          >
+            {re === null ? '📋 使用系统默认（点击自定义）' : '✅ 已自定义（点击恢复默认）'}
+          </button>
+        </div>
+
+        {re !== null && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* high / low 描述 */}
+            <Label text="「高意图」描述 — 可主动推荐服务的情形">
+              <textarea
+                className="form-input"
+                rows={2}
+                value={re.high_desc}
+                onChange={e => updateRe('high_desc', e.target.value)}
+                placeholder="用户明确表达了购买/使用意向…"
+              />
+            </Label>
+            <Label text="「低意图」描述 — 有相关问题但无明确需求">
+              <textarea
+                className="form-input"
+                rows={2}
+                value={re.low_desc}
+                onChange={e => updateRe('low_desc', e.target.value)}
+                placeholder="用户有普通询问但无明显意向…"
+              />
+            </Label>
+
+            {/* 例句组 */}
+            <ExampleGroup
+              label="「高意图」例句"
+              color="rgba(99,241,99,.1)"
+              borderColor="rgba(99,241,99,.25)"
+              items={re.examples_high}
+              inputVal={newExHigh}
+              onInputChange={setNewExHigh}
+              onAdd={() => addReExample('examples_high', newExHigh, () => setNewExHigh(''))}
+              onRemove={i => removeReExample('examples_high', i)}
+            />
+            <ExampleGroup
+              label="「低意图」例句"
+              color="rgba(241,199,99,.1)"
+              borderColor="rgba(241,199,99,.25)"
+              items={re.examples_low}
+              inputVal={newExLow}
+              onInputChange={setNewExLow}
+              onAdd={() => addReExample('examples_low', newExLow, () => setNewExLow(''))}
+              onRemove={i => removeReExample('examples_low', i)}
+            />
+            <ExampleGroup
+              label="「无意图」例句（普通聊天/问候）"
+              color="rgba(148,163,184,.08)"
+              borderColor="rgba(148,163,184,.2)"
+              items={re.examples_none}
+              inputVal={newExNone}
+              onInputChange={setNewExNone}
+              onAdd={() => addReExample('examples_none', newExNone, () => setNewExNone(''))}
+              onRemove={i => removeReExample('examples_none', i)}
+            />
+          </div>
+        )}
+      </Section>
+
+      {/* ── 📚 知识库工具配置 ─────────────────────────────────────────────────────── */}
+      <Section title="📚 知识库工具">
+        <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 14px' }}>
+          配置 Agent 可以调用的知识库查询工具。每个工具对应一个知识库页面，Agent 会在合适时机自动调用。
+          <strong style={{ color: '#94a3b8' }}> 不配置则使用系统默认知识库逻辑。</strong>
+        </p>
+
+        {/* 开关 */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+          <button
+            className={`btn ${kc === null ? 'btn-secondary' : 'btn-primary'}`}
+            style={{ fontSize: '.82rem', padding: '5px 14px', opacity: kc === null ? 0.5 : 1 }}
+            onClick={() => {
+              if (kc === null) updateField('knowledge_config', KNOWLEDGE_TEMPLATE);
+              else updateField('knowledge_config', null);
+            }}
+          >
+            {kc === null ? '📋 使用系统默认（点击自定义）' : '✅ 已自定义（点击恢复默认）'}
+          </button>
+        </div>
+
+        {kc !== null && (
+          <div>
+            {/* 类型标识 */}
+            <Label text="知识库类型标识（英文，如 health_wiki / product_rag）">
+              <input
+                className="form-input"
+                value={kc.type}
+                onChange={e => updateField('knowledge_config', { ...kc, type: e.target.value })}
+                placeholder="如: health_wiki"
+              />
+            </Label>
+
+            {/* 工具列表 */}
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {kc.tools.map((tool, i) => (
+                <div key={i} style={{
+                  background: 'rgba(99,102,241,.06)', border: '1px solid rgba(99,102,241,.2)',
+                  borderRadius: 10, padding: '14px 16px', position: 'relative',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <span style={{ fontWeight: 600, fontSize: '.88rem', color: '#a5b4fc' }}>
+                      工具 #{i + 1}
+                    </span>
+                    <button
+                      onClick={() => removeTool(i)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', fontSize: '1.1rem' }}
+                    >×</button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <Label text="Function 名称（英文）">
+                      <input
+                        className="form-input"
+                        value={tool.name}
+                        onChange={e => updateTool(i, 'name', e.target.value)}
+                        placeholder="如: get_product_spec"
+                      />
+                    </Label>
+                    <Label text="显示名称（中文）">
+                      <input
+                        className="form-input"
+                        value={tool.display_name}
+                        onChange={e => updateTool(i, 'display_name', e.target.value)}
+                        placeholder="如: 产品规格查询"
+                      />
+                    </Label>
+                  </div>
+                  <Label text="调用时机">
+                    <input
+                      className="form-input"
+                      value={tool.when_to_call}
+                      onChange={e => updateTool(i, 'when_to_call', e.target.value)}
+                      placeholder="用户询问…时调用"
+                    />
+                  </Label>
+                  <Label text="知识库页面文件名">
+                    <input
+                      className="form-input"
+                      value={tool.target_page}
+                      onChange={e => updateTool(i, 'target_page', e.target.value)}
+                      placeholder="如: products.md"
+                    />
+                  </Label>
+                </div>
+              ))}
+            </div>
+
+            <button
+              className="btn btn-secondary"
+              style={{ marginTop: 10, fontSize: '.82rem' }}
+              onClick={addTool}
+            >
+              + 添加工具
+            </button>
+          </div>
+        )}
+      </Section>
+
       {/* ── 保存按钮 ──────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 8, paddingBottom: 40 }}>
         <button
@@ -330,5 +590,54 @@ function RadioOption({
       </div>
       <span style={{ fontSize: '.78rem', color: 'var(--muted)', paddingLeft: 22 }}>{hint}</span>
     </label>
+  );
+}
+
+// ── 分诊例句组组件 ─────────────────────────────────────────────────────────────
+function ExampleGroup({
+  label, color, borderColor, items, inputVal, onInputChange, onAdd, onRemove,
+}: {
+  label: string;
+  color: string;
+  borderColor: string;
+  items: string[];
+  inputVal: string;
+  onInputChange: (v: string) => void;
+  onAdd: () => void;
+  onRemove: (i: number) => void;
+}) {
+  return (
+    <div>
+      <div style={{ fontSize: '.82rem', fontWeight: 500, color: 'var(--muted)', marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+        {items.map((ex, i) => (
+          <span key={i} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            background: color, border: `1px solid ${borderColor}`,
+            borderRadius: 20, padding: '3px 10px', fontSize: '.8rem',
+          }}>
+            「{ex}」
+            <button
+              onClick={() => onRemove(i)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', fontSize: '.85rem', padding: 0, lineHeight: 1 }}
+            >×</button>
+          </span>
+        ))}
+        {items.length === 0 && (
+          <span style={{ fontSize: '.78rem', color: 'var(--muted)', fontStyle: 'italic' }}>暂无例句</span>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          className="form-input"
+          style={{ flex: 1, fontSize: '.85rem' }}
+          value={inputVal}
+          onChange={e => onInputChange(e.target.value)}
+          placeholder="输入例句后按 Enter 或点添加…"
+          onKeyDown={e => e.key === 'Enter' && onAdd()}
+        />
+        <button className="btn btn-secondary" style={{ fontSize: '.82rem' }} onClick={onAdd}>添加</button>
+      </div>
+    </div>
   );
 }
