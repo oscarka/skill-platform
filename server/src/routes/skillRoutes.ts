@@ -620,18 +620,22 @@ skillRouter.patch('/:id/meta', async (req, res) => {
     if (!skill) return res.status(404).json({ error: 'Skill not found' });
 
     const { description, tags } = req.body;
-    const tagsJson = tags !== undefined
-      ? JSON.stringify(Array.isArray(tags) ? tags : [])
-      : null;
 
-    await db.runAsync(
-      `UPDATE skills SET
-         description = COALESCE(?, description),
-         tags        = CASE WHEN ? IS NOT NULL THEN ? ELSE tags END,
-         updated_at  = ?
-       WHERE id = ?`,
-      [description ?? null, tagsJson, tagsJson, Date.now(), req.params.id]
-    );
+    // 分开更新，避免 PostgreSQL 对 CASE WHEN ? IS NOT NULL 参数类型推断失败
+    if (description !== undefined) {
+      await db.runAsync(
+        `UPDATE skills SET description = ?, updated_at = ? WHERE id = ?`,
+        [description, Date.now(), req.params.id]
+      );
+    }
+    if (tags !== undefined) {
+      const tagsJson = JSON.stringify(Array.isArray(tags) ? tags : []);
+      await db.runAsync(
+        `UPDATE skills SET tags = ?, updated_at = ? WHERE id = ?`,
+        [tagsJson, Date.now(), req.params.id]
+      );
+    }
+
     const updated = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
     res.json({ skill: sanitize(updated!, true) });
   } catch (err: any) {
