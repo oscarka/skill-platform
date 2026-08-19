@@ -364,6 +364,7 @@ export interface AgentChatRequest {
   health_profile?:  string;
   skill_id?:        string;   // 可选：前端强制指定（优先级高于自动路由）
   callback_url?:    string;
+  agent_id?:        string;   // 可选：指定 Agent 实例 ID（不传则 fallback 到 'default'）
 }
 
 export interface AgentDelivery {
@@ -2229,9 +2230,10 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   }
 
   // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
+  // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
   void updateAgentTask(requestId, { status: 'routing' });
-  const profile = await loadAgentProfile();
-  console.log(`[AgentService] Profile: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+  const profile = await loadAgentProfile(req.agent_id);
+  console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
   const availableSkills = await getAvailableSkills(profile);
   console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
 
