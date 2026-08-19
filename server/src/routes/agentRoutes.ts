@@ -698,12 +698,20 @@ agentRouter.get('/profile', async (_req, res) => {
   try {
     const row = await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', ['default']);
     if (!row) {
+      // 返回默认 profile（原始内容，一字未改，仅追加新字段）
       return res.json({
-        id: 'default', name: '服务助理',
-        role_desc: '', reply_style: '', service_flow: '',
-        taboos: [], reassurance_mode: 'ai', reassurance_tpl: '',
-        skill_mode: 'auto', skill_ids: [],
-        routing_examples: null, knowledge_config: null,
+        id:               'default',
+        name:             '服务助理',
+        role_desc:        '专业健康顾问助理，协助客户了解检查报告和日常健康管理',
+        reply_style:      '亲切、专业，回复简洁不超过200字',
+        service_flow:     '1. 判断是否为健康相关问题\n2. 健康问题优先调用对应 skill 深度分析\n3. 非健康问题礼貌回复并适当引导',
+        taboos:           ['不诊断疾病', '不推荐具体药物品牌', '不承诺治疗效果'],
+        reassurance_mode: 'ai',
+        reassurance_tpl:  '',
+        skill_mode:       'auto',
+        skill_ids:        [],
+        routing_examples: null,   // 新增：null = 使用原始提示词（不影响现有行为）
+        knowledge_config: null,   // 新增：null = 使用原有 WIKI 逻辑
       });
     }
     res.json({
