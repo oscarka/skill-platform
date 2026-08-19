@@ -11,6 +11,7 @@ import SkillTest from './pages/SkillTest';
 import McpConfigs from './pages/McpConfigs';
 import OAuthManager from './pages/OAuthManager';
 import AgentProfile from './pages/AgentProfile';
+import AgentInstances from './pages/AgentInstances';
 import AgentLogs from './pages/AgentLogs';
 import SkillResult from './pages/SkillResult';
 
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="mcp-configs" element={<McpConfigs />} />
           <Route path="oauth" element={<OAuthManager />} />
           <Route path="agent-profile" element={<AgentProfile />} />
+          <Route path="agent-instances" element={<AgentInstances />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 
 const API = '/api/v1/agent';
 
@@ -82,35 +83,43 @@ const KNOWLEDGE_TEMPLATE: KnowledgeConfig = {
 };
 
 export default function AgentProfilePage() {
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const agentId = searchParams.get('agentId'); // null = default
+
   const [profile,       setProfile]       = useState<AgentProfile>(DEFAULT_PROFILE);
   const [skills,        setSkills]        = useState<PublishedSkill[]>([]);
   const [saving,        setSaving]        = useState(false);
   const [saveMsg,       setSaveMsg]       = useState('');
   const [newTaboo,      setNewTaboo]      = useState('');
   const [loading,       setLoading]       = useState(true);
+  const [instanceName,  setInstanceName]  = useState('');
 
   // ── 分诊配置编辑临时状态 ──────────────────────────────────────────────────────
   const [newExHigh, setNewExHigh] = useState('');
   const [newExLow,  setNewExLow]  = useState('');
   const [newExNone, setNewExNone] = useState('');
 
-  // ── 加载 ─────────────────────────────────────────────────────────────────────
+  // ── 加载：agentId 存在时加载对应实例，否则加载默认 profile ──────────────────
   useEffect(() => {
+    const profileUrl = agentId ? `${API}/profiles/${agentId}` : `${API}/profile`;
     Promise.all([
-      fetch(`${API}/profile`).then(r => r.json()),
+      fetch(profileUrl).then(r => r.json()),
       fetch(`${API}/skills/available`).then(r => r.json()),
     ]).then(([profileData, skillsData]) => {
       setProfile({ ...DEFAULT_PROFILE, ...profileData });
+      setInstanceName(profileData.name ?? '');
       setSkills(Array.isArray(skillsData) ? skillsData : []);
     }).catch(console.error).finally(() => setLoading(false));
-  }, []);
+  }, [agentId]);
 
-  // ── 保存 ─────────────────────────────────────────────────────────────────────
+  // ── 保存：agentId 存在时保存到对应实例，否则保存到默认 profile ──────────────
   const save = useCallback(async () => {
     setSaving(true);
     setSaveMsg('');
     try {
-      const res = await fetch(`${API}/profile`, {
+      const saveUrl = agentId ? `${API}/profiles/${agentId}` : `${API}/profile`;
+      const res = await fetch(saveUrl, {
         method:  'PUT',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(profile),
@@ -123,7 +132,7 @@ export default function AgentProfilePage() {
       setSaving(false);
       setTimeout(() => setSaveMsg(''), 3000);
     }
-  }, [profile]);
+  }, [profile, agentId]);
 
   const updateField = (key: keyof AgentProfile, val: any) =>
     setProfile(p => ({ ...p, [key]: val }));
@@ -180,12 +189,34 @@ export default function AgentProfilePage() {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0 }}>🤖 服务配置</h1>
-        <p style={{ color: 'var(--muted)', margin: '6px 0 0' }}>
-          配置主 Agent 的身份、服务流程和可用技能，Agent 将根据这些配置自主决策如何回复客户。
-        </p>
-      </div>
+      {/* 返回按钮 + 实例标题（从 agent-instances 进入时显示） */}
+      {agentId ? (
+        <div style={{ marginBottom: 24 }}>
+          <button
+            onClick={() => navigate('/agent-instances')}
+            style={{
+              background: 'none', border: '1px solid var(--border)', borderRadius: 8,
+              padding: '6px 14px', cursor: 'pointer', color: 'var(--muted)',
+              fontSize: '.82rem', marginBottom: 12,
+            }}
+          >
+            ← 返回实例列表
+          </button>
+          <h1 style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0 }}>
+            ✏️ {instanceName || agentId}
+          </h1>
+          <p style={{ color: 'var(--muted)', margin: '6px 0 0', fontSize: '.88rem' }}>
+            编辑此 Agent 实例的身份、服务流程和可用技能。
+          </p>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 24 }}>
+          <h1 style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0 }}>🤖 服务配置</h1>
+          <p style={{ color: 'var(--muted)', margin: '6px 0 0' }}>
+            配置主 Agent 的身份、服务流程和可用技能，Agent 将根据这些配置自主决策如何回复客户。
+          </p>
+        </div>
+      )}
 
       {/* ── 基本属性 ──────────────────────────────────────────────────────────── */}
       <Section title="基本属性">
