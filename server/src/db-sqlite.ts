@@ -197,8 +197,15 @@ export function initDb(): void {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_user_recent_files_user ON user_recent_files(user_id, created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
-    // 已存在的表加列迁移
-    `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
+    // 已存在的表加列迁移（SQLite 不支持 ALTER TABLE ADD COLUMN IF NOT EXISTS，catch 会忽略"duplicate column"错误）
+    `ALTER TABLE user_recent_files ADD COLUMN content_hash TEXT`,
+    // ── Multi-Agent 改造 v1：agent_profiles 新增分诊示例与知识库工具配置字段 ──
+    `ALTER TABLE agent_profiles ADD COLUMN routing_examples TEXT DEFAULT NULL`,
+    `ALTER TABLE agent_profiles ADD COLUMN knowledge_config TEXT DEFAULT NULL`,
+    // agent_id：守卫与工单绑定到具体 Agent 实例（多 Agent 隔离用）
+    `ALTER TABLE skill_confirm_guards ADD COLUMN agent_id TEXT DEFAULT 'default'`,
+    `ALTER TABLE tickets ADD COLUMN agent_id TEXT DEFAULT 'default'`,
+
 
   ];
   for (const sql of migrations) {

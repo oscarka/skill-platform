@@ -392,6 +392,58 @@ export interface SkillRouteLog {
 
 const DEFAULT_PROFILE_ID = 'default';
 
+// 分诊意图配置：替代代码中写死的医疗示例词
+export interface RoutingExamples {
+  high_desc:    string;   // 强意向的判断描述
+  low_desc:     string;   // 泛咨询的判断描述
+  examples_high: string[]; // 强意向示例词
+  examples_low:  string[]; // 泛咨询示例词
+  examples_none: string[]; // 闲聊/问候示例词
+}
+
+// 知识工具配置条目（对应一个 Function Calling 工具）
+export interface KnowledgeTool {
+  name:         string;  // 工具标识符（英文，如 get_product_spec）
+  display_name: string;  // 中文友好名称
+  when_to_call: string;  // 触发意图说明（防止模型误用）
+  target_page:  string;  // 对应的文档页面文件名或 API 路径
+}
+
+// 知识库与工具集配置
+export interface KnowledgeConfig {
+  type:     'llmwiki' | 'product_rag' | 'crm_profile' | 'none';
+  endpoint?: string;    // 知识库服务地址（可选，默认从环境变量读取）
+  tools:    KnowledgeTool[];
+}
+
+// 默认的医疗 Agent 知识库配置（与原有 WIKI_TOOLS 完全等价）
+const DEFAULT_KNOWLEDGE_CONFIG: KnowledgeConfig = {
+  type: 'llmwiki',
+  tools: [
+    {
+      name: 'get_medical_history',
+      display_name: '历史病史与化验档案',
+      when_to_call: '当用户询问具体的检查结果、病史详情、化验指标时调用',
+      target_page: 'medical_history.md',
+    },
+    {
+      name: 'get_medication_plan',
+      display_name: '用药方案与干预措施',
+      when_to_call: '当用户询问具体用药、剂量调整、治疗方案、监测目标时调用',
+      target_page: 'medication_plan.md',
+    },
+  ],
+};
+
+// 默认的医疗 Agent 分诊配置（与原有 routeDecision Prompt 中写死的示例完全等价）
+const DEFAULT_ROUTING_EXAMPLES: RoutingExamples = {
+  high_desc:     '客户明确表达了要使用某个专项服务，可以主动向用户推荐该服务',
+  low_desc:      '客户有健康相关问题，但没明确要求使用某个服务，直接用AI知识回答即可，不推销服务',
+  examples_high: ['帮我做营养分析', '开始AI营养师', '帮我分析报告'],
+  examples_low:  ['我血糖高怎么办', '最近血压不稳定', '体重一直降是什么原因'],
+  examples_none: ['你好', '能咨询血糖问题吗', '你们能做什么'],
+};
+
 interface AgentProfile {
   id:               string;
   name:             string;
@@ -403,48 +455,62 @@ interface AgentProfile {
   reassurance_tpl:  string;
   skill_mode:       'auto' | 'manual';
   skill_ids:        string[];
+  // Multi-Agent v1 新增字段
+  // null = 未配置，routeDecision 将使用原始硬编码提示词（保证现有 Agent 行为不变）
+  // RoutingExamples = 已配置，routeDecision 将使用动态模板
+  routing_examples: RoutingExamples | null;
+  knowledge_config: KnowledgeConfig | null;
 }
 
-let _profileCache: AgentProfile | null = null;
-let _profileCacheExpire = 0;
+// Profile 缓存：key = agentId，支持多实例并发缓存
+const _profileCacheMap = new Map<string, { profile: AgentProfile; expireAt: number }>();
 
-async function loadAgentProfile(): Promise<AgentProfile> {
-  if (_profileCache && Date.now() < _profileCacheExpire) return _profileCache;
+async function loadAgentProfile(agentId?: string): Promise<AgentProfile> {
+  const id = agentId || DEFAULT_PROFILE_ID;
+  const cached = _profileCacheMap.get(id);
+  if (cached && Date.now() < cached.expireAt) return cached.profile;
   try {
     const row = await db.getAsync<any>(
       'SELECT * FROM agent_profiles WHERE id = ?',
-      [DEFAULT_PROFILE_ID]
+      [id]
     );
-    const profile: AgentProfile = row ? {
-      id:               row.id,
-      name:             row.name || '服务助理',
-      role_desc:        row.role_desc || '',
-      reply_style:      row.reply_style || '',
-      service_flow:     row.service_flow || '',
-      taboos:           safeParseJson(row.taboos, []),
-      reassurance_mode: (row.reassurance_mode === 'template' ? 'template' : 'ai'),
-      reassurance_tpl:  row.reassurance_tpl || '',
-      skill_mode:       (row.skill_mode === 'manual' ? 'manual' : 'auto'),
-      skill_ids:        safeParseJson(row.skill_ids, []),
+    // 若指定 id 不存在，自动 fallback 到 default
+    const src = row ?? (id !== DEFAULT_PROFILE_ID
+      ? await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID])
+      : null);
+    const profile: AgentProfile = src ? {
+      id:               src.id,
+      name:             src.name || '服务助理',
+      role_desc:        src.role_desc || '',
+      reply_style:      src.reply_style || '',
+      service_flow:     src.service_flow || '',
+      taboos:           safeParseJson(src.taboos, []),
+      reassurance_mode: (src.reassurance_mode === 'template' ? 'template' : 'ai'),
+      reassurance_tpl:  src.reassurance_tpl || '',
+      skill_mode:       (src.skill_mode === 'manual' ? 'manual' : 'auto'),
+      skill_ids:        safeParseJson(src.skill_ids, []),
+      routing_examples: safeParseJson(src.routing_examples, null),   // null = 未配置，使用原始提示词
+      knowledge_config: safeParseJson(src.knowledge_config, null),    // null = 未配置，使用原有 WIKI 逻辑
     } : defaultProfile();
-    _profileCache = profile;
-    _profileCacheExpire = Date.now() + 60_000;  // 60s cache
+    _profileCacheMap.set(id, { profile, expireAt: Date.now() + 60_000 });
     return profile;
   } catch {
-    return _profileCache || defaultProfile();
+    return _profileCacheMap.get(id)?.profile ?? defaultProfile();
   }
 }
 
-export async function saveAgentProfile(data: Partial<AgentProfile>): Promise<AgentProfile> {
+export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: string): Promise<AgentProfile> {
+  const id = agentId || DEFAULT_PROFILE_ID;
   const now = Date.now();
   const existing = await db.getAsync<any>(
     'SELECT id FROM agent_profiles WHERE id = ?',
-    [DEFAULT_PROFILE_ID]
+    [id]
   );
   if (existing) {
     await db.runAsync(
       `UPDATE agent_profiles SET name=?, role_desc=?, reply_style=?, service_flow=?,
-       taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?, updated_at=?
+       taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?,
+       routing_examples=?, knowledge_config=?, updated_at=?
        WHERE id=?`,
       [
         data.name ?? '服务助理',
@@ -456,17 +522,20 @@ export async function saveAgentProfile(data: Partial<AgentProfile>): Promise<Age
         data.reassurance_tpl ?? '',
         data.skill_mode ?? 'auto',
         JSON.stringify(data.skill_ids ?? []),
+        // routing_examples/knowledge_config: 若前端未传入（undefined），保持 null；若明确传入则写入
+        data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+        data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
         now,
-        DEFAULT_PROFILE_ID,
+        id,
       ]
     );
   } else {
     await db.runAsync(
       `INSERT INTO agent_profiles (id,name,role_desc,reply_style,service_flow,taboos,
-       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,routing_examples,knowledge_config,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        DEFAULT_PROFILE_ID,
+        id,
         data.name ?? '服务助理',
         data.role_desc ?? '',
         data.reply_style ?? '',
@@ -476,11 +545,44 @@ export async function saveAgentProfile(data: Partial<AgentProfile>): Promise<Age
         data.reassurance_tpl ?? '',
         data.skill_mode ?? 'auto',
         JSON.stringify(data.skill_ids ?? []),
+        data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+        data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
         now, now,
       ]
     );
   }
-  return loadAgentProfile();
+  // 清除该 agentId 的缓存，下次重新读取
+  _profileCacheMap.delete(id);
+  return loadAgentProfile(id);
+}
+
+// 获取所有 Agent 实例列表
+export async function listAgentProfiles(): Promise<AgentProfile[]> {
+  try {
+    const rows = await db.allAsync<any>('SELECT * FROM agent_profiles ORDER BY created_at ASC');
+    return rows.map(src => ({
+      id:               src.id,
+      name:             src.name || '服务助理',
+      role_desc:        src.role_desc || '',
+      reply_style:      src.reply_style || '',
+      service_flow:     src.service_flow || '',
+      taboos:           safeParseJson(src.taboos, []),
+      reassurance_mode: (src.reassurance_mode === 'template' ? 'template' : 'ai'),
+      reassurance_tpl:  src.reassurance_tpl || '',
+      skill_mode:       (src.skill_mode === 'manual' ? 'manual' : 'auto'),
+      skill_ids:        safeParseJson(src.skill_ids, []),
+      routing_examples: safeParseJson(src.routing_examples, null),
+      knowledge_config: safeParseJson(src.knowledge_config, null),
+    }));
+  } catch { return []; }
+}
+
+// 删除 Agent 实例（不允许删除 'default'）
+export async function deleteAgentProfile(agentId: string): Promise<boolean> {
+  if (agentId === DEFAULT_PROFILE_ID) return false;
+  await db.runAsync('DELETE FROM agent_profiles WHERE id = ?', [agentId]);
+  _profileCacheMap.delete(agentId);
+  return true;
 }
 
 function defaultProfile(): AgentProfile {
@@ -495,6 +597,8 @@ function defaultProfile(): AgentProfile {
     reassurance_tpl: '',
     skill_mode: 'auto',
     skill_ids: [],
+    routing_examples: null,   // 默认不配置，routeDecision 使用原始医疗提示词
+    knowledge_config: null,    // 默认不配置，使用原有 WIKI 工具逻辑
   };
 }
 
@@ -941,6 +1045,7 @@ async function routeDecision(
   notes: string,
   availableSkills: { id: string; name: string; description: string }[],
   apiKey: string,
+  routingExamples?: RoutingExamples,   // Multi-Agent v1: 可选，不传则使用默认医疗配置
 ): Promise<RouteDecisionResult> {
   const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731';
 
@@ -966,7 +1071,12 @@ async function routeDecision(
     .map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`)
     .join('\n');
 
-  const systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+  // 当 routing_examples 未配置时，使用原始提示词（一字不改，保证现有行为不变）
+  // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
+  let systemPrompt: string;
+  if (!routingExamples) {
+    // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
+    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
 1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
 2. 判断置信度（confidence）：
@@ -984,6 +1094,31 @@ ${skillList}
 
 只返回 JSON，不要有其他内容：
 {"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+  } else {
+    // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
+    const re = routingExamples;
+    const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
+    const exLow  = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
+    const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
+    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+
+1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
+2. 判断置信度（confidence）：
+   - "high"：${re.high_desc}（如：${exHigh}）
+   - "low"：${re.low_desc}（如：${exLow}）
+   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
+
+注意：
+- 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
+- 询问服务能力/范围属于 none，不是 low
+- 如没有合适的 skill，skill_id 返回 null
+
+可用专项服务列表：
+${skillList}
+
+只返回 JSON，不要有其他内容：
+{"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+  }
 
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
@@ -2158,6 +2293,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       req.notes || '',
       availableSkills,
       apiKey,
+      profile.routing_examples || undefined,  // null → undefined → routeDecision 使用原始提示词
     );
     selectedSkillId   = rdResult.skill_id;
     selectedSkillName = rdResult.skill_name;

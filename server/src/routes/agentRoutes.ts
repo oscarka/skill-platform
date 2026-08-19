@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { processAgentChat, handleJobCallback, saveAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
 import * as db from '../db';
 
 
@@ -689,28 +689,29 @@ agentRouter.post('/cua-done/:requestId', async (req, res) => {
 
 // ─── GET /api/v1/agent/profile ────────────────────────────────────────────────
 
+const safeParseJson = (v: any, fallback: any) => {
+  if (!v) return fallback;
+  try { return JSON.parse(v); } catch { return fallback; }
+};
+
 agentRouter.get('/profile', async (_req, res) => {
   try {
     const row = await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', ['default']);
     if (!row) {
-      // 返回默认 profile
       return res.json({
-        id:               'default',
-        name:             '服务助理',
-        role_desc:        '专业健康顾问助理，协助客户了解检查报告和日常健康管理',
-        reply_style:      '亲切、专业，回复简洁不超过200字',
-        service_flow:     '1. 判断是否为健康相关问题\n2. 健康问题优先调用对应 skill 深度分析\n3. 非健康问题礼貌回复并适当引导',
-        taboos:           ['不诊断疾病', '不推荐具体药物品牌', '不承诺治疗效果'],
-        reassurance_mode: 'ai',
-        reassurance_tpl:  '',
-        skill_mode:       'auto',
-        skill_ids:        [],
+        id: 'default', name: '服务助理',
+        role_desc: '', reply_style: '', service_flow: '',
+        taboos: [], reassurance_mode: 'ai', reassurance_tpl: '',
+        skill_mode: 'auto', skill_ids: [],
+        routing_examples: null, knowledge_config: null,
       });
     }
     res.json({
       ...row,
-      taboos:    JSON.parse(row.taboos || '[]'),
-      skill_ids: JSON.parse(row.skill_ids || '[]'),
+      taboos:           safeParseJson(row.taboos, []),
+      skill_ids:        safeParseJson(row.skill_ids, []),
+      routing_examples: safeParseJson(row.routing_examples, null),
+      knowledge_config: safeParseJson(row.knowledge_config, null),
     });
   } catch (err: any) {
     console.error('[AgentRoute] GET /profile error:', err.message);
@@ -730,6 +731,71 @@ agentRouter.put('/profile', async (req, res) => {
     res.status(500).json({ error: 'db_error', message: err.message });
   }
 });
+
+// ─── Multi-Agent 实例管理 API ─────────────────────────────────────────────────
+// GET    /api/v1/agent/profiles          — 列表所有 Agent 实例
+// POST   /api/v1/agent/profiles          — 新建 Agent 实例
+// GET    /api/v1/agent/profiles/:id      — 读取某个 Agent 配置
+// PUT    /api/v1/agent/profiles/:id      — 更新某个 Agent 配置
+// DELETE /api/v1/agent/profiles/:id      — 删除某个 Agent 实例
+
+agentRouter.get('/profiles', async (_req, res) => {
+  try {
+    const profiles = await listAgentProfiles();
+    res.json(profiles);
+  } catch (err: any) {
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+agentRouter.post('/profiles', async (req, res) => {
+  try {
+    const { id, ...data } = req.body;
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const profile = await saveAgentProfile(data, id);
+    res.status(201).json(profile);
+  } catch (err: any) {
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+agentRouter.get('/profiles/:id', async (req, res) => {
+  try {
+    const row = await db.getAsync<any>(
+      'SELECT * FROM agent_profiles WHERE id = ?', [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    res.json({
+      ...row,
+      taboos:           safeParseJson(row.taboos, []),
+      skill_ids:        safeParseJson(row.skill_ids, []),
+      routing_examples: safeParseJson(row.routing_examples, null),
+      knowledge_config: safeParseJson(row.knowledge_config, null),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+agentRouter.put('/profiles/:id', async (req, res) => {
+  try {
+    const profile = await saveAgentProfile(req.body, req.params.id);
+    res.json(profile);
+  } catch (err: any) {
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
+agentRouter.delete('/profiles/:id', async (req, res) => {
+  try {
+    const ok = await deleteAgentProfile(req.params.id);
+    if (!ok) return res.status(403).json({ error: 'cannot_delete_default' });
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: 'db_error', message: err.message });
+  }
+});
+
 
 // ─── GET /api/v1/agent/skills/available ────────────────────────────────────────
 
