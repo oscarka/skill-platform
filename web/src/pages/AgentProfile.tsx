@@ -358,23 +358,35 @@ export default function AgentProfilePage() {
       {/* ── 🎯 分诊配置 ──────────────────────────────────────────────────────────── */}
       <Section title="🎯 分诊配置">
         <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 14px' }}>
-          告诉 Agent 如何判断用户消息的意图置信度。
-          <strong style={{ color: '#94a3b8' }}> 不配置则使用系统默认分诊逻辑（推荐默认 Agent 保持不变）。</strong>
+          告诉 Agent 如何判断用户消息的意图置信度。不配置则使用系统默认分诊逻辑（推荐默认 Agent 保持不变）。
         </p>
 
         {/* 开关：启用 / 使用默认 */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
           <button
             className={`btn ${re === null ? 'btn-secondary' : 'btn-primary'}`}
-            style={{ fontSize: '.82rem', padding: '5px 14px', opacity: re === null ? 0.5 : 1 }}
+            style={{ fontSize: '.82rem', padding: '5px 14px' }}
             onClick={() => {
               if (re === null) updateField('routing_examples', ROUTING_TEMPLATE);
               else updateField('routing_examples', null);
             }}
           >
-            {re === null ? '📋 使用系统默认（点击自定义）' : '✅ 已自定义（点击恢复默认）'}
+            {re === null ? '点击自定义分诊配置' : '✅ 已自定义 — 点击恢复系统默认'}
           </button>
         </div>
+
+        {/* 系统默认预览（只读） */}
+        {re === null && (
+          <div style={{
+            background: 'rgba(255,255,255,.03)', border: '1px dashed rgba(255,255,255,.12)',
+            borderRadius: 8, padding: '12px 14px', fontSize: '.8rem', color: 'var(--muted)',
+          }}>
+            <div style={{ fontWeight: 600, color: '#94a3b8', marginBottom: 8 }}>📋 当前使用系统默认分诊逻辑：</div>
+            <div style={{ marginBottom: 5 }}>🟢 <strong style={{ color: '#e2e8f0' }}>高意图</strong>：客户明确表达了要使用某个服务（如"帮我做营养分析""开始AI营养师"），可主动推荐</div>
+            <div style={{ marginBottom: 5 }}>🟡 <strong style={{ color: '#e2e8f0' }}>低意图</strong>：客户有健康相关问题但没明确要求使用服务（如"我血糖高怎么办"），直接AI回答</div>
+            <div>⚪ <strong style={{ color: '#e2e8f0' }}>无意图</strong>：普通聊天/问候/询问服务范围，直接回答，不涉及健康或服务</div>
+          </div>
+        )}
 
         {re !== null && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -436,23 +448,35 @@ export default function AgentProfilePage() {
       {/* ── 📚 知识库工具配置 ─────────────────────────────────────────────────────── */}
       <Section title="📚 知识库工具">
         <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 14px' }}>
-          配置 Agent 可以调用的知识库查询工具。每个工具对应一个知识库页面，Agent 会在合适时机自动调用。
-          <strong style={{ color: '#94a3b8' }}> 不配置则使用系统默认知识库逻辑。</strong>
+          配置 Agent 可以调用的知识库查询工具。每个工具对应一个知识库页面，Agent 会在合适时机自动调用。不配置则使用系统默认知识库逻辑。
         </p>
 
         {/* 开关 */}
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
           <button
             className={`btn ${kc === null ? 'btn-secondary' : 'btn-primary'}`}
-            style={{ fontSize: '.82rem', padding: '5px 14px', opacity: kc === null ? 0.5 : 1 }}
+            style={{ fontSize: '.82rem', padding: '5px 14px' }}
             onClick={() => {
               if (kc === null) updateField('knowledge_config', KNOWLEDGE_TEMPLATE);
               else updateField('knowledge_config', null);
             }}
           >
-            {kc === null ? '📋 使用系统默认（点击自定义）' : '✅ 已自定义（点击恢复默认）'}
+            {kc === null ? '点击自定义知识库工具' : '✅ 已自定义 — 点击恢复系统默认'}
           </button>
         </div>
+
+        {/* 系统默认预览（只读） */}
+        {kc === null && (
+          <div style={{
+            background: 'rgba(255,255,255,.03)', border: '1px dashed rgba(255,255,255,.12)',
+            borderRadius: 8, padding: '12px 14px', fontSize: '.8rem', color: 'var(--muted)',
+          }}>
+            <div style={{ fontWeight: 600, color: '#94a3b8', marginBottom: 8 }}>📋 当前使用系统默认知识库工具：</div>
+            <div style={{ marginBottom: 5 }}>📖 <strong style={{ color: '#e2e8f0' }}>get_health_wiki</strong> — 查询用户健康档案 Wiki（含体检报告、病史摘要）</div>
+            <div style={{ marginBottom: 5 }}>👤 <strong style={{ color: '#e2e8f0' }}>get_user_profile</strong> — 获取用户基本信息和个人档案</div>
+            <div>🗂️ <strong style={{ color: '#e2e8f0' }}>query_ticket</strong> — 查询工单进度和分析报告（用户主动询问时触发）</div>
+          </div>
+        )}
 
         {kc !== null && (
           <div>
