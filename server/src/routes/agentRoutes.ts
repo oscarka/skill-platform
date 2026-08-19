@@ -809,11 +809,20 @@ agentRouter.delete('/profiles/:id', async (req, res) => {
 
 agentRouter.get('/skills/available', async (_req, res) => {
   try {
+    // 只返回有 "agent版" 标签的已发布 skill
+    // tags 存储为 JSON 数组字符串，如 '["agent版"]'
     const skills = await db.allAsync<any>(
-      "SELECT id, name, description, category FROM skills WHERE status = 'published' ORDER BY name",
+      `SELECT id, name, description, category, tags FROM skills
+       WHERE status = 'published'
+         AND tags IS NOT NULL
+         AND tags LIKE '%agent版%'
+       ORDER BY name`,
       []
     );
-    res.json(skills);
+    res.json(skills.map((s: any) => ({
+      ...s,
+      tags: s.tags ? JSON.parse(s.tags) : [],
+    })));
   } catch (err: any) {
     console.error('[AgentRoute] GET /skills/available error:', err.message);
     res.status(500).json({ error: 'db_error', message: err.message });

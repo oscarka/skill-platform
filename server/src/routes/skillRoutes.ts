@@ -49,6 +49,7 @@ export interface SkillRecord {
   bundle_status?: 'none' | 'building' | 'ready' | 'failed';
   installed_at?: number;
   mcp_names?: string;  // JSON array e.g. '["fetch"]' | '[]' | null
+  tags?: string;       // JSON array e.g. '["agent版"]' | '[]' | null
 }
 
 // ─── ClaWHub API client ────────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ function sanitize(skill: SkillRecord, full = false) {
     bundle_path: skill.bundle_path || null,
     installed_at: skill.installed_at || null,
     mcp_names: skill.mcp_names != null ? JSON.parse(skill.mcp_names) : null,
+    tags:      skill.tags != null ? JSON.parse(skill.tags) : [],
   };
   if (full) {
     return {
@@ -603,6 +605,34 @@ skillRouter.patch('/:id/model', async (req, res) => {
     );
     const updated = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
     console.log(`[SkillModel] skill=${req.params.id} preferred_model=${updated?.preferred_model} fallback_model=${updated?.fallback_model}`);
+    res.json({ skill: sanitize(updated!, true) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PATCH /api/skills/:id/meta ──────────────────────────────────────────────
+// 允许对任何状态（包括 published）的 skill 更新 description 和 tags
+// description/tags 属于展示元数据，不影响执行逻辑，无需创建新版本
+skillRouter.patch('/:id/meta', async (req, res) => {
+  try {
+    const skill = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
+    if (!skill) return res.status(404).json({ error: 'Skill not found' });
+
+    const { description, tags } = req.body;
+    const tagsJson = tags !== undefined
+      ? JSON.stringify(Array.isArray(tags) ? tags : [])
+      : null;
+
+    await db.runAsync(
+      `UPDATE skills SET
+         description = COALESCE(?, description),
+         tags        = CASE WHEN ? IS NOT NULL THEN ? ELSE tags END,
+         updated_at  = ?
+       WHERE id = ?`,
+      [description ?? null, tagsJson, tagsJson, Date.now(), req.params.id]
+    );
+    const updated = await db.getAsync<SkillRecord>('SELECT * FROM skills WHERE id=?', [req.params.id]);
     res.json({ skill: sanitize(updated!, true) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

@@ -482,6 +482,9 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT 'default'`,
       // agent_id: 记录工单由哪个 Agent 实例创建（异步回发时按该 Agent 的风格组装消息）
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT 'default'`,
+      // ── Skill 标签系统：tags 用于过滤哪些 Skill 可配置给 Agent ──
+      // 格式：JSON 数组字符串，如 '["agent版"]'；NULL 表示无标签
+      `ALTER TABLE skills ADD COLUMN IF NOT EXISTS tags TEXT DEFAULT NULL`,
     ];
     for (const sql of migrations) {
       try { await pool.query(sql); } catch { /* ignore */ }

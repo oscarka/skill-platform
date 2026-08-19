@@ -205,6 +205,8 @@ export function initDb(): void {
     // agent_id：守卫与工单绑定到具体 Agent 实例（多 Agent 隔离用）
     `ALTER TABLE skill_confirm_guards ADD COLUMN agent_id TEXT DEFAULT 'default'`,
     `ALTER TABLE tickets ADD COLUMN agent_id TEXT DEFAULT 'default'`,
+    // ── Skill 标签系统：tags 用于过滤哪些 Skill 可配置给 Agent ──
+    `ALTER TABLE skills ADD COLUMN tags TEXT DEFAULT NULL`,
 
 
   ];

@@ -7,6 +7,7 @@ interface PublishedSkill {
   name:        string;
   description: string;
   category:    string;
+  tags:        string[];
 }
 
 // ── 新增：分诊示例配置 ────────────────────────────────────────────────────────
@@ -294,6 +295,9 @@ export default function AgentProfilePage() {
 
       {/* ── Skill 权限 ────────────────────────────────────────────────────────── */}
       <Section title="可用 Skill">
+        <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 16px' }}>
+          仅显示已打「agent版」标签的已审批 Skill。
+        </p>
         <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
           <RadioOption
             checked={profile.skill_mode === 'auto'}
@@ -347,6 +351,13 @@ export default function AgentProfilePage() {
                       fontSize: '.72rem', padding: '2px 7px', borderRadius: 10,
                       background: 'rgba(99,102,241,.15)', color: '#a5b4fc',
                     }}>{sk.category}</span>
+                  )}
+                  {(sk.tags ?? []).includes('agent版') && (
+                    <span style={{
+                      fontSize: '.7rem', padding: '2px 7px', borderRadius: 10,
+                      background: 'rgba(34,197,94,.15)', color: '#86efac',
+                      fontWeight: 600,
+                    }}>agent版</span>
                   )}
                 </label>
               );
