@@ -336,6 +336,56 @@ const WIKI_TOOLS = [
   },
 ];
 
+// ─── Phase B: 动态知识库工具构造 ─────────────────────────────────────────────
+//
+// buildKnowledgeTools(profile):
+//   knowledge_config === null → 返回原始 WIKI_TOOLS（默认医疗行为，零回归）
+//   knowledge_config.type === 'none' → 只返回 query_ticket（不挂任何知识库）
+//   knowledge_config.tools 非空 → 动态构造工具声明 + 保留 query_ticket
+//
+function buildKnowledgeTools(profile: AgentProfile): typeof WIKI_TOOLS {
+  const kc = profile.knowledge_config;
+
+  // null = default 医疗 Agent，原样返回 WIKI_TOOLS，一字不变
+  if (!kc) return WIKI_TOOLS;
+
+  // type === 'none'：该实例不使用知识库，只保留 query_ticket
+  if (kc.type === 'none' || !kc.tools || kc.tools.length === 0) {
+    return WIKI_TOOLS.filter((t: any) => t.function?.name === 'query_ticket');
+  }
+
+  // 自定义工具：从 knowledge_config.tools 动态构建
+  const customTools = kc.tools.map((tool: KnowledgeTool) => ({
+    type: 'function' as const,
+    function: {
+      name: tool.name,
+      description: tool.when_to_call.slice(0, 200),  // when_to_call 作为 description
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  }));
+
+  // 始终保留 query_ticket（工单查询能力）
+  const queryTicketTool = WIKI_TOOLS.find((t: any) => t.function?.name === 'query_ticket');
+  return queryTicketTool ? [...customTools, queryTicketTool] : customTools;
+}
+
+//
+// buildKnowledgePromptHint(profile):
+//   knowledge_config === null → 返回空字符串（default 提示词完全不受影响）
+//   有自定义工具 → 返回强约束引导块（追加到 systemPrompt 末尾）
+//
+function buildKnowledgePromptHint(profile: AgentProfile): string {
+  const kc = profile.knowledge_config;
+  if (!kc || !kc.tools || kc.tools.length === 0) return '';
+
+  const lines = kc.tools.map((tool: KnowledgeTool) =>
+    `- 当 ${tool.when_to_call} 时 → 必须调用工具 \`${tool.name}\``
+  ).join('\n');
+
+  return '\n\n📋 【可用知识库工具清单】请根据用户意图按需调用，无需重复读取已有内容：\n' + lines;
+}
+
+
 // ─── In-memory store for pending async health queries ─────────────────────────
 const pendingRequests = new Map<string, {
   callbackUrl:  string;
@@ -674,6 +724,7 @@ async function callGeminiMessages(
     tools?: any[];
     userId?: string;
     onToolCall?: (name: string, args: any, result: string) => void;
+    _knowledgeTools?: KnowledgeTool[];  // Phase B: 动态知识库工具列表，用于工具分发
   },
 ): Promise<string> {
   // 动态获取凭证（忽略外部传入的 apiKey，统一走 settings DB）
@@ -758,7 +809,13 @@ async function callGeminiMessages(
       const fnName = tc.function?.name || '';
       let result = '';
 
-      if (fnName === 'get_medical_history') {
+      // ── Phase B: 先查 knowledge_config.tools 动态匹配（null = default 医疗，跳过）──
+      const _kcTools: KnowledgeTool[] | undefined = (options as any)?._knowledgeTools;
+      const _matchedKcTool = _kcTools?.find(t => t.name === fnName);
+      if (_matchedKcTool) {
+        result = await fetchWikiPage(userId, _matchedKcTool.target_page);
+        console.log(`[Gemini] 📄 knowledge_tool=${fnName} page=${_matchedKcTool.target_page} → ${result.length}字`);
+      } else if (fnName === 'get_medical_history') {
         result = await fetchWikiPage(userId, 'medical_history.md');
         console.log(`[Gemini] 📄 get_medical_history → ${result.length}字`);
       } else if (fnName === 'get_medication_plan') {
@@ -1374,16 +1431,18 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
   「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
   「created」= 已创建待处理，告知工单已建即可
   「expired」= 已过期，可重新开始
-- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名`;
+- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名` + buildKnowledgePromptHint(profile);
 
   const messages = [
     ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content },
   ];
 
+  const _chatKcTools = profile.knowledge_config?.tools as KnowledgeTool[] | undefined;
   const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
-    tools:      WIKI_TOOLS,   // 含 query_ticket，让 AI 按需查工单
+    tools:      buildKnowledgeTools(profile),  // Phase B: 动态工具（null → 原 WIKI_TOOLS）
     userId:     meta.user_id,
+    _knowledgeTools: _chatKcTools,             // Phase B: 传入动态分发用
     onToolCall: (name, _args, result) => {
       if (name === 'query_ticket') {
         void appendTaskEvent(requestId, 'tool_query_ticket', {
@@ -1438,7 +1497,7 @@ async function handleHealthDirect(
 
 要求：
 - 不要使用 Markdown 格式
-- 如无健康档案，基于对话内容给出通用建议`;
+- 如无健康档案，基于对话内容给出通用建议` + buildKnowledgePromptHint(profile);
 
   const contextBlock = [
     notes ? `【客户备注】\n${notes}` : '',
@@ -1450,9 +1509,11 @@ async function handleHealthDirect(
     { role: 'user', content: contextBlock },
   ];
 
+  const _healthKcTools = profile.knowledge_config?.tools as KnowledgeTool[] | undefined;
   const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048, {
-    tools: WIKI_TOOLS,  // Step 6: 始终传入，包含 query_ticket
+    tools: buildKnowledgeTools(profile),  // Phase B: 动态工具（null → 原 WIKI_TOOLS）
     userId: meta.user_id,
+    _knowledgeTools: _healthKcTools,      // Phase B: 传入动态分发用
     onToolCall: (name, args, result) => {
       // Step 6: 记录 tool call 事件到日志
       if (name === 'query_ticket') {
