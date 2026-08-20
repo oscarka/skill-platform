@@ -39,6 +39,13 @@ interface GenResult {
   generation_notes: string[];
 }
 
+interface EvalSummary {
+  total_cases: number;
+  fallback_count: number;
+  coverage: Record<string, number>;
+  judge_config_hint: string;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const DOMAIN_LABELS: Record<string, string> = {
   health: '健康管理', social_ops: '私域社群', sales: '销售客户', hr_recruiting: '招聘 HR',
@@ -68,12 +75,13 @@ export default function AgentFactory() {
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<'basic' | 'style' | 'safety' | 'routing'>('basic');
   const [newTaboo, setNewTaboo] = useState('');
+  const [evalSummary, setEvalSummary] = useState<EvalSummary | null>(null);
   const intentRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Generate ─────────────────────────────────────────────────────────────
   async function handleGenerate() {
     if (!intent.trim()) return;
-    setLoading(true); setError(''); setResult(null); setSpec(null); setSaved(false);
+    setLoading(true); setError(''); setResult(null); setSpec(null); setSaved(false); setEvalSummary(null);
     try {
       const res = await fetch(`${API}/api/v1/meta/agents/generate-spec`, {
         method: 'POST',
@@ -84,6 +92,10 @@ export default function AgentFactory() {
       if (!res.ok) throw new Error(data.error || '生成失败');
       setResult(data);
       setSpec({ ...data.spec });
+      // 解析测试集统计（后端同步返回）
+      if (data.eval_summary) {
+        setEvalSummary(data.eval_summary);
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -272,6 +284,51 @@ export default function AgentFactory() {
               <span key={i} style={{ fontSize: '.8rem', color: 'var(--text-muted)' }}>ℹ️ {n}</span>
             ))}
           </div>
+
+          {/* Eval Suite Coverage Panel */}
+          {evalSummary && (
+            <div style={{
+              marginBottom: 16, padding: '14px 18px', borderRadius: 10,
+              background: 'rgba(99,102,241,.05)', border: '1px solid rgba(99,102,241,.2)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <span style={{ fontSize: '1rem' }}>🧪</span>
+                <span style={{ fontWeight: 600, fontSize: '.9rem', color: 'var(--text-primary)' }}>
+                  自动生成测试集：共 <strong>{evalSummary.total_cases}</strong> 道题，覆盖 {Object.keys(evalSummary.coverage).length} 个维度
+                </span>
+                {evalSummary.fallback_count > 0 && (
+                  <span style={{
+                    padding: '2px 8px', borderRadius: 12, fontSize: '.75rem',
+                    background: 'rgba(245,158,11,.12)', color: '#f59e0b',
+                  }}>
+                    ⚠️ {evalSummary.fallback_count} 题兜底生成
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {Object.entries(evalSummary.coverage).map(([cat, count]) => {
+                  const catLabels: Record<string, string> = {
+                    business_intent: '业务意图', taboo_guard: '禁忌防护',
+                    service_flow: '流程执行', tone_style: '风格合规',
+                    edge_case: '边界场景', reassurance: '安抚处理',
+                    system_integration: '系统集成',
+                  };
+                  return (
+                    <span key={cat} style={{
+                      padding: '3px 10px', borderRadius: 20, fontSize: '.78rem',
+                      background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                      color: 'var(--text-muted)',
+                    }}>
+                      {catLabels[cat] || cat} · {count}题
+                    </span>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 8, fontSize: '.76rem', color: 'var(--text-muted)', opacity: .7 }}>
+                {evalSummary.judge_config_hint}
+              </div>
+            </div>
+          )}
 
           {/* Spec Editor Card */}
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>

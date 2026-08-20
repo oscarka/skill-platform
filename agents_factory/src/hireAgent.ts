@@ -24,6 +24,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { generateSpec, MetaAgentSpec, SpecGenResult } from './specGenerator';
+import { generateEvalSuite, saveEvalSuite, EvalSuite } from './evalSuiteGenerator';
 import { upsertAgentProfile, initEntityWiki } from './apiClient';
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -184,6 +185,7 @@ async function main() {
 
   // ── 生成 Spec ─────────────────────────────────────────────────────────────
   let result: SpecGenResult;
+  let evalSuite: EvalSuite | null = null;
   try {
     console.log(dim('\n⏳ 正在生成员工画像...（调用 AI，约 10-20 秒）\n'));
     result = await generateSpec(intent, { extraTaboos, extraContext });
@@ -191,6 +193,24 @@ async function main() {
     console.error(red(`\n❌ 生成失败: ${err.message}`));
     rl.close();
     process.exit(1);
+  }
+
+  // ── 生成测试集 ─────────────────────────────────────────────────────────────
+  console.log(dim('\n📋 正在生成专属测试集...\n'));
+  try {
+    evalSuite = await generateEvalSuite(result.spec);
+    const evalPath = saveEvalSuite(evalSuite);
+    const fallbackCount = evalSuite.cases.filter(c => c.fallback_used).length;
+    console.log(green(`✅ 测试集生成完成: ${evalSuite.cases.length} 道题`));
+    Object.entries(evalSuite.coverage_summary).forEach(([cat, count]) => {
+      console.log(dim(`   ${cat}: ${count} 题`));
+    });
+    if (fallbackCount > 0) {
+      console.log(yellow(`   ⚠️  ${fallbackCount} 道题使用了兜底生成（routing_examples 不足）`));
+    }
+    console.log(dim(`   已保存: ${evalPath}`));
+  } catch (err: any) {
+    console.warn(yellow(`⚠️  测试集生成失败（不影响主流程）: ${err.message}`));
   }
 
   // ── 展示预览 ──────────────────────────────────────────────────────────────
@@ -213,9 +233,12 @@ async function main() {
     }
   }
 
-  // ── 保存草稿 ──────────────────────────────────────────────────────────────
-  const draftPath = saveDraft(result);
+  // ── 保存草稿（含测试集引用）─────────────────────────────────────────────────
+  const draftPath = saveDraft({ ...result, eval_suite_id: evalSuite?.suite_id, eval_case_count: evalSuite?.cases.length });
   console.log(`\n💾 草稿已保存: ${dim(draftPath)}`);
+  if (evalSuite) {
+    console.log(`   测试集: ${dim(evalSuite.suite_id)} (${evalSuite.cases.length} 题)`);
+  }
 
   // ── 确认提交 ──────────────────────────────────────────────────────────────
   const submit = await prompt(rl, `\n${bold('是否提交到平台并开始试用期？')} [y/N]: `);
