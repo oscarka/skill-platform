@@ -47,9 +47,14 @@ export async function sendChatMessage(params: {
     method: 'POST',
     headers: defaultHeaders,
     body: JSON.stringify({
-      content: params.content,
+      content: params.content !== undefined && params.content !== null ? String(params.content) : ' ',
+      source: 'eval_sandbox',
       session_id: params.sessionId || params.userId,
       history: params.history || [],
+      context: {
+        available_apps: ['企业微信'],
+        current_recipient: 'EvalMockUser',
+      },
       meta: {
         user_id: params.userId,
         from_name: 'EvalMockUser',
@@ -88,14 +93,33 @@ export async function upsertAgentProfile(spec: {
   knowledge_domain?: string;
   intent_prompt?: string;
 }): Promise<{ id: string }> {
-  const res = await fetch(`${PLATFORM_BASE}/api/v1/meta/agents`, {
-    method: 'POST',
+  // 先尝试 PUT 更新
+  const putRes = await fetch(`${PLATFORM_BASE}/api/v1/meta/agents/${spec.id}`, {
+    method: 'PUT',
     headers: defaultHeaders,
     body: JSON.stringify(spec),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`[API] Upsert agent failed: HTTP ${res.status} ${await res.text()}`);
-  return res.json() as any;
+
+  if (putRes.ok) {
+    return putRes.json() as any;
+  }
+
+  // 404 说明尚未创建，执行 POST 创建
+  if (putRes.status === 404) {
+    const postRes = await fetch(`${PLATFORM_BASE}/api/v1/meta/agents`, {
+      method: 'POST',
+      headers: defaultHeaders,
+      body: JSON.stringify(spec),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!postRes.ok) {
+      throw new Error(`[API] Upsert agent failed (POST): HTTP ${postRes.status} ${await postRes.text()}`);
+    }
+    return postRes.json() as any;
+  }
+
+  throw new Error(`[API] Upsert agent failed (PUT): HTTP ${putRes.status} ${await putRes.text()}`);
 }
 
 /** 查询候选 Agent 状态（试用期状态、当前分数等） */

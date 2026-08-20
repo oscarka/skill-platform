@@ -3,7 +3,7 @@
   "branchName": "ralph/phase5-eval-loop",
   "description": "Ralph 驱动评测飞轮：AI 自主运行113题测试 → 分析 Gemini Judge 诊断 → 通用化修改 Spec → 迭代直到95分",
 
-  "eval_agent_id": "agent_私域社群运营经理_fe0975",
+  "eval_agent_id": "agent_community_ops_fe0975",
   "eval_agent_name": "私域社群运营经理",
   "total_cases": 113,
   "target_score": 95,
@@ -50,9 +50,9 @@
 
   "_instructions": {
     "how_to_run": "cd /Users/cc/skill-platform/scripts/ralph && ./ralph.sh 10",
-    "eval_command": "cd /Users/cc/skill-platform/agents_factory && export $(grep -v '^#' ../server/.env | xargs) && SKIP_AUTO_OPTIMIZER=1 npx ts-node src/ralphLoop.ts agent_私域社群运营经理_fe0975 --single-round",
-    "draft_spec_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_私域社群运营经理_fe0975.json",
-    "eval_suite_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_私域社群运营经理_fe0975_eval.json",
+    "eval_command": "cd /Users/cc/skill-platform/agents_factory && export $(grep -v '^#' ../server/.env | xargs) && SKIP_AUTO_OPTIMIZER=1 npx ts-node src/ralphLoop.ts agent_community_ops_fe0975 --single-round",
+    "draft_spec_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_community_ops_fe0975.json",
+    "eval_suite_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_community_ops_fe0975_eval.json",
     "diagnosis_reports_dir": "/Users/cc/skill-platform/agents_factory/reports/",
     "eval_logs_dir": "/Users/cc/skill-platform/agents_factory/eval_logs/"
   }

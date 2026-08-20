@@ -90,13 +90,17 @@ function inferKnowledgeDomain(intent: string): string {
 }
 
 function generateAgentId(name: string): string {
-  const slug = name
+  // 只保留 ASCII 小写字母、数字，其余字符转为拼音或哈希以符合 ^[a-z0-9_-]{3,64}$
+  const asciiSlug = name
     .toLowerCase()
-    .replace(/[^\w\u4e00-\u9fa5]/g, '_')
+    .replace(/[^a-z0-9]/g, '_')
     .replace(/_+/g, '_')
-    .slice(0, 20);
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 16);
+  const nameHash = crypto.createHash('md5').update(name).digest('hex').slice(0, 6);
   const suffix = crypto.randomBytes(3).toString('hex');
-  return `agent_${slug}_${suffix}`;
+  const base = asciiSlug ? `${asciiSlug}_${nameHash}` : nameHash;
+  return `agent_${base}_${suffix}`.slice(0, 48);
 }
 
 // ─── LLM 调用（通过环境变量配置，兼容 Doubao / DeepSeek / Gemini）────────────

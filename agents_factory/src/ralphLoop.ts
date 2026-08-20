@@ -22,7 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { sendChatMessage, upsertAgentProfile, cleanupSandboxUser } from './apiClient';
-import { assertCase, aggregateRunScore, saveRunScore, RunScore } from './scoreEngine';
+import { assertCaseAsync, aggregateRunScore, saveRunScore, RunScore, CaseResult } from './scoreEngine';
 
 const MAX_ROUNDS = 10;
 const PASSING_SCORE = 95;
@@ -260,8 +260,8 @@ export async function runRalphLoop(params: {
     // 推送当前版本到生产 Agent Config（通过 API，黑盒调用）
     await upsertAgentProfile({ id: agentId, ...currentSpec });
 
-    const caseResults = [];
-    const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    const sessionHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
+    const caseResults: CaseResult[] = [];
 
     for (const evalCase of allCases) {
       const startMs = Date.now();
@@ -269,26 +269,39 @@ export async function runRalphLoop(params: {
       let ticketCreated = false;
       let skillTriggered: string | undefined;
 
+      // 会话隔离：多轮记忆/上下文类测试共享 shared session，其余测试独立 session 防止上下文污染
+      const isSharedSession = evalCase.precondition === 'sandbox_session' || evalCase.category === 'memory_context' || evalCase.tags?.includes('memory');
+      const sessionId = isSharedSession ? `${mockUserId}_shared` : `${mockUserId}_${evalCase.id}`;
+      const caseHistory = sessionHistories.get(sessionId) || [];
+      const historyToSend = evalCase.conversation || caseHistory;
+
       try {
         const result = await sendChatMessage({
           userId: mockUserId,
           agentId,
           content: evalCase.input,
-          history: evalCase.conversation ? [] : history,
-          sessionId: mockUserId,
+          history: historyToSend,
+          sessionId,
         });
         reply = result.reply || '';
         ticketCreated = !!result.ticket_created;
         skillTriggered = result.skill_route;
 
-        history.push({ role: 'user', content: evalCase.input });
-        history.push({ role: 'assistant', content: reply });
+        // 仅在成功回复且非空时记录到该 session 历史
+        if (evalCase.input && evalCase.input.trim() && reply && reply.trim()) {
+          const updated = [
+            ...historyToSend,
+            { role: 'user' as const, content: evalCase.input },
+            { role: 'assistant' as const, content: reply },
+          ];
+          sessionHistories.set(sessionId, updated);
+        }
       } catch (err: any) {
         reply = `[ERROR: ${err.message}]`;
       }
 
       const latencyMs = Date.now() - startMs;
-      const caseResult = assertCase(evalCase, reply, latencyMs, { ticket_created: ticketCreated, skill_triggered: skillTriggered });
+      const caseResult = await assertCaseAsync(evalCase, reply, latencyMs, { ticket_created: ticketCreated, skill_triggered: skillTriggered });
       caseResults.push(caseResult);
 
       const icon = caseResult.passed ? '✅' : '❌';
@@ -449,9 +462,9 @@ if (require.main === module) {
     onRoundComplete: async (round, score, diagnosis) => {
       // 将本轮结果上报到 meta_agent_eval_runs 表
       try {
-        const { default: fetch } = await import('node-fetch').catch(() => ({ default: globalThis.fetch }));
+        const fetchFn = (globalThis as any).fetch;
         const PLATFORM_BASE = process.env.PLATFORM_BASE_URL || 'https://skill-platform-yo5337ccva-de.a.run.app';
-        await fetch(`${PLATFORM_BASE}/api/v1/meta/agents/${agentId}/eval-runs`, {
+        await fetchFn(`${PLATFORM_BASE}/api/v1/meta/agents/${agentId}/eval-runs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
