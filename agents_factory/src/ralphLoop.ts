@@ -73,39 +73,30 @@ function updateBestSnapshot(agentId: string, snapshot: AgentVersionSnapshot) {
   console.log(`[Ralph] ✅ 新最优版本: ${snapshot.version_hash} (得分: ${snapshot.score})`);
 }
 
-/** 加载评测题库 — 自动合并固定通用卷 + 候选 Agent 专属测试集 */
+/** 加载评测题库 — 专属测试集存在时独占使用（100%纯领域题库），否则加载通用卷 */
 function loadEvalSuites(agentId: string, extraSuiteFiles: string[] = []): any[] {
   const suitesDir = path.join(__dirname, '..', 'eval_suites');
   const draftsDir = path.join(__dirname, '..', 'drafts');
 
-  // 固定通用卷
-  const fixedFiles = ['base_universal.json', 'advanced_lifecycle.json', ...extraSuiteFiles];
-  const fixedCases = fixedFiles.flatMap(file => {
-    const fullPath = path.join(suitesDir, file);
-    if (!fs.existsSync(fullPath)) {
-      console.warn(`[Ralph] 通用题库不存在: ${fullPath}`);
-      return [];
-    }
-    const suite = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-    console.log(`[Ralph]   通用卷 ${file}: ${suite.cases?.length || 0} 题`);
-    return suite.cases || [];
-  });
-
-  // 专属测试集
   const evalPath = path.join(draftsDir, `${agentId}_eval.json`);
-  let domainCases: any[] = [];
   if (fs.existsSync(evalPath)) {
     const evalSuite = JSON.parse(fs.readFileSync(evalPath, 'utf-8'));
-    domainCases = evalSuite.cases || [];
+    const domainCases = evalSuite.cases || [];
     const fallbackCount = domainCases.filter((c: any) => c.fallback_used).length;
-    console.log(`[Ralph]   专属测试集: ${domainCases.length} 题（兜底 ${fallbackCount} 道，Judge: ${evalSuite.judge_model}）`);
-  } else {
-    console.warn(`[Ralph] ⚠️  未找到专属测试集: ${evalPath}，仅运行通用卷`);
+    console.log(`[Ralph] 🎯 加载 100% 专属纯领域测试集: ${domainCases.length} 题（兜底 ${fallbackCount} 道，Judge: ${evalSuite.judge_model}）`);
+    console.log(`[Ralph] 📋 合计: ${domainCases.length} 道纯领域考题（无外部不相干领域题库干扰）`);
+    return domainCases;
   }
 
-  const all = [...fixedCases, ...domainCases];
-  console.log(`[Ralph] 📋 合计: ${all.length} 道题（通用 ${fixedCases.length} + 专属 ${domainCases.length}）`);
-  return all;
+  // 兜底：仅在未找到专属测试集时加载通用基础卷
+  console.warn(`[Ralph] ⚠️ 未找到专属测试集: ${evalPath}，回退加载通用卷`);
+  const fixedFiles = ['base_universal.json', 'advanced_lifecycle.json', ...extraSuiteFiles];
+  return fixedFiles.flatMap(file => {
+    const fullPath = path.join(suitesDir, file);
+    if (!fs.existsSync(fullPath)) return [];
+    const suite = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+    return suite.cases || [];
+  });
 }
 
 /** 生成失败归因诊断书 */
@@ -272,6 +263,7 @@ export async function runRalphLoop(params: {
       // 会话隔离：多轮记忆/上下文类测试共享 shared session，其余测试独立 session 防止上下文污染
       const isSharedSession = evalCase.precondition === 'sandbox_session' || evalCase.category === 'memory_context' || evalCase.tags?.includes('memory');
       const sessionId = isSharedSession ? `${mockUserId}_shared` : `${mockUserId}_${evalCase.id}`;
+      const caseHistory = sessionHistories.get(sessionId) || [];
       let historyToSend = evalCase.conversation || caseHistory;
       if (evalCase.inject_context && !historyToSend.some((m: any) => m.content?.includes(evalCase.inject_context))) {
         historyToSend = [
