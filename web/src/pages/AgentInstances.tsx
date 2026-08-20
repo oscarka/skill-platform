@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -87,11 +87,11 @@ const CATEGORY_NAMES: Record<string, string> = {
 };
 
 const STATUS_BADGE: Record<string, { label: string; bg: string; color: string; border: string }> = {
-  pending_human_approval: { label: '待录用审批 🎓', bg: 'rgba(245,158,11,.15)', color: '#d97706', border: 'rgba(245,158,11,.3)' },
-  evaluating:             { label: '考核中 🔄',     bg: 'rgba(99,102,241,.15)', color: '#6366f1', border: 'rgba(99,102,241,.3)' },
-  approved:               { label: '已转正上线 ✅', bg: 'rgba(34,197,94,.15)',  color: '#16a34a', border: 'rgba(34,197,94,.3)' },
-  draft:                  { label: '草稿待测 📝',   bg: 'rgba(100,116,139,.15)',color: '#64748b', border: 'rgba(100,116,139,.3)' },
-  rejected:               { label: '已淘汰 ❌',     bg: 'rgba(239,68,68,.15)',  color: '#dc2626', border: 'rgba(239,68,68,.3)' },
+  pending_human_approval: { label: '待录用审批 🎓', bg: 'rgba(245,158,11,.15)', color: '#f59e0b', border: 'rgba(245,158,11,.3)' },
+  evaluating:             { label: '考核中 🔄',     bg: 'rgba(99,102,241,.15)', color: '#818cf8', border: 'rgba(99,102,241,.3)' },
+  approved:               { label: '已转正上线 ✅', bg: 'rgba(34,197,94,.15)',  color: '#4ade80', border: 'rgba(34,197,94,.3)' },
+  draft:                  { label: '草稿待测 📝',   bg: 'rgba(148,163,184,.15)',color: '#94a3b8', border: 'rgba(148,163,184,.3)' },
+  rejected:               { label: '已淘汰 ❌',     bg: 'rgba(239,68,68,.15)',  color: '#f87171', border: 'rgba(239,68,68,.3)' },
 };
 
 function timeAgo(ts?: number) {
@@ -121,6 +121,8 @@ export default function AgentInstances() {
   // ── Candidate agents state ──
   const [candidates, setCandidates] = useState<CandidateAgent[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(true);
+  const [candidateFilter, setCandidateFilter] = useState<'active' | 'pending' | 'approved' | 'rejected' | 'all'>('active');
+  const [selectedVersions, setSelectedVersions] = useState<Record<string, string>>({});
 
   // ── Eval Detail Modal state ──
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateAgent | null>(null);
@@ -286,7 +288,48 @@ export default function AgentInstances() {
     }
   }
 
-  // Filtered case results
+  // ── 按岗位名称聚合候选人（同岗位多版本叠加） ──
+  const candidateGroups = useMemo(() => {
+    const map = new Map<string, CandidateAgent[]>();
+    for (const c of candidates) {
+      const groupKey = c.name.trim();
+      if (!map.has(groupKey)) map.set(groupKey, []);
+      map.get(groupKey)!.push(c);
+    }
+
+    // 每个岗位按分数和时间排序（最高分/最新排在最前）
+    const groups: { positionName: string; list: CandidateAgent[] }[] = [];
+    map.forEach((list, positionName) => {
+      list.sort((a, b) => (b.best_score || 0) - (a.best_score || 0) || b.created_at - a.created_at);
+      groups.push({ positionName, list });
+    });
+    return groups;
+  }, [candidates]);
+
+  // 筛选活跃/淘汰分组
+  const filteredGroups = useMemo(() => {
+    return candidateGroups.map(g => {
+      const filteredList = g.list.filter(c => {
+        if (candidateFilter === 'active') return c.status !== 'rejected';
+        if (candidateFilter === 'pending') return c.status === 'pending_human_approval';
+        if (candidateFilter === 'approved') return c.status === 'approved';
+        if (candidateFilter === 'rejected') return c.status === 'rejected';
+        return true;
+      });
+      return { positionName: g.positionName, list: filteredList, totalCount: g.list.length };
+    }).filter(g => g.list.length > 0);
+  }, [candidateGroups, candidateFilter]);
+
+  // 统计数
+  const counts = useMemo(() => {
+    const pending = candidates.filter(c => c.status === 'pending_human_approval').length;
+    const approved = candidates.filter(c => c.status === 'approved').length;
+    const rejected = candidates.filter(c => c.status === 'rejected').length;
+    const active = candidates.filter(c => c.status !== 'rejected').length;
+    return { pending, approved, rejected, active, total: candidates.length };
+  }, [candidates]);
+
+  // Filtered case results in modal
   const filteredCases = (evalRunDetail?.case_results || []).filter(c => {
     if (onlyFailed && c.passed) return false;
     if (categoryFilter !== 'all' && c.category !== categoryFilter) return false;
@@ -301,15 +344,15 @@ export default function AgentInstances() {
   });
 
   return (
-    <div style={{ padding: '32px 36px', maxWidth: 1100, margin: '0 auto' }}>
+    <div style={{ padding: '32px 36px', maxWidth: 1160, margin: '0 auto' }}>
       {/* 页头 */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <h1 style={{ margin: 0, fontSize: '1.55rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 10 }}>
             <span>👥</span> AI 员工管理大厅
           </h1>
           <p style={{ margin: '6px 0 0', color: 'var(--muted)', fontSize: '.88rem' }}>
-            包含候选员工试用期考评大屏（全量题目与答卷明细），以及已转正上线的在职员工配置。
+            查看候选员工试用期考评大屏（全量题目与答卷明细），以及已转正上线的在职员工配置。
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
@@ -378,17 +421,43 @@ export default function AgentInstances() {
       {/* ── 候选员工列表 Tab ── */}
       {activeTab === 'candidates' && (
         <div>
+          {/* 候选人状态子筛选 Pills */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+            {[
+              { key: 'active', label: `活跃岗位 (${counts.active})` },
+              { key: 'pending', label: `🎓 待录用审批 (${counts.pending})` },
+              { key: 'approved', label: `✅ 已转正 (${counts.approved})` },
+              { key: 'rejected', label: `❌ 已淘汰 (${counts.rejected})` },
+              { key: 'all', label: `全部候选记录 (${counts.total})` },
+            ].map(pill => (
+              <button
+                key={pill.key}
+                onClick={() => setCandidateFilter(pill.key as any)}
+                style={{
+                  padding: '6px 14px', borderRadius: 20, border: '1px solid',
+                  fontSize: '.82rem', fontWeight: 600, cursor: 'pointer',
+                  background: candidateFilter === pill.key ? 'var(--accent)' : 'var(--bg-secondary)',
+                  borderColor: candidateFilter === pill.key ? 'var(--accent)' : 'var(--border)',
+                  color: candidateFilter === pill.key ? '#fff' : 'var(--text-secondary)',
+                  transition: 'all .2s',
+                }}
+              >
+                {pill.label}
+              </button>
+            ))}
+          </div>
+
           {loadingCandidates ? (
             <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--muted)' }}>
               加载候选员工中...
             </div>
-          ) : candidates.length === 0 ? (
+          ) : filteredGroups.length === 0 ? (
             <div style={{
               textAlign: 'center', padding: '60px 0', background: 'var(--card)',
               borderRadius: 16, border: '1px dashed var(--border)',
             }}>
               <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>🏢</div>
-              <h3 style={{ margin: '0 0 8px', fontWeight: 600 }}>暂无候选员工</h3>
+              <h3 style={{ margin: '0 0 8px', fontWeight: 600 }}>暂无匹配的候选员工</h3>
               <p style={{ margin: 0, color: 'var(--muted)', fontSize: '.88rem' }}>
                 前往「AI 招募工作台」输入岗位需求，即可生成并自动启动试用期评测。
               </p>
@@ -401,34 +470,46 @@ export default function AgentInstances() {
               </button>
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
-              {candidates.map(c => {
-                const st = STATUS_BADGE[c.status] || STATUS_BADGE.draft;
-                const isReadyForApprove = c.status === 'pending_human_approval' || c.best_score >= 95;
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 20 }}>
+              {filteredGroups.map(group => {
+                // 当前岗位选中的版本（默认最高分版本）
+                const currentSelectedId = selectedVersions[group.positionName] || group.list[0].id;
+                const currentCandidate = group.list.find(c => c.id === currentSelectedId) || group.list[0];
+
+                const st = STATUS_BADGE[currentCandidate.status] || STATUS_BADGE.draft;
+                const isReadyForApprove = currentCandidate.status === 'pending_human_approval' || currentCandidate.best_score >= 95;
 
                 return (
                   <div
-                    key={c.id}
+                    key={group.positionName}
                     style={{
                       background: 'var(--card)',
-                      border: isReadyForApprove ? '1.5px solid rgba(245,158,11,.4)' : '1px solid var(--border)',
+                      border: isReadyForApprove ? '1.5px solid rgba(245,158,11,.45)' : '1px solid var(--border)',
                       borderRadius: 14,
                       padding: '20px 22px',
                       display: 'flex',
                       flexDirection: 'column',
                       justifyContent: 'space-between',
-                      boxShadow: isReadyForApprove ? '0 4px 20px rgba(245,158,11,.08)' : '0 2px 10px rgba(0,0,0,.03)',
+                      boxShadow: isReadyForApprove ? '0 4px 24px rgba(245,158,11,.08)' : '0 2px 10px rgba(0,0,0,.03)',
                     }}
                   >
                     <div>
-                      {/* 顶部标题与状态徽章 */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                      {/* 岗位标题与状态 */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                         <div>
-                          <div style={{ fontWeight: 700, fontSize: '1.12rem', color: 'var(--text-primary)' }}>
-                            {c.name}
+                          <div style={{ fontWeight: 700, fontSize: '1.15rem', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span>{currentCandidate.name}</span>
+                            {group.list.length > 1 && (
+                              <span style={{
+                                fontSize: '.72rem', padding: '1px 6px', borderRadius: 10,
+                                background: 'rgba(99,102,241,.12)', color: 'var(--accent)', fontWeight: 600,
+                              }}>
+                                {group.list.length} 个候选轮次
+                              </span>
+                            )}
                           </div>
-                          <div style={{ fontSize: '.8rem', color: 'var(--muted)', marginTop: 2, fontFamily: 'monospace' }}>
-                            {c.id}
+                          <div style={{ fontSize: '.78rem', color: 'var(--muted)', marginTop: 2, fontFamily: 'monospace' }}>
+                            {currentCandidate.id}
                           </div>
                         </div>
                         <span style={{
@@ -439,12 +520,43 @@ export default function AgentInstances() {
                         </span>
                       </div>
 
-                      {/* 角色定位简介 */}
+                      {/* 同岗位多版本切换 Tabs（如果有多条记录） */}
+                      {group.list.length > 1 && (
+                        <div style={{
+                          display: 'flex', gap: 6, padding: '6px 8px', borderRadius: 8,
+                          background: 'var(--bg-secondary)', marginBottom: 14, overflowX: 'auto',
+                        }}>
+                          <span style={{ fontSize: '.75rem', color: 'var(--muted)', alignSelf: 'center', flexShrink: 0 }}>
+                            切换版本:
+                          </span>
+                          {group.list.map((c, vIdx) => {
+                            const isSelected = c.id === currentCandidate.id;
+                            return (
+                              <button
+                                key={c.id}
+                                onClick={() => setSelectedVersions(prev => ({ ...prev, [group.positionName]: c.id }))}
+                                style={{
+                                  padding: '3px 9px', borderRadius: 6, border: '1px solid',
+                                  fontSize: '.75rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                                  background: isSelected ? 'var(--card)' : 'transparent',
+                                  borderColor: isSelected ? 'var(--accent)' : 'transparent',
+                                  color: isSelected ? 'var(--accent)' : 'var(--muted)',
+                                }}
+                              >
+                                v{group.list.length - vIdx} · {c.best_score || 0}分
+                                {c.status === 'rejected' ? ' (淘汰)' : ''}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* 角色描述 */}
                       <p style={{
                         margin: '0 0 16px', color: 'var(--text-secondary)', fontSize: '.88rem',
                         lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
                       }}>
-                        {c.role_desc}
+                        {currentCandidate.role_desc}
                       </p>
 
                       {/* 得分与考评状态卡片 */}
@@ -457,15 +569,15 @@ export default function AgentInstances() {
                           <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 2 }}>考评综合得分</div>
                           <div style={{
                             fontSize: '1.3rem', fontWeight: 800,
-                            color: c.best_score >= 95 ? '#16a34a' : c.best_score >= 80 ? '#2563eb' : '#d97706',
+                            color: currentCandidate.best_score >= 95 ? '#16a34a' : currentCandidate.best_score >= 80 ? '#2563eb' : '#d97706',
                           }}>
-                            {c.best_score > 0 ? `${c.best_score} 分` : '暂无'}
+                            {currentCandidate.best_score > 0 ? `${currentCandidate.best_score} 分` : '暂无'}
                           </div>
                         </div>
                         <div>
                           <div style={{ fontSize: '.75rem', color: 'var(--muted)', marginBottom: 2 }}>Ralph 考评轮次</div>
                           <div style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                            第 {c.total_eval_rounds || 1} 轮
+                            第 {currentCandidate.total_eval_rounds || 1} 轮
                           </div>
                         </div>
                       </div>
@@ -474,7 +586,7 @@ export default function AgentInstances() {
                     {/* 底部操作按钮 */}
                     <div style={{ display: 'flex', gap: 10, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
                       <button
-                        onClick={() => openEvalDetail(c)}
+                        onClick={() => openEvalDetail(currentCandidate)}
                         style={{
                           flex: 1, padding: '9px 12px', borderRadius: 8,
                           border: '1px solid var(--border)', background: 'var(--card)',
@@ -485,18 +597,18 @@ export default function AgentInstances() {
                         <span>📋</span> 查看考评大屏 & 答卷
                       </button>
 
-                      {c.status === 'pending_human_approval' && (
+                      {currentCandidate.status === 'pending_human_approval' && (
                         <button
-                          onClick={() => handleApprove(c.id)}
-                          disabled={approving === c.id}
+                          onClick={() => handleApprove(currentCandidate.id)}
+                          disabled={approving === currentCandidate.id}
                           style={{
                             padding: '9px 16px', borderRadius: 8, border: 'none',
                             background: '#16a34a', color: '#fff', fontSize: '.88rem', fontWeight: 600,
-                            cursor: approving === c.id ? 'default' : 'pointer',
+                            cursor: approving === currentCandidate.id ? 'default' : 'pointer',
                             display: 'flex', alignItems: 'center', gap: 4,
                           }}
                         >
-                          {approving === c.id ? '转正中...' : '✅ 批准转正'}
+                          {approving === currentCandidate.id ? '转正中...' : '✅ 批准转正'}
                         </button>
                       )}
                     </div>
@@ -610,12 +722,12 @@ export default function AgentInstances() {
       {/* 新建/克隆 在职实例 弹窗 */}
       {showNew && (
         <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 1000,
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,.75)', backdropFilter: 'blur(6px)', zIndex: 10000,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }} onClick={e => { if (e.target === e.currentTarget) setShowNew(false); }}>
           <div style={{
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 16,
-            padding: '28px 32px', width: 440, boxShadow: '0 20px 60px rgba(0,0,0,.4)',
+            background: '#1e1e24', border: '1px solid rgba(255,255,255,.15)', borderRadius: 16,
+            padding: '28px 32px', width: 440, boxShadow: '0 20px 60px rgba(0,0,0,.6)', color: '#f3f4f6',
           }}>
             <h2 style={{ margin: '0 0 20px', fontSize: '1.1rem', fontWeight: 700 }}>
               {cloneFrom ? `克隆自「${profiles.find(p => p.id === cloneFrom)?.name}」` : '新建 Agent 实例'}
@@ -689,32 +801,39 @@ export default function AgentInstances() {
         </div>
       )}
 
-      {/* ── 候选员工全量考评大屏 & 112 题问答 Modal ── */}
+      {/* ── 候选员工全量考评大屏 & 112 题问答 Modal（高对比纯黑不透光背景） ── */}
       {selectedCandidate && (
         <div
           style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)', zIndex: 1000,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+            position: 'fixed', inset: 0,
+            background: 'rgba(5, 5, 10, 0.85)', backdropFilter: 'blur(8px)',
+            zIndex: 10000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
           }}
           onClick={e => { if (e.target === e.currentTarget) setSelectedCandidate(null); }}
         >
           <div
             style={{
-              background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 16,
-              width: '95vw', maxWidth: 1100, maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-              boxShadow: '0 25px 70px rgba(0,0,0,.5)', overflow: 'hidden',
+              background: '#18181b', // 纯深色不透光背景
+              border: '1px solid rgba(255,255,255,0.18)',
+              borderRadius: 16,
+              width: '95vw', maxWidth: 1120, maxHeight: '90vh',
+              display: 'flex', flexDirection: 'column',
+              boxShadow: '0 25px 80px rgba(0,0,0,0.95)',
+              color: '#f4f4f5',
+              overflow: 'hidden',
             }}
           >
             {/* Modal Header */}
             <div style={{
-              padding: '20px 28px', borderBottom: '1px solid var(--border)',
+              padding: '20px 28px', borderBottom: '1px solid rgba(255,255,255,0.1)',
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              background: 'var(--bg-secondary)',
+              background: '#202024',
             }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: '1.3rem' }}>🎓</span>
-                  <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700 }}>
+                  <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#fafafa' }}>
                     {selectedCandidate.name} — 试用期考评大屏
                   </h2>
                   <span style={{
@@ -726,8 +845,8 @@ export default function AgentInstances() {
                     {STATUS_BADGE[selectedCandidate.status]?.label}
                   </span>
                 </div>
-                <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginTop: 4 }}>
-                  候选员工 ID: <code style={{ fontFamily: 'monospace' }}>{selectedCandidate.id}</code>
+                <div style={{ fontSize: '.82rem', color: '#a1a1aa', marginTop: 4 }}>
+                  候选员工 ID: <code style={{ fontFamily: 'monospace', color: '#e4e4e7' }}>{selectedCandidate.id}</code>
                 </div>
               </div>
 
@@ -749,7 +868,7 @@ export default function AgentInstances() {
                   onClick={() => setSelectedCandidate(null)}
                   style={{
                     background: 'none', border: 'none', fontSize: '1.4rem', cursor: 'pointer',
-                    color: 'var(--muted)', padding: '4px 8px', borderRadius: 6,
+                    color: '#a1a1aa', padding: '4px 8px', borderRadius: 6,
                   }}
                 >
                   ✕
@@ -759,16 +878,16 @@ export default function AgentInstances() {
 
             {/* Modal Navigation Tabs */}
             <div style={{
-              display: 'flex', gap: 16, padding: '0 28px', borderBottom: '1px solid var(--border)',
-              background: 'var(--card)',
+              display: 'flex', gap: 16, padding: '0 28px', borderBottom: '1px solid rgba(255,255,255,0.1)',
+              background: '#18181b',
             }}>
               <button
                 onClick={() => setModalTab('qa')}
                 style={{
                   padding: '12px 6px', border: 'none', background: 'none', cursor: 'pointer',
                   fontWeight: 600, fontSize: '.92rem',
-                  color: modalTab === 'qa' ? 'var(--accent)' : 'var(--muted)',
-                  borderBottom: modalTab === 'qa' ? '2.5px solid var(--accent)' : '2.5px solid transparent',
+                  color: modalTab === 'qa' ? '#818cf8' : '#a1a1aa',
+                  borderBottom: modalTab === 'qa' ? '2.5px solid #818cf8' : '2.5px solid transparent',
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}
               >
@@ -780,8 +899,8 @@ export default function AgentInstances() {
                 style={{
                   padding: '12px 6px', border: 'none', background: 'none', cursor: 'pointer',
                   fontWeight: 600, fontSize: '.92rem',
-                  color: modalTab === 'overview' ? 'var(--accent)' : 'var(--muted)',
-                  borderBottom: modalTab === 'overview' ? '2.5px solid var(--accent)' : '2.5px solid transparent',
+                  color: modalTab === 'overview' ? '#818cf8' : '#a1a1aa',
+                  borderBottom: modalTab === 'overview' ? '2.5px solid #818cf8' : '2.5px solid transparent',
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}
               >
@@ -793,8 +912,8 @@ export default function AgentInstances() {
                 style={{
                   padding: '12px 6px', border: 'none', background: 'none', cursor: 'pointer',
                   fontWeight: 600, fontSize: '.92rem',
-                  color: modalTab === 'spec' ? 'var(--accent)' : 'var(--muted)',
-                  borderBottom: modalTab === 'spec' ? '2.5px solid var(--accent)' : '2.5px solid transparent',
+                  color: modalTab === 'spec' ? '#818cf8' : '#a1a1aa',
+                  borderBottom: modalTab === 'spec' ? '2.5px solid #818cf8' : '2.5px solid transparent',
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}
               >
@@ -803,13 +922,13 @@ export default function AgentInstances() {
             </div>
 
             {/* Modal Body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px', background: '#141417' }}>
               {loadingEvalDetail ? (
-                <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--muted)' }}>
+                <div style={{ textAlign: 'center', padding: '60px 0', color: '#a1a1aa' }}>
                   加载考评问答记录中...
                 </div>
               ) : !evalRunDetail ? (
-                <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--muted)' }}>
+                <div style={{ textAlign: 'center', padding: '40px 0', color: '#a1a1aa' }}>
                   暂未找到评测记录，请先在后台运行 Ralph 评测飞轮。
                 </div>
               ) : (
@@ -821,7 +940,7 @@ export default function AgentInstances() {
                       <div style={{
                         display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap',
                         marginBottom: 20, padding: '12px 16px', borderRadius: 10,
-                        background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                        background: '#1f1f23', border: '1px solid rgba(255,255,255,0.08)',
                       }}>
                         {/* 搜索框 */}
                         <div style={{ flex: 1, minWidth: 200 }}>
@@ -832,8 +951,8 @@ export default function AgentInstances() {
                             onChange={e => setSearchFilter(e.target.value)}
                             style={{
                               width: '100%', boxSizing: 'border-box', padding: '8px 12px',
-                              borderRadius: 6, border: '1px solid var(--border)',
-                              background: 'var(--card)', color: 'var(--text-primary)', fontSize: '.88rem',
+                              borderRadius: 6, border: '1px solid rgba(255,255,255,0.12)',
+                              background: '#27272a', color: '#fafafa', fontSize: '.88rem',
                             }}
                           />
                         </div>
@@ -843,8 +962,8 @@ export default function AgentInstances() {
                           value={categoryFilter}
                           onChange={e => setCategoryFilter(e.target.value)}
                           style={{
-                            padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)',
-                            background: 'var(--card)', color: 'var(--text-primary)', fontSize: '.88rem',
+                            padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.12)',
+                            background: '#27272a', color: '#fafafa', fontSize: '.88rem',
                           }}
                         >
                           <option value="all">全部维度分类 ({evalRunDetail.case_results?.length || 0})</option>
@@ -854,7 +973,7 @@ export default function AgentInstances() {
                         </select>
 
                         {/* 只看未通过 */}
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.88rem', cursor: 'pointer' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.88rem', cursor: 'pointer', color: '#e4e4e7' }}>
                           <input
                             type="checkbox"
                             checked={onlyFailed}
@@ -867,7 +986,7 @@ export default function AgentInstances() {
                       {/* 题目列表 */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                         {filteredCases.length === 0 ? (
-                          <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--muted)' }}>
+                          <div style={{ textAlign: 'center', padding: '40px 0', color: '#a1a1aa' }}>
                             无匹配的测试用例
                           </div>
                         ) : (
@@ -875,36 +994,36 @@ export default function AgentInstances() {
                             <div
                               key={c.case_id}
                               style={{
-                                background: 'var(--card)',
-                                border: `1px solid ${c.passed ? 'var(--border)' : 'rgba(239,68,68,.3)'}`,
+                                background: '#1c1c20',
+                                border: `1px solid ${c.passed ? 'rgba(255,255,255,0.08)' : 'rgba(239,68,68,.35)'}`,
                                 borderRadius: 10,
                                 padding: '16px 20px',
-                                boxShadow: '0 1px 4px rgba(0,0,0,.02)',
+                                boxShadow: '0 2px 8px rgba(0,0,0,.2)',
                               }}
                             >
                               {/* 题目头 */}
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                  <span style={{ fontWeight: 700, fontSize: '.95rem', color: 'var(--text-primary)' }}>
+                                  <span style={{ fontWeight: 700, fontSize: '.95rem', color: '#fafafa' }}>
                                     #{idx + 1} [{c.case_id}] {c.case_name}
                                   </span>
                                   <span style={{
                                     padding: '2px 8px', borderRadius: 12, fontSize: '.72rem',
-                                    background: 'var(--bg-secondary)', color: 'var(--muted)',
+                                    background: 'rgba(255,255,255,0.08)', color: '#a1a1aa',
                                   }}>
                                     {CATEGORY_NAMES[c.category] || c.category}
                                   </span>
                                 </div>
 
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                  <span style={{ fontSize: '.8rem', color: 'var(--muted)' }}>
+                                  <span style={{ fontSize: '.8rem', color: '#a1a1aa' }}>
                                     ⏱️ {c.latency_ms}ms
                                   </span>
                                   <span style={{
                                     padding: '3px 10px', borderRadius: 14, fontSize: '.8rem', fontWeight: 700,
-                                    background: c.passed ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.12)',
-                                    color: c.passed ? '#16a34a' : '#dc2626',
-                                    border: `1px solid ${c.passed ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.25)'}`,
+                                    background: c.passed ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)',
+                                    color: c.passed ? '#4ade80' : '#f87171',
+                                    border: `1px solid ${c.passed ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'}`,
                                   }}>
                                     {c.passed ? `✅ ${c.score}分` : `❌ ${c.score}分`}
                                   </span>
@@ -913,13 +1032,13 @@ export default function AgentInstances() {
 
                               {/* Agent 实际回复 */}
                               <div style={{ marginBottom: 12 }}>
-                                <div style={{ fontSize: '.8rem', color: 'var(--muted)', marginBottom: 4, fontWeight: 600 }}>
+                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600 }}>
                                   🤖 Agent 实际回复：
                                 </div>
                                 <div style={{
                                   padding: '10px 14px', borderRadius: 8,
-                                  background: 'var(--bg-secondary)', fontSize: '.88rem', lineHeight: 1.6,
-                                  color: 'var(--text-primary)', whiteSpace: 'pre-wrap',
+                                  background: '#121215', fontSize: '.88rem', lineHeight: 1.6,
+                                  color: '#f4f4f5', whiteSpace: 'pre-wrap', border: '1px solid rgba(255,255,255,0.05)',
                                 }}>
                                   {c.agent_reply || '(无文本回复)'}
                                 </div>
@@ -927,7 +1046,7 @@ export default function AgentInstances() {
 
                               {/* 断言判定细节 */}
                               <div>
-                                <div style={{ fontSize: '.8rem', color: 'var(--muted)', marginBottom: 4, fontWeight: 600 }}>
+                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600 }}>
                                   ⚖️ 裁判判定明细：
                                 </div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -936,9 +1055,9 @@ export default function AgentInstances() {
                                       key={di}
                                       style={{
                                         padding: '3px 8px', borderRadius: 6, fontSize: '.78rem',
-                                        background: d.includes('✅') ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)',
-                                        color: d.includes('✅') ? '#16a34a' : '#dc2626',
-                                        border: `1px solid ${d.includes('✅') ? 'rgba(34,197,94,.2)' : 'rgba(239,68,68,.2)'}`,
+                                        background: d.includes('✅') ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)',
+                                        color: d.includes('✅') ? '#4ade80' : '#f87171',
+                                        border: `1px solid ${d.includes('✅') ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.25)'}`,
                                       }}
                                     >
                                       {d}
@@ -959,38 +1078,38 @@ export default function AgentInstances() {
                       <div style={{
                         display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16,
                       }}>
-                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(99,102,241,.08)', border: '1px solid rgba(99,102,241,.2)' }}>
-                          <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginBottom: 4 }}>🎯 业务目标与转化 (35%)</div>
-                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#6366f1' }}>{evalRunDetail.score_business} / 100</div>
+                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(99,102,241,.12)', border: '1px solid rgba(99,102,241,.25)' }}>
+                          <div style={{ fontSize: '.82rem', color: '#a5b4fc', marginBottom: 4 }}>🎯 业务目标与转化 (35%)</div>
+                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#818cf8' }}>{evalRunDetail.score_business} / 100</div>
                         </div>
 
-                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(34,197,94,.08)', border: '1px solid rgba(34,197,94,.2)' }}>
-                          <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginBottom: 4 }}>🧠 记忆与画像保真 (15%)</div>
-                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#16a34a' }}>{evalRunDetail.score_memory} / 100</div>
+                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(34,197,94,.12)', border: '1px solid rgba(34,197,94,.25)' }}>
+                          <div style={{ fontSize: '.82rem', color: '#86efac', marginBottom: 4 }}>🧠 记忆与画像保真 (15%)</div>
+                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#4ade80' }}>{evalRunDetail.score_memory} / 100</div>
                         </div>
 
-                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(245,158,11,.08)', border: '1px solid rgba(245,158,11,.2)' }}>
-                          <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginBottom: 4 }}>⚙️ 工单与技能流转 (15%)</div>
-                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#d97706' }}>{evalRunDetail.score_ticket_skill} / 100</div>
+                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(245,158,11,.12)', border: '1px solid rgba(245,158,11,.25)' }}>
+                          <div style={{ fontSize: '.82rem', color: '#fde047', marginBottom: 4 }}>⚙️ 工单与技能流转 (15%)</div>
+                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#f59e0b' }}>{evalRunDetail.score_ticket_skill} / 100</div>
                         </div>
 
-                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(168,85,247,.08)', border: '1px solid rgba(168,85,247,.2)' }}>
-                          <div style={{ fontSize: '.82rem', color: 'var(--muted)', marginBottom: 4 }}>🛡️ 合规与安全 (35%)</div>
-                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#9333ea' }}>{evalRunDetail.score_compliance} / 100</div>
+                        <div style={{ padding: '16px 20px', borderRadius: 12, background: 'rgba(168,85,247,.12)', border: '1px solid rgba(168,85,247,.25)' }}>
+                          <div style={{ fontSize: '.82rem', color: '#d8b4fe', marginBottom: 4 }}>🛡️ 合规与安全 (35%)</div>
+                          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#c084fc' }}>{evalRunDetail.score_compliance} / 100</div>
                         </div>
                       </div>
 
                       <div style={{
                         padding: '18px 22px', borderRadius: 12,
-                        background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                        background: '#1f1f23', border: '1px solid rgba(255,255,255,0.08)',
                       }}>
-                        <h4 style={{ margin: '0 0 10px', fontSize: '1rem', fontWeight: 700 }}>🏆 考评达标结论</h4>
+                        <h4 style={{ margin: '0 0 10px', fontSize: '1rem', fontWeight: 700, color: '#fafafa' }}>🏆 考评达标结论</h4>
                         <p style={{ margin: '0 0 8px', fontSize: '.9rem', lineHeight: 1.6 }}>
                           候选员工 <strong>{selectedCandidate.name}</strong> 考评通过率达到{' '}
                           <strong>{((evalRunDetail.passed_cases / evalRunDetail.total_cases) * 100).toFixed(1)}%</strong>（{evalRunDetail.passed_cases}/{evalRunDetail.total_cases} 题），
                           禁忌零容忍守卫 <strong>{evalRunDetail.taboo_violated ? '⛔ 存在违规' : '✅ 0 项违规'}</strong>。
                         </p>
-                        <p style={{ margin: 0, fontSize: '.85rem', color: 'var(--muted)' }}>
+                        <p style={{ margin: 0, fontSize: '.85rem', color: '#a1a1aa' }}>
                           综合得分达到 <strong>{evalRunDetail.total_score} 分</strong>（已超过 95 分录用达标线），已满足转正要求。
                         </p>
                       </div>
@@ -1001,22 +1120,22 @@ export default function AgentInstances() {
                   {modalTab === 'spec' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                       <div>
-                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6 }}>角色定位 (role_desc)</label>
-                        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--bg-secondary)', fontSize: '.88rem' }}>
+                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6, color: '#fafafa' }}>角色定位 (role_desc)</label>
+                        <div style={{ padding: '10px 14px', borderRadius: 8, background: '#1f1f23', fontSize: '.88rem', border: '1px solid rgba(255,255,255,0.08)' }}>
                           {selectedCandidate.role_desc}
                         </div>
                       </div>
 
                       <div>
-                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6 }}>回复风格 (reply_style)</label>
-                        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--bg-secondary)', fontSize: '.88rem' }}>
+                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6, color: '#fafafa' }}>回复风格 (reply_style)</label>
+                        <div style={{ padding: '10px 14px', borderRadius: 8, background: '#1f1f23', fontSize: '.88rem', border: '1px solid rgba(255,255,255,0.08)' }}>
                           {selectedCandidate.reply_style || '(无特殊限制)'}
                         </div>
                       </div>
 
                       <div>
-                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6 }}>服务流程 (service_flow)</label>
-                        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--bg-secondary)', fontSize: '.88rem' }}>
+                        <label style={{ display: 'block', fontWeight: 600, fontSize: '.88rem', marginBottom: 6, color: '#fafafa' }}>服务流程 (service_flow)</label>
+                        <div style={{ padding: '10px 14px', borderRadius: 8, background: '#1f1f23', fontSize: '.88rem', border: '1px solid rgba(255,255,255,0.08)' }}>
                           {selectedCandidate.service_flow || '(无)'}
                         </div>
                       </div>
