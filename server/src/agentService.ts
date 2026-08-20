@@ -198,19 +198,60 @@ function backgroundPostLog(userId: string, userMsg: string, aiReply: string): vo
     body,
     signal: AbortSignal.timeout(10_000),
   })
-    .then(res => {
+    .then(async res => {
       console.log(`[WikiLog] ✓ 日志写入成功 userId=${userId} HTTP ${res.status}`);
-      // ── 30 轮计数器 ──
-      const count = (syncCounters.get(userId) || 0) + 1;
-      syncCounters.set(userId, count);
-      console.log(`[WikiSync] 计数器 userId=${userId} count=${count}/${SYNC_COUNTER_LIMIT}`);
-      if (count >= SYNC_COUNTER_LIMIT) {
-        console.log(`[WikiSync] 📊 ${SYNC_COUNTER_LIMIT} 轮计数器触发 sync userId=${userId}`);
-        syncCounters.set(userId, 0);
-        triggerWikiSync(userId, 'counter_30');
-      }
+      // ── 数据库驱动的未同步日志对账（废除易丢的内存计数器）──
+      void checkAndTriggerWikiSync(userId);
     })
     .catch(err => console.warn(`[WikiLog] ✗ 日志写入失败（不影响主流程）userId=${userId}:`, err.message));
+}
+
+/**
+ * 实时检查并触发未同步日志消化（阈值 >= 10 条）
+ */
+const _activeSyncLocks = new Set<string>();
+
+export async function checkAndTriggerWikiSync(userId: string): Promise<void> {
+  if (!LLMWIKI_BASE || !userId || _activeSyncLocks.has(userId)) return;
+  try {
+    const res = await fetch(`${LLMWIKI_BASE}/api/clients/${userId}/logs`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return;
+    const logs = await res.json();
+    const unsyncedCount = Array.isArray(logs) ? logs.filter((l: any) => !l.synced).length : 0;
+    if (unsyncedCount >= 10) {
+      console.log(`[WikiSyncWatchdog] 📊 发现客户 userId=${userId} 积压未同步日志 ${unsyncedCount} 条，触发自动同步`);
+      triggerWikiSync(userId, `unsynced_threshold_${unsyncedCount}`, 30);
+    }
+  } catch (err: any) {
+    console.debug(`[WikiSyncWatchdog] 检查未同步日志跳过 userId=${userId}:`, err.message);
+  }
+}
+
+/**
+ * 全局活跃客户定期未同步对账看门狗（定时巡检，兜底所有遗留未同步日志）
+ */
+export async function reconcileActiveClientsWikiSync(): Promise<void> {
+  if (!LLMWIKI_BASE) return;
+  try {
+    // 找出最近 24 小时内有活跃任务的所有客户
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const activeRows = await db.allAsync<any>(
+      `SELECT DISTINCT user_id FROM agent_tasks WHERE started_at >= ? LIMIT 20`,
+      [cutoff]
+    );
+    if (!activeRows || activeRows.length === 0) return;
+
+    for (const r of activeRows) {
+      const uid = r.user_id;
+      if (uid && !_activeSyncLocks.has(uid)) {
+        await checkAndTriggerWikiSync(uid);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[WikiSyncWatchdog] 全局对账巡检异常:', err.message);
+  }
 }
 
 /**
@@ -240,33 +281,39 @@ export async function writeWikiLog(userId: string, content: string, type: string
     throw new Error(`LLMWiki log write failed: HTTP ${res.status} ${errText}`);
   }
   console.log(`[WriteWikiLog] ✓ 写入成功 userId=${userId} HTTP ${res.status}`);
+  void checkAndTriggerWikiSync(userId);
 }
 
 /**
  * 后台触发 LLMWiki Wiki sync Pipeline（Skill 完成后调用）
  */
 export function triggerWikiSyncPublic(userId: string, reason: string): void {
-  triggerWikiSync(userId, reason);
+  triggerWikiSync(userId, reason, 30);
 }
 
-function triggerWikiSync(userId: string, reason: string, maxLogs: number = 15): void {
-  if (!LLMWIKI_BASE || !userId) {
-    console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
+function triggerWikiSync(userId: string, reason: string, maxLogs: number = 30): void {
+  if (!LLMWIKI_BASE || !userId || _activeSyncLocks.has(userId)) {
     return;
   }
+  _activeSyncLocks.add(userId);
   const url = `${LLMWIKI_BASE}/api/clients/${userId}/sync`;
   console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId} maxLogs=${maxLogs}`);
   fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason, maxLogs }),
-    signal: AbortSignal.timeout(600_000),  // 10min: 3-stage LLM pipeline can take 5-10min
+    signal: AbortSignal.timeout(600_000),  // 10min: 3-stage LLM pipeline
   })
     .then(async res => {
       const data = await res.json().catch(() => ({}));
       console.log(`[WikiSync] ✓ sync完成 userId=${userId} HTTP ${res.status} wikiUpdated=${(data as any).wikiUpdated ?? '?'}`);
+      // 成功后清理该用户的内存 Wiki 上下文缓存，确保下次对话立即拉取最新 wiki
+      _wikiCache.delete(userId);
     })
-    .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message));
+    .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message))
+    .finally(() => {
+      _activeSyncLocks.delete(userId);
+    });
 }
 
 /**
