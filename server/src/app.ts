@@ -13,6 +13,7 @@ import { testRouter } from './routes/testRoutes';
 import { mcpRouter } from './routes/mcpRoutes';
 import { oauthRouter } from './routes/oauthRoutes';
 import { agentRouter, startDispatcherLoop } from './routes/agentRoutes';
+import { metaAgentRouter } from './routes/metaAgentRoutes';
 import { reconcileStaleTasks, reconcileActiveClientsWikiSync } from './agentService';
 import cookieParser from 'cookie-parser';
 
@@ -38,6 +39,7 @@ app.use('/api/h5', h5Router);
 app.use('/api/results', resultRouter);
 app.use('/api/test', testRouter);
 app.use('/api/mcp-configs', mcpRouter);
+app.use('/api/v1/meta/agents', metaAgentRouter);    // Meta-Agent 候选员工招聘与评测接口
 app.use('/api/v1/agent', agentRouter);  // 通用 Agent 接口
 app.use('/api/orch', agentRouter);       // 渠道统一入口（/api/orch/ingest）
 app.use('/', oauthRouter);  // OAuth routes: /auth/google/start, /auth/google/callback, /api/oauth/*
