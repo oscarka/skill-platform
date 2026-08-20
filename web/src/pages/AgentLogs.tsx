@@ -765,6 +765,9 @@ function AgentTasksPanel() {
                   channel_delivery_success: { icon: '⚡', label: '渠道直发送达', dotBg: '#10b981', cardBg: '#ecfdf5', cardBorder: '#a7f3d0', textColor: '#047857' },
                   channel_delivery_failed:  { icon: '⚠️', label: '渠道发送异常', dotBg: '#f59e0b', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#b45309' },
                   channel_delivery_skipped: { icon: '⏭️', label: '渠道跳过直发', dotBg: '#6b7280', cardBg: '#f9fafb', cardBorder: '#e5e7eb', textColor: '#374151' },
+                  guard_lifecycle:       { icon: '🛡️', label: '守卫状态变更', dotBg: '#7c3aed', cardBg: '#f5f3ff', cardBorder: '#c4b5fd', textColor: '#5b21b6' },
+                  agent_context_assembled: { icon: '🧩', label: '提示词组装完成', dotBg: '#475569', cardBg: '#f8fafc', cardBorder: '#cbd5e1', textColor: '#334155' },
+                  tool_query_ticket:     { icon: '🔎', label: '历史工单检索', dotBg: '#0891b2', cardBg: '#ecfeff', cardBorder: '#a5f3fc', textColor: '#0e7490' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -897,9 +900,65 @@ function AgentTasksPanel() {
                             {p.output_preview && <details><summary style={{ fontSize: '.72rem', color: '#64748b', cursor: 'pointer' }}>▶ 展开回复内容</summary><pre style={{ fontSize: '.82rem', color: '#14532d', whiteSpace: 'pre-wrap', marginTop: 6, maxHeight: 280, overflow: 'auto', background: 'rgba(255,255,255,.7)', padding: 10, borderRadius: 7, lineHeight: 1.6 }}>{p.output_preview}</pre></details>}
                           </div>
                         )}
+                        {evType === 'skill_suggest' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' as const }}>
+                              <span style={{ fontSize: '.85rem', fontWeight: 600, color: '#92400e' }}>
+                                💡 推荐技能：{p.skillName || '未知技能'}
+                              </span>
+                              {p.skillId && <code style={{ fontSize: '.7rem', color: '#78716c' }}>{String(p.skillId).slice(0, 8)}</code>}
+                            </div>
+                            {p.reason && (
+                              <div style={{ fontSize: '.8rem', color: '#78350f', background: 'rgba(255,255,255,.6)', padding: '6px 10px', borderRadius: 6, borderLeft: '3px solid #f59e0b', lineHeight: 1.5 }}>
+                                推荐理由：{p.reason}
+                              </div>
+                            )}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开原始数据</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
+                          </div>
+                        )}
+                        {evType === 'guard_lifecycle' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const, marginBottom: 6 }}>
+                              <span style={{ fontSize: '.85rem', fontWeight: 600, color: '#5b21b6' }}>
+                                🛡️ {p.action === 'new_created' ? '守卫已创建' : p.action === 'renewed' ? '守卫已续期' : p.action === 'closed' ? '守卫已关闭' : '守卫状态变更'}
+                              </span>
+                              <span style={{ background: '#ede9fe', color: '#5b21b6', padding: '1px 6px', borderRadius: 4, fontSize: '.72rem' }}>{p.skillName}</span>
+                              {p.expiresAt && <span style={{ fontSize: '.7rem', color: '#6b7280' }}>有效至 {p.expiresAt.split('T')[1]?.slice(0, 8)}</span>}
+                            </div>
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开原始数据</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
+                          </div>
+                        )}
+                        {evType === 'agent_context_assembled' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, marginBottom: 6 }}>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#f1f5f9', color: '#334155', fontWeight: 600 }}>
+                                🧩 上下文拼装完成
+                              </span>
+                              {p.routeSkill && <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#ede9fe', color: '#5b21b6' }}>目标技能: {p.routeSkill}</span>}
+                              {p.confidence && <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#dcfce7', color: '#166534' }}>置信度: {p.confidence}</span>}
+                            </div>
+                            {p.directive && (
+                              <div style={{ fontSize: '.78rem', color: '#475569', background: 'rgba(255,255,255,.7)', padding: '6px 10px', borderRadius: 6, borderLeft: '3px solid #94a3b8', lineHeight: 1.5 }}>
+                                {p.directive.slice(0, 160)}{p.directive.length > 160 ? '...' : ''}
+                              </div>
+                            )}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开完整上下文指令</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
+                          </div>
+                        )}
+                        {evType === 'tool_query_ticket' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+                              <span style={{ fontSize: '.82rem', fontWeight: 600, color: p.result?.found ? '#059669' : '#475569' }}>
+                                🔎 {p.result?.found ? '找到近期工单' : '未检索到近期历史工单'}
+                              </span>
+                              {p.result?.ticketId && <code style={{ fontSize: '.7rem', color: '#059669' }}>#{p.result.ticketId}</code>}
+                            </div>
+                            {p.result?.message && <div style={{ fontSize: '.75rem', color: '#64748b' }}>{p.result.message}</div>}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开工单检索结果</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
+                          </div>
+                        )}
                         {evType === 'reply_sent' && (
                           <div>
-                            {/* CUA delivery dark bar */}
                             <div style={{ background: '#0f172a', borderRadius: 7, padding: '7px 11px', marginBottom: 8, fontFamily: 'monospace', fontSize: '11px', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' as const, gap: 6 }}>
                               <div><span style={{ color: '#38bdf8', fontWeight: 'bold' }}>SEND</span> <span style={{ color: '#f1f5f9' }}>{p.channel || '企业微信'}</span></div>
                               <div style={{ display: 'flex', gap: 10 }}>
@@ -944,6 +1003,7 @@ function AgentTasksPanel() {
                                 </div>
                               </div>
                             )}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开身份路由详情</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
                           </div>
                         )}
                         {evType === 'delivery_enqueued' && (
@@ -958,6 +1018,7 @@ function AgentTasksPanel() {
                               </span>
                             </div>
                             {p.jobId && <div style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace' }}>Job ID: {p.jobId}</div>}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开出站任务数据</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
                           </div>
                         )}
                         {evType === 'channel_delivery_success' && (
@@ -978,6 +1039,7 @@ function AgentTasksPanel() {
                                 {p.replyPreview}
                               </div>
                             )}
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开发送结果</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
                           </div>
                         )}
                         {evType === 'channel_delivery_failed' && (
@@ -996,6 +1058,7 @@ function AgentTasksPanel() {
                             <div style={{ fontSize: '.8rem', color: '#dc2626', fontFamily: 'monospace', background: 'rgba(255,255,255,.8)', padding: '6px 10px', borderRadius: 6, border: '1px solid #fecaca' }}>
                               {p.error}
                             </div>
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开失败详情</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
                           </div>
                         )}
                         {evType === 'channel_delivery_skipped' && (
@@ -1013,6 +1076,7 @@ function AgentTasksPanel() {
                             <div style={{ fontSize: '.78rem', color: '#64748b' }}>
                               原因：{p.reason}
                             </div>
+                            <details style={{ marginTop: 6 }}><summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开数据</summary><pre style={{ fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre></details>
                           </div>
                         )}
                         {evType === 'cua_delivered' && (
@@ -1136,8 +1200,11 @@ function AgentTasksPanel() {
                           </div>
                         )}
 
-                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent'].includes(evType) && (
-                          <pre style={{ margin: 0, fontSize: '.72rem', color: '#475569', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
+                        {!['message_received','wiki_fetched','context_snapshot','route_decided','skill_selected','skill_input','skill_started','reassurance_sent','skill_done','reply_sent','task_failed','cua_delivered','app_prewarm','cua_step','skill_suggest','reply_preempted','result_link_built','wiki_sync_pending','wiki_confirmed','wiki_declined','skill_skipped_low_confidence','skill_guard_activated','skill_guard_check','skill_guard_judgment','skill_guard_clarify','skill_guard_closed','ticket_created','ticket_result_sent','identity_resolved','delivery_enqueued','channel_delivery_success','channel_delivery_failed','channel_delivery_skipped','guard_lifecycle','agent_context_assembled','tool_query_ticket'].includes(evType) && (
+                          <details style={{ marginTop: 4 }}>
+                            <summary style={{ fontSize: '.7rem', color: '#94a3b8', cursor: 'pointer' }}>▶ 展开原始数据 ({evType})</summary>
+                            <pre style={{ margin: '4px 0 0 0', fontSize: '10px', color: '#475569', background: 'rgba(255,255,255,.8)', padding: '6px 8px', borderRadius: 4, whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>{JSON.stringify(ev.payload, null, 2)}</pre>
+                          </details>
                         )}
                       </div>
                     </div>
