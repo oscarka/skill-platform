@@ -225,9 +225,10 @@ ${JSON.stringify(currentSpec, null, 2)}
 export async function runRalphLoop(params: {
   agentId: string;
   agentSpec: any;
-  extraSuiteFiles?: string[];   // 额外题库（专属测试集由 agentId 自动推断加载）
+  extraSuiteFiles?: string[];
   maxRounds?: number;
   targetScore?: number;
+  skipAutoOptimizer?: boolean;  // true = ralph.sh 模式，由外部 AI 做优化
   onRoundComplete?: (round: number, score: RunScore, diagnosis: string) => Promise<any>;
 }): Promise<{ finalScore: number; status: 'pending_human_approval' | 'max_rounds_reached'; totalRounds: number }> {
   const {
@@ -235,6 +236,7 @@ export async function runRalphLoop(params: {
     extraSuiteFiles = [],
     maxRounds = MAX_ROUNDS,
     targetScore = PASSING_SCORE,
+    skipAutoOptimizer = false,
     onRoundComplete,
   } = params;
 
@@ -333,8 +335,8 @@ export async function runRalphLoop(params: {
       }
     }
 
-    // Gemini 2.5 Flash 自动优化（无外部覆盖 且 分数未达标 时运行）
-    if (!externalUpdate && runScore.total_score < targetScore) {
+    // Gemini 3.7 Flash 自动优化（skipAutoOptimizer=false 时才运行）
+    if (!externalUpdate && !skipAutoOptimizer && runScore.total_score < targetScore) {
       const geminiUpdate = await callGeminiOptimizer(currentSpec, diagnosis, round);
       if (geminiUpdate) {
         currentSpec = { ...currentSpec, ...geminiUpdate };
@@ -404,12 +406,26 @@ function generateGraduationReport(
   ].join('\n');
 }
 
-// ─── CLI 入口（npx ts-node src/ralphLoop.ts <agentId>）────────────────────────
+// ─── CLI 入口 ──────────────────────────────────────────────────────────────
+// 用法:
+//   npx ts-node src/ralphLoop.ts <agentId>              # 完整飞轮（内置 Gemini 3.7 Flash 优化）
+//   npx ts-node src/ralphLoop.ts <agentId> --single-round  # 单轮模式（ralph.sh 驱动时使用）
+//   SKIP_AUTO_OPTIMIZER=1 npx ts-node src/ralphLoop.ts <agentId> --single-round  # 禁用内置优化器，由 AI 自主优化
 if (require.main === module) {
-  const agentId = process.argv[2];
+  const args = process.argv.slice(2);
+  const agentId = args.find(a => !a.startsWith('--'));
+  const singleRound = args.includes('--single-round');
+  const skipOptimizer = process.env.SKIP_AUTO_OPTIMIZER === '1';
+
   if (!agentId) {
-    console.error('用法: npx ts-node src/ralphLoop.ts <agentId>');
+    console.error('用法: npx ts-node src/ralphLoop.ts <agentId> [--single-round]');
+    console.error('  --single-round   : 只跑一轮后退出（配合 ralph.sh 循环使用）');
+    console.error('  SKIP_AUTO_OPTIMIZER=1 : 禁用内置 Gemini 优化器（让外部 AI 来优化）');
     process.exit(1);
+  }
+
+  if (singleRound) {
+    console.log(`[Ralph] 单轮模式（ralph.sh 驱动），SKIP_AUTO_OPTIMIZER=${skipOptimizer}`);
   }
 
   // 从草稿文件加载 Spec
@@ -428,6 +444,8 @@ if (require.main === module) {
   runRalphLoop({
     agentId,
     agentSpec,
+    maxRounds: singleRound ? 1 : MAX_ROUNDS,    // 单轮模式：跑完1轮即退出
+    skipAutoOptimizer: skipOptimizer,             // ralph.sh 模式：由 AI 来优化，不调 API
     onRoundComplete: async (round, score, diagnosis) => {
       // 将本轮结果上报到 meta_agent_eval_runs 表
       try {

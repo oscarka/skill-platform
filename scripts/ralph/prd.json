@@ -1,63 +1,59 @@
 {
-  "projectName": "Skill Platform — Phase 5 Ralph 评测飞轮",
+  "projectName": "Skill Platform — Agent 评测飞轮（Ralph 驱动）",
   "branchName": "ralph/phase5-eval-loop",
-  "description": "用 Ralph 驱动 Agent 评测飞轮：运行测试集 → Gemini 3.7 Flash 分析诊断 → 优化 Spec → 迭代直到达标",
+  "description": "Ralph 驱动评测飞轮：AI 自主运行113题测试 → 分析 Gemini Judge 诊断 → 通用化修改 Spec → 迭代直到95分",
+
+  "eval_agent_id": "agent_私域社群运营经理_fe0975",
+  "eval_agent_name": "私域社群运营经理",
+  "total_cases": 113,
+  "target_score": 95,
+  "max_rounds": 10,
+  "rounds_completed": 0,
+  "best_score": 0,
+  "current_status": "not_started",
+  "score_history": [],
+
   "userStories": [
     {
-      "id": "RALPH-001",
-      "title": "为候选 Agent 运行第1轮完整评测",
+      "id": "EVAL-001",
+      "title": "第1轮：执行基准评测，建立得分基线",
       "priority": 1,
       "passes": false,
-      "description": "在 agents_factory/ 目录运行 ralphLoop.ts，加载候选 Agent 'agent_私域社群运营经理_fe0975' 的完整113题测试集，执行第1轮对话评测并输出诊断报告",
-      "acceptance_criteria": [
-        "所有113道题都已执行（通用23 + 专属90）",
-        "每道题的 passed/failed 状态已记录",
-        "诊断报告已生成到 agents_factory/reports/ 目录",
-        "本轮得分已写入 agents_factory/eval_logs/ 目录"
-      ],
-      "commands": [
-        "cd /Users/cc/skill-platform/agents_factory",
-        "export $(grep -v '^#' ../server/.env | xargs)",
-        "npx ts-node src/ralphLoop.ts agent_私域社群运营经理_fe0975"
-      ]
+      "description": "运行全量113题评测，获取初始得分作为基线。不做任何 Spec 修改，纯粹观察初始表现。",
+      "done_criteria": "eval_logs/ 中有第1轮得分记录，且 best_score 已更新"
     },
     {
-      "id": "RALPH-002",
-      "title": "Gemini 3.7 Flash 分析诊断并优化 Spec",
+      "id": "EVAL-002",
+      "title": "第2-4轮：针对最大失败类型做通用化修改",
       "priority": 2,
       "passes": false,
-      "description": "基于第1轮诊断报告，调用 Gemini 3.7 Flash（gemini-3.7-flash）分析失败原因，给出通用化 Spec 修改建议并自动应用到 currentSpec",
-      "acceptance_criteria": [
-        "callGeminiOptimizer 使用 gemini-3.7-flash 模型",
-        "修改建议必须是通用化规则，不得硬编码针对具体测试用例的规则",
-        "修改后的 Spec 已持久化到草稿文件",
-        "日志中清晰显示：修改了哪些字段、通用化理由、预期改善"
-      ]
+      "description": "分析第1轮失败用例，找出最高频失败类型（格式/禁忌/流程/安抚），做通用化 Spec 修改，观察分数趋势",
+      "done_criteria": "连续两轮分数上升，或失败最高频类型通过率超过80%"
     },
     {
-      "id": "RALPH-003",
-      "title": "爬山迭代直到分数达标或10轮上限",
+      "id": "EVAL-003",
+      "title": "第5-8轮：精细化调优，覆盖所有维度",
       "priority": 3,
       "passes": false,
-      "description": "持续运行评测 → 优化循环，实现分数爬山：分数上升则晋级，下降则回滚到最优版本，直到达到95分或完成10轮",
-      "acceptance_criteria": [
-        "每轮得分变化趋势清晰可见",
-        "禁忌违反立即触发回滚且不计分",
-        "最优版本快照已正确维护",
-        "最终输出毕业报告或 max_rounds_reached 状态"
-      ]
+      "description": "在初步改善基础上，对各维度精细调优：business_intent/taboo_guard/service_flow/tone_style/edge_case/reassurance/memory/routing",
+      "done_criteria": "所有维度通过率均超过75%"
     },
     {
-      "id": "RALPH-004",
-      "title": "将最优 Spec 同步到平台候选员工列表",
+      "id": "EVAL-004",
+      "title": "达标：综合得分 ≥ 95，进入人工审核",
       "priority": 4,
       "passes": false,
-      "description": "评测完成后，将最优版本的 Spec 通过 API 同步到平台，更新候选员工状态为 pending_human_approval",
-      "acceptance_criteria": [
-        "平台 /api/v1/meta/agents/:id 已更新为最优版本",
-        "候选员工状态变为 pending_human_approval",
-        "毕业报告 Markdown 文件已生成"
-      ]
+      "description": "综合得分达到95分，生成毕业考评报告，候选员工状态变更为 pending_human_approval",
+      "done_criteria": "best_score >= 95，毕业报告已生成"
     }
-  ]
+  ],
+
+  "_instructions": {
+    "how_to_run": "cd /Users/cc/skill-platform/scripts/ralph && ./ralph.sh 10",
+    "eval_command": "cd /Users/cc/skill-platform/agents_factory && export $(grep -v '^#' ../server/.env | xargs) && SKIP_AUTO_OPTIMIZER=1 npx ts-node src/ralphLoop.ts agent_私域社群运营经理_fe0975 --single-round",
+    "draft_spec_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_私域社群运营经理_fe0975.json",
+    "eval_suite_path": "/Users/cc/skill-platform/agents_factory/drafts/agent_私域社群运营经理_fe0975_eval.json",
+    "diagnosis_reports_dir": "/Users/cc/skill-platform/agents_factory/reports/",
+    "eval_logs_dir": "/Users/cc/skill-platform/agents_factory/eval_logs/"
+  }
 }
