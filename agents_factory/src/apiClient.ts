@@ -14,6 +14,10 @@ const PLATFORM_BASE = process.env.PLATFORM_BASE_URL || 'https://skill-platform-y
 const PLATFORM_API_KEY = process.env.PLATFORM_API_KEY || '';
 const TIMEOUT_MS = 30_000;
 
+// ── 通用 Wiki 记忆库访问（llmwiki 服务，与 skill-platform 独立部署）──
+// 不需要单独 Cloud Run，llmwiki 已有自己的服务
+const WIKI_BASE = process.env.WIKI_BASE_URL || 'https://llmwiki-yo5337ccva-an.a.run.app';
+
 /** 安全守卫：防止用真实用户 ID 进行测试 */
 function assertSandboxUser(userId: string) {
   if (!userId.startsWith('eval_sandbox_')) {
@@ -116,7 +120,7 @@ export async function listAvailableSkills(): Promise<Array<{ id: string; name: s
 export async function cleanupSandboxUser(userId: string): Promise<void> {
   assertSandboxUser(userId);
   // 通过 Meta API 清理虚拟用户数据
-  const res = await fetch(`${PLATFORM_BASE}/api/v1/meta/sandbox/${userId}`, {
+  const res = await fetch(`${PLATFORM_BASE}/api/v1/meta/agents/sandbox/${userId}`, {
     method: 'DELETE',
     headers: defaultHeaders,
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -124,4 +128,72 @@ export async function cleanupSandboxUser(userId: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     console.warn(`[API] Cleanup sandbox user ${userId} failed: HTTP ${res.status}`);
   }
+}
+
+// ─── Generic Wiki 记忆库 API（调用 llmwiki 服务）────────────────────────────
+
+/**
+ * 获取实体的记忆摘要（供 Agent System Prompt 注入）
+ * @param domain  - 领域标识（social_ops / sales / hr_recruiting / health）
+ * @param entityId - 实体 ID（用户 ID 或客户 ID）
+ * @param maxTokens - 最大字符数近似限制（默认 2000）
+ * @returns 格式化的记忆摘要字符串，供直接拼入 system prompt
+ */
+export async function getMemorySummary(
+  domain: string,
+  entityId: string,
+  maxTokens = 2000,
+): Promise<string> {
+  try {
+    const res = await fetch(
+      `${WIKI_BASE}/api/generic-wiki/${domain}/${entityId}/summary?max_tokens=${maxTokens}`,
+      { signal: AbortSignal.timeout(TIMEOUT_MS) },
+    );
+    if (res.status === 404) return ''; // 实体尚无记忆档案，正常返回空
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json() as any;
+    return data.summary || '';
+  } catch (err: any) {
+    console.warn(`[Wiki] getMemorySummary failed for ${domain}/${entityId}: ${err.message}`);
+    return ''; // 记忆库不可用时降级：不中断 Agent 运行
+  }
+}
+
+/**
+ * 初始化实体的 Wiki（建档）
+ * @param domain    - 领域标识
+ * @param entityId  - 实体 ID
+ * @param entityInfo - 实体基本信息（name、id 等，用于填充模板）
+ */
+export async function initEntityWiki(
+  domain: string,
+  entityId: string,
+  entityInfo: Record<string, string> = {},
+): Promise<{ pages_created: string[] }> {
+  const res = await fetch(`${WIKI_BASE}/api/generic-wiki/${domain}/${entityId}/init`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(entityInfo),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`[Wiki] Init entity wiki failed: HTTP ${res.status} ${await res.text()}`);
+  return res.json() as any;
+}
+
+/**
+ * 更新实体 Wiki 的单个页面内容
+ */
+export async function updateWikiPage(
+  domain: string,
+  entityId: string,
+  pageName: string,
+  content: string,
+): Promise<void> {
+  const res = await fetch(`${WIKI_BASE}/api/generic-wiki/${domain}/${entityId}/${pageName}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`[Wiki] Update wiki page failed: HTTP ${res.status}`);
 }
