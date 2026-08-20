@@ -8,9 +8,9 @@
   "total_cases": 113,
   "target_score": 95,
   "max_rounds": 10,
-  "rounds_completed": 3,
-  "best_score": 82,
-  "current_status": "in_progress",
+  "rounds_completed": 4,
+  "best_score": 97,
+  "current_status": "pending_human_approval",
   "score_history": [
     {
       "round": 1,
@@ -46,6 +46,18 @@
       "total_cases": 112,
       "taboo_violated": true,
       "changed_fields": ["reply_style", "taboos", "delivery_config.max_reply_length"]
+    },
+    {
+      "round": 4,
+      "score": 97,
+      "score_compliance": 93,
+      "score_business": 100,
+      "score_ticket_skill": 95,
+      "score_memory": 100,
+      "passed_cases": 107,
+      "total_cases": 112,
+      "taboo_violated": false,
+      "changed_fields": ["reply_style", "taboos", "delivery_config.max_reply_length", "inject_context_fix"]
     }
   ],
 
@@ -54,7 +66,7 @@
       "id": "EVAL-001",
       "title": "第1轮：执行基准评测，建立得分基线",
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "description": "运行全量113题评测，获取初始得分作为基线。不做任何 Spec 修改，纯粹观察初始表现。",
       "done_criteria": "eval_logs/ 中有第1轮得分记录，且 best_score 已更新"
     },
@@ -62,7 +74,7 @@
       "id": "EVAL-002",
       "title": "第2-4轮：针对最大失败类型做通用化修改",
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "description": "分析第1轮失败用例，找出最高频失败类型（格式/禁忌/流程/安抚），做通用化 Spec 修改，观察分数趋势",
       "done_criteria": "连续两轮分数上升，或失败最高频类型通过率超过80%"
     },
@@ -70,7 +82,7 @@
       "id": "EVAL-003",
       "title": "第5-8轮：精细化调优，覆盖所有维度",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "description": "在初步改善基础上，对各维度精细调优：business_intent/taboo_guard/service_flow/tone_style/edge_case/reassurance/memory/routing",
       "done_criteria": "所有维度通过率均超过75%"
     },
@@ -78,7 +90,7 @@
       "id": "EVAL-004",
       "title": "达标：综合得分 ≥ 95，进入人工审核",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "description": "综合得分达到95分，生成毕业考评报告，候选员工状态变更为 pending_human_approval",
       "done_criteria": "best_score >= 95，毕业报告已生成"
     }
