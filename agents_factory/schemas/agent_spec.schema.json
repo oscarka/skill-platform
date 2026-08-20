@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentSpec",
+  "description": "Skill-Platform 标准 Agent DSL 规范 v1.0 — 用于定义候选员工的完整岗位配置",
+  "type": "object",
+  "required": ["id", "name", "role_desc", "reply_style"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Agent 唯一标识符（字母数字下划线，如 social_ops_agent_001）",
+      "pattern": "^[a-z0-9_-]{3,64}$"
+    },
+    "name": {
+      "type": "string",
+      "description": "Agent 显示名称（如 小雅·群运营助手）",
+      "maxLength": 30
+    },
+    "role_desc": {
+      "type": "string",
+      "description": "角色职责描述（系统提示词角色定位段）",
+      "maxLength": 500
+    },
+    "reply_style": {
+      "type": "string",
+      "description": "回复风格规范（如 亲切活泼，控制在150字以内，不用 Markdown）",
+      "maxLength": 300
+    },
+    "service_flow": {
+      "type": "string",
+      "description": "标准服务流程 SOP（可选）",
+      "maxLength": 1000
+    },
+    "taboos": {
+      "type": "array",
+      "description": "禁忌词与禁止行为列表（绝对不能触犯的铁律）",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "reassurance_tpl": {
+      "type": "string",
+      "description": "等待期间的安抚话术模板（{客户姓名} 为占位符）",
+      "maxLength": 200
+    },
+    "skill_ids": {
+      "type": "array",
+      "description": "挂载的 Skill ID 列表（从 Skill 库中按需装配）",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "default": []
+    },
+    "knowledge_domain": {
+      "type": "string",
+      "description": "关联的通用知识库 Domain 命名空间（如 social_ops, sales, hr_recruiting）",
+      "pattern": "^[a-z0-9_]{2,32}$"
+    },
+    "routing_examples": {
+      "type": "array",
+      "description": "意图分诊 Few-shot 示例（10组以上）",
+      "items": {
+        "type": "object",
+        "required": ["user_input", "expected_route", "confidence"],
+        "properties": {
+          "user_input": { "type": "string" },
+          "expected_route": {
+            "type": "string",
+            "enum": ["chat", "health_direct", "health_skill", "ticket"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        }
+      },
+      "minItems": 5,
+      "default": []
+    },
+    "delivery_config": {
+      "type": "object",
+      "description": "消息下发配置（节奏控制等）",
+      "properties": {
+        "pacing_enabled": { "type": "boolean", "default": true },
+        "pacing_interval_ms": { "type": "number", "default": 1500, "minimum": 500, "maximum": 5000 }
+      },
+      "default": {}
+    },
+    "meta": {
+      "type": "object",
+      "description": "元信息（由 Meta-Agent 自动填充，不需手动编写）",
+      "properties": {
+        "created_by": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "version": { "type": "string" },
+        "intent_prompt": { "type": "string", "description": "触发创建此 Agent 的原始用户意图指令" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "in_probation", "pending_human_approval", "approved", "rejected"],
+          "description": "员工招聘状态（draft=初稿, in_probation=试用考评中, pending_human_approval=等待终审, approved=转正上线, rejected=淘汰）"
+        },
+        "current_score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "best_score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "current_version_hash": { "type": "string" },
+        "best_version_hash": { "type": "string" },
+        "total_eval_rounds": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

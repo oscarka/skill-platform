@@ -1,0 +1,20 @@
+{
+  "name": "agents-factory",
+  "version": "1.0.0",
+  "description": "AI 员工招聘与试用期考评平台 — 独立隔离沙箱",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "create-agent": "node --loader ts-node/esm src/metaAgent.ts create",
+    "run-ralph": "node --loader ts-node/esm src/ralphLoop.ts",
+    "view-logs": "node --loader ts-node/esm src/viewLogs.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "engines": { "node": ">=20" }
+}
