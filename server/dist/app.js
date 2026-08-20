@@ -64,6 +64,7 @@ app.use((err, _req, res, _next) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 async function start() {
     await Promise.resolve((0, db_1.initDb)());
+    (0, agentRoutes_1.startDispatcherLoop)(); // 启动出站消息分发后台循环（每 5s 扫 delivery_queue）
     app.listen(PORT, () => {
         console.log(`\n🚀 Skill Platform API running at http://localhost:${PORT}`);
         console.log(`   Health: http://localhost:${PORT}/api/health`);

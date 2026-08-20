@@ -447,6 +447,18 @@ async function initDb() {
             `ALTER TABLE user_recent_files ADD COLUMN IF NOT EXISTS content_hash TEXT`,
             // content_hash 索引：必须在 ALTER TABLE 之后创建（否则列不存在会报错）
             `CREATE INDEX IF NOT EXISTS idx_user_recent_files_hash ON user_recent_files(user_id, content_hash)`,
+            // ── Multi-Agent 改造 v1：agent_profiles 新增分诊示例与知识库工具配置字段 ──
+            // routing_examples: JSON {high:[],low:[],none:[]} — 分诊意图说明与示例词，替代代码写死的医疗示例
+            `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS routing_examples TEXT DEFAULT NULL`,
+            // knowledge_config: JSON {type:'llmwiki'|'product_rag'|'crm_profile'|'none', tools:[]} — 知识库类型与 Function Calling 工具清单
+            `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS knowledge_config TEXT DEFAULT NULL`,
+            // agent_id: 记录守卫属于哪个 Agent 实例（多 Agent 隔离用）
+            `ALTER TABLE skill_confirm_guards ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT 'default'`,
+            // agent_id: 记录工单由哪个 Agent 实例创建（异步回发时按该 Agent 的风格组装消息）
+            `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT 'default'`,
+            // ── Skill 标签系统：tags 用于过滤哪些 Skill 可配置给 Agent ──
+            // 格式：JSON 数组字符串，如 '["agent版"]'；NULL 表示无标签
+            `ALTER TABLE skills ADD COLUMN IF NOT EXISTS tags TEXT DEFAULT NULL`,
         ];
         for (const sql of migrations) {
             try {

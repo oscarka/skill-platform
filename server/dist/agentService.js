@@ -54,6 +54,8 @@ exports.appendTaskEvent = appendTaskEvent;
 exports.writeWikiLog = writeWikiLog;
 exports.triggerWikiSyncPublic = triggerWikiSyncPublic;
 exports.saveAgentProfile = saveAgentProfile;
+exports.listAgentProfiles = listAgentProfiles;
+exports.deleteAgentProfile = deleteAgentProfile;
 exports.handleJobCallback = handleJobCallback;
 exports.processAgentChat = processAgentChat;
 const uuid_1 = require("uuid");
@@ -379,6 +381,47 @@ const WIKI_TOOLS = [
         },
     },
 ];
+// ─── Phase B: 动态知识库工具构造 ─────────────────────────────────────────────
+//
+// buildKnowledgeTools(profile):
+//   knowledge_config === null → 返回原始 WIKI_TOOLS（默认医疗行为，零回归）
+//   knowledge_config.type === 'none' → 只返回 query_ticket（不挂任何知识库）
+//   knowledge_config.tools 非空 → 动态构造工具声明 + 保留 query_ticket
+//
+function buildKnowledgeTools(profile) {
+    const kc = profile.knowledge_config;
+    // null = default 医疗 Agent，原样返回 WIKI_TOOLS，一字不变
+    if (!kc)
+        return WIKI_TOOLS;
+    // type === 'none'：该实例不使用知识库，只保留 query_ticket
+    if (kc.type === 'none' || !kc.tools || kc.tools.length === 0) {
+        return WIKI_TOOLS.filter((t) => t.function?.name === 'query_ticket');
+    }
+    // 自定义工具：从 knowledge_config.tools 动态构建
+    const customTools = kc.tools.map((tool) => ({
+        type: 'function',
+        function: {
+            name: tool.name,
+            description: tool.when_to_call.slice(0, 200), // when_to_call 作为 description
+            parameters: { type: 'object', properties: {}, required: [] },
+        },
+    }));
+    // 始终保留 query_ticket（工单查询能力）
+    const queryTicketTool = WIKI_TOOLS.find((t) => t.function?.name === 'query_ticket');
+    return queryTicketTool ? [...customTools, queryTicketTool] : customTools;
+}
+//
+// buildKnowledgePromptHint(profile):
+//   knowledge_config === null → 返回空字符串（default 提示词完全不受影响）
+//   有自定义工具 → 返回强约束引导块（追加到 systemPrompt 末尾）
+//
+function buildKnowledgePromptHint(profile) {
+    const kc = profile.knowledge_config;
+    if (!kc || !kc.tools || kc.tools.length === 0)
+        return '';
+    const lines = kc.tools.map((tool) => `- 当 ${tool.when_to_call} 时 → 必须调用工具 \`${tool.name}\``).join('\n');
+    return '\n\n📋 【可用知识库工具清单】请根据用户意图按需调用，无需重复读取已有内容：\n' + lines;
+}
 // ─── In-memory store for pending async health queries ─────────────────────────
 const pendingRequests = new Map();
 // ─── 工单创建防抖锁（防止短时间内并发请求重复建单）──────────────────────────
@@ -386,39 +429,74 @@ const pendingRequests = new Map();
 const _ticketCreationLocks = new Set();
 // ─── Agent Profile ────────────────────────────────────────────────────────────
 const DEFAULT_PROFILE_ID = 'default';
-let _profileCache = null;
-let _profileCacheExpire = 0;
-async function loadAgentProfile() {
-    if (_profileCache && Date.now() < _profileCacheExpire)
-        return _profileCache;
+// 默认的医疗 Agent 知识库配置（与原有 WIKI_TOOLS 完全等价）
+const DEFAULT_KNOWLEDGE_CONFIG = {
+    type: 'llmwiki',
+    tools: [
+        {
+            name: 'get_medical_history',
+            display_name: '历史病史与化验档案',
+            when_to_call: '当用户询问具体的检查结果、病史详情、化验指标时调用',
+            target_page: 'medical_history.md',
+        },
+        {
+            name: 'get_medication_plan',
+            display_name: '用药方案与干预措施',
+            when_to_call: '当用户询问具体用药、剂量调整、治疗方案、监测目标时调用',
+            target_page: 'medication_plan.md',
+        },
+    ],
+};
+// 默认的医疗 Agent 分诊配置（与原有 routeDecision Prompt 中写死的示例完全等价）
+const DEFAULT_ROUTING_EXAMPLES = {
+    high_desc: '客户明确表达了要使用某个专项服务，可以主动向用户推荐该服务',
+    low_desc: '客户有健康相关问题，但没明确要求使用某个服务，直接用AI知识回答即可，不推销服务',
+    examples_high: ['帮我做营养分析', '开始AI营养师', '帮我分析报告'],
+    examples_low: ['我血糖高怎么办', '最近血压不稳定', '体重一直降是什么原因'],
+    examples_none: ['你好', '能咨询血糖问题吗', '你们能做什么'],
+};
+// Profile 缓存：key = agentId，支持多实例并发缓存
+const _profileCacheMap = new Map();
+async function loadAgentProfile(agentId) {
+    const id = agentId || DEFAULT_PROFILE_ID;
+    const cached = _profileCacheMap.get(id);
+    if (cached && Date.now() < cached.expireAt)
+        return cached.profile;
     try {
-        const row = await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID]);
-        const profile = row ? {
-            id: row.id,
-            name: row.name || '服务助理',
-            role_desc: row.role_desc || '',
-            reply_style: row.reply_style || '',
-            service_flow: row.service_flow || '',
-            taboos: safeParseJson(row.taboos, []),
-            reassurance_mode: (row.reassurance_mode === 'template' ? 'template' : 'ai'),
-            reassurance_tpl: row.reassurance_tpl || '',
-            skill_mode: (row.skill_mode === 'manual' ? 'manual' : 'auto'),
-            skill_ids: safeParseJson(row.skill_ids, []),
+        const row = await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [id]);
+        // 若指定 id 不存在，自动 fallback 到 default
+        const src = row ?? (id !== DEFAULT_PROFILE_ID
+            ? await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID])
+            : null);
+        const profile = src ? {
+            id: src.id,
+            name: src.name || '服务助理',
+            role_desc: src.role_desc || '',
+            reply_style: src.reply_style || '',
+            service_flow: src.service_flow || '',
+            taboos: safeParseJson(src.taboos, []),
+            reassurance_mode: (src.reassurance_mode === 'template' ? 'template' : 'ai'),
+            reassurance_tpl: src.reassurance_tpl || '',
+            skill_mode: (src.skill_mode === 'manual' ? 'manual' : 'auto'),
+            skill_ids: safeParseJson(src.skill_ids, []),
+            routing_examples: safeParseJson(src.routing_examples, null), // null = 未配置，使用原始提示词
+            knowledge_config: safeParseJson(src.knowledge_config, null), // null = 未配置，使用原有 WIKI 逻辑
         } : defaultProfile();
-        _profileCache = profile;
-        _profileCacheExpire = Date.now() + 60_000; // 60s cache
+        _profileCacheMap.set(id, { profile, expireAt: Date.now() + 60_000 });
         return profile;
     }
     catch {
-        return _profileCache || defaultProfile();
+        return _profileCacheMap.get(id)?.profile ?? defaultProfile();
     }
 }
-async function saveAgentProfile(data) {
+async function saveAgentProfile(data, agentId) {
+    const id = agentId || DEFAULT_PROFILE_ID;
     const now = Date.now();
-    const existing = await db.getAsync('SELECT id FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID]);
+    const existing = await db.getAsync('SELECT id FROM agent_profiles WHERE id = ?', [id]);
     if (existing) {
         await db.runAsync(`UPDATE agent_profiles SET name=?, role_desc=?, reply_style=?, service_flow=?,
-       taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?, updated_at=?
+       taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?,
+       routing_examples=?, knowledge_config=?, updated_at=?
        WHERE id=?`, [
             data.name ?? '服务助理',
             data.role_desc ?? '',
@@ -429,15 +507,18 @@ async function saveAgentProfile(data) {
             data.reassurance_tpl ?? '',
             data.skill_mode ?? 'auto',
             JSON.stringify(data.skill_ids ?? []),
+            // routing_examples/knowledge_config: 若前端未传入（undefined），保持 null；若明确传入则写入
+            data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+            data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
             now,
-            DEFAULT_PROFILE_ID,
+            id,
         ]);
     }
     else {
         await db.runAsync(`INSERT INTO agent_profiles (id,name,role_desc,reply_style,service_flow,taboos,
-       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [
-            DEFAULT_PROFILE_ID,
+       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,routing_examples,knowledge_config,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+            id,
             data.name ?? '服务助理',
             data.role_desc ?? '',
             data.reply_style ?? '',
@@ -447,10 +528,45 @@ async function saveAgentProfile(data) {
             data.reassurance_tpl ?? '',
             data.skill_mode ?? 'auto',
             JSON.stringify(data.skill_ids ?? []),
+            data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+            data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
             now, now,
         ]);
     }
-    return loadAgentProfile();
+    // 清除该 agentId 的缓存，下次重新读取
+    _profileCacheMap.delete(id);
+    return loadAgentProfile(id);
+}
+// 获取所有 Agent 实例列表
+async function listAgentProfiles() {
+    try {
+        const rows = await db.allAsync('SELECT * FROM agent_profiles ORDER BY created_at ASC');
+        return rows.map(src => ({
+            id: src.id,
+            name: src.name || '服务助理',
+            role_desc: src.role_desc || '',
+            reply_style: src.reply_style || '',
+            service_flow: src.service_flow || '',
+            taboos: safeParseJson(src.taboos, []),
+            reassurance_mode: (src.reassurance_mode === 'template' ? 'template' : 'ai'),
+            reassurance_tpl: src.reassurance_tpl || '',
+            skill_mode: (src.skill_mode === 'manual' ? 'manual' : 'auto'),
+            skill_ids: safeParseJson(src.skill_ids, []),
+            routing_examples: safeParseJson(src.routing_examples, null),
+            knowledge_config: safeParseJson(src.knowledge_config, null),
+        }));
+    }
+    catch {
+        return [];
+    }
+}
+// 删除 Agent 实例（不允许删除 'default'）
+async function deleteAgentProfile(agentId) {
+    if (agentId === DEFAULT_PROFILE_ID)
+        return false;
+    await db.runAsync('DELETE FROM agent_profiles WHERE id = ?', [agentId]);
+    _profileCacheMap.delete(agentId);
+    return true;
 }
 function defaultProfile() {
     return {
@@ -464,6 +580,8 @@ function defaultProfile() {
         reassurance_tpl: '',
         skill_mode: 'auto',
         skill_ids: [],
+        routing_examples: null, // 默认不配置，routeDecision 使用原始医疗提示词
+        knowledge_config: null, // 默认不配置，使用原有 WIKI 工具逻辑
     };
 }
 // ─── Config helpers ───────────────────────────────────────────────────────────
@@ -592,7 +710,14 @@ async function callGeminiMessages(systemPrompt, messages, apiKey, maxTokens = 40
         for (const tc of toolCalls) {
             const fnName = tc.function?.name || '';
             let result = '';
-            if (fnName === 'get_medical_history') {
+            // ── Phase B: 先查 knowledge_config.tools 动态匹配（null = default 医疗，跳过）──
+            const _kcTools = options?._knowledgeTools;
+            const _matchedKcTool = _kcTools?.find(t => t.name === fnName);
+            if (_matchedKcTool) {
+                result = await fetchWikiPage(userId, _matchedKcTool.target_page);
+                console.log(`[Gemini] 📄 knowledge_tool=${fnName} page=${_matchedKcTool.target_page} → ${result.length}字`);
+            }
+            else if (fnName === 'get_medical_history') {
                 result = await fetchWikiPage(userId, 'medical_history.md');
                 console.log(`[Gemini] 📄 get_medical_history → ${result.length}字`);
             }
@@ -684,7 +809,9 @@ async function queryContextSnapshot(sessionId, userId) {
     if (sessionId) {
         activeGuard = await db.getAsync(`SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>?
-       ORDER BY created_at DESC LIMIT 1`, [sessionId, nowMs]).catch(() => null);
+       ORDER BY created_at DESC LIMIT 1`, 
+        // Note: agent_id filter not applied here (agentContextPackage doesn't know profile yet)
+        [sessionId, nowMs]).catch(() => null);
     }
     // 查工单：该用户7天内最新工单（任意skill）
     let recentTicket = null;
@@ -801,7 +928,7 @@ function _routeCacheKey(content, skillIds) {
     const contentSnip = content.trim().slice(0, 80);
     return `${contentSnip}||${skillIds.sort().join(',')}`;
 }
-async function routeDecision(content, history, notes, availableSkills, apiKey) {
+async function routeDecision(content, history, notes, availableSkills, apiKey, routingExamples) {
     const model = process.env.ARK_MODEL || 'deepseek-v4-flash-ga-260731';
     // 缓存命中时直接返回
     const cacheKey = _routeCacheKey(content, availableSkills.map(s => s.id));
@@ -821,7 +948,12 @@ async function routeDecision(content, history, notes, availableSkills, apiKey) {
     const recentHistory = history.slice(-20)
         .map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`)
         .join('\n');
-    const systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+    // 当 routing_examples 未配置时，使用原始提示词（一字不改，保证现有行为不变）
+    // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
+    let systemPrompt;
+    if (!routingExamples) {
+        // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
+        systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
 1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
 2. 判断置信度（confidence）：
@@ -839,6 +971,32 @@ ${skillList}
 
 只返回 JSON，不要有其他内容：
 {"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+    }
+    else {
+        // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
+        const re = routingExamples;
+        const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
+        const exLow = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
+        const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
+        systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+
+1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
+2. 判断置信度（confidence）：
+   - "high"：${re.high_desc}（如：${exHigh}）
+   - "low"：${re.low_desc}（如：${exLow}）
+   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
+
+注意：
+- 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
+- 询问服务能力/范围属于 none，不是 low
+- 如没有合适的 skill，skill_id 返回 null
+
+可用专项服务列表：
+${skillList}
+
+只返回 JSON，不要有其他内容：
+{"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+    }
     const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
     const t0 = Date.now();
     try {
@@ -1023,14 +1181,16 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
   「done」= 分析已完成。根据用户意图：若问具体健康建议（如"能换牛奶吗"），必须先引用 report 字段内容回答再附 report_url；若只问"报告在哪"则直接给 report_url；无论哪种情况，服务名必须用 skill_name 字段原文
   「created」= 已创建待处理，告知工单已建即可
   「expired」= 已过期，可重新开始
-- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名`;
+- ⚠️ 关键：回复中提到服务名时，永远使用 query_ticket 返回的 skill_name 原文，不要替换成对话中出现过的其他服务名` + buildKnowledgePromptHint(profile);
     const messages = [
         ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
         { role: 'user', content },
     ];
+    const _chatKcTools = profile.knowledge_config?.tools;
     const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 1024, {
-        tools: WIKI_TOOLS, // 含 query_ticket，让 AI 按需查工单
+        tools: buildKnowledgeTools(profile), // Phase B: 动态工具（null → 原 WIKI_TOOLS）
         userId: meta.user_id,
+        _knowledgeTools: _chatKcTools, // Phase B: 传入动态分发用
         onToolCall: (name, _args, result) => {
             if (name === 'query_ticket') {
                 void appendTaskEvent(requestId, 'tool_query_ticket', {
@@ -1075,7 +1235,7 @@ async function handleHealthDirect(req, apiKey, requestId, delivery, profile, ski
 
 要求：
 - 不要使用 Markdown 格式
-- 如无健康档案，基于对话内容给出通用建议`;
+- 如无健康档案，基于对话内容给出通用建议` + buildKnowledgePromptHint(profile);
     const contextBlock = [
         notes ? `【客户备注】\n${notes}` : '',
         `【当前问题】\n${content}`,
@@ -1084,9 +1244,11 @@ async function handleHealthDirect(req, apiKey, requestId, delivery, profile, ski
         ...history.slice(-20).map(h => ({ role: h.role, content: h.content })),
         { role: 'user', content: contextBlock },
     ];
+    const _healthKcTools = profile.knowledge_config?.tools;
     const reply = await callGeminiMessages(systemPrompt, messages, apiKey, 2048, {
-        tools: WIKI_TOOLS, // Step 6: 始终传入，包含 query_ticket
+        tools: buildKnowledgeTools(profile), // Phase B: 动态工具（null → 原 WIKI_TOOLS）
         userId: meta.user_id,
+        _knowledgeTools: _healthKcTools, // Phase B: 传入动态分发用
         onToolCall: (name, args, result) => {
             // Step 6: 记录 tool call 事件到日志
             if (name === 'query_ticket') {
@@ -1296,13 +1458,14 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
             source_channel: req.source_channel || req.source || '',
             juhe_conv_id: req.meta?.juhe_conv_id || '',
         });
+        // Phase C: 工单记录 agent_id，供异步回发时按对应 Agent 人设组装通知消息
         await db.runAsync(`INSERT INTO tickets
         (id, skill_id, token, title, patient_name, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [ticketId, skillId, token,
+         created_by, status, return_count, expires_at, created_at, updated_at, delivery_info, request_id, prefilled_values, agent_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [ticketId, skillId, token,
             `${skillName} — ${fromName} — ${new Date(now).toLocaleDateString('zh-CN')}`,
             patientName, prefilledNotes,
-            meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson]);
+            meta.user_id || null, 'waiting_input', 0, expiresAt, now, now, deliveryInfo, requestId, prefilledValuesJson, profile.id]);
         // ── 将最近附件默认写入 ticket_inputs（系统自动挂载）───────────────────────
         for (const f of prefilledFiles) {
             await db.runAsync(`INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
@@ -1730,9 +1893,12 @@ async function processAgentChat(req) {
     let activeGuardRow = null; // 非 null = 守卫有效且未超轮次，留给 Step 4
     if (sessionId) {
         const nowMs = Date.now();
+        // Phase C: 加 agent_id 过滤，防止不同 Agent 的守卫相互干扰
+        // 此处 profile 尚未加载，直接从 req 读取 agent_id（未传则 'default'）
+        const _reqAgentId = req.agent_id || 'default';
         const activeGuard = await db.getAsync(`SELECT * FROM skill_confirm_guards
-       WHERE session_id=? AND status='active' AND expires_at>?
-       ORDER BY created_at DESC LIMIT 1`, [sessionId, nowMs]);
+       WHERE session_id=? AND status='active' AND expires_at>? AND (agent_id=? OR agent_id IS NULL OR agent_id='')
+       ORDER BY created_at DESC LIMIT 1`, [sessionId, nowMs, _reqAgentId]);
         if (activeGuard) {
             const MAX_GUARD_ROUNDS = 10;
             const newCheckCount = (activeGuard.check_count || 0) + 1;
@@ -1773,9 +1939,11 @@ async function processAgentChat(req) {
         }
     }
     // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
+    // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
+    // 注：守卫查询时使用的是 req.agent_id（上面 _reqAgentId），不依赖此 profile
     void updateAgentTask(requestId, { status: 'routing' });
-    const profile = await loadAgentProfile();
-    console.log(`[AgentService] Profile: skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
+    const profile = await loadAgentProfile(req.agent_id);
+    console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
     const availableSkills = await getAvailableSkills(profile);
     console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
     // 检查是否前端/守卫强制指定了 skill_id（守卫确认 yes 时注入，优先级最高）
@@ -1828,7 +1996,7 @@ async function processAgentChat(req) {
             catch { /* 查询失败不影响路由 */ }
         }
         const rdResult = await routeDecision(routingContent, // 含文件摘要的路由上下文
-        req.history || [], req.notes || '', availableSkills, apiKey);
+        req.history || [], req.notes || '', availableSkills, apiKey, profile.routing_examples || undefined);
         selectedSkillId = rdResult.skill_id;
         selectedSkillName = rdResult.skill_name;
         selectedSkillDesc = rdResult.skill_desc;
@@ -2038,10 +2206,11 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         const guardId = `guard_${(0, uuid_1.v4)().replace(/-/g, '').slice(0, 12)}`;
         const nowTs = Date.now();
         try {
+            // Phase C: 写入 agent_id，保证守卫与创建它的 Agent 实例绑定
             await db.runAsync(`INSERT INTO skill_confirm_guards
-          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`, [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
-                '', nowTs, nowTs, nowTs + 30 * 60 * 1000]);
+          (id, session_id, user_id, skill_id, skill_name, suggest_msg, suggest_ts, status, created_at, expires_at, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`, [guardId, sessionId, userId, newGuardSkillId, newGuardSkillName,
+                '', nowTs, nowTs, nowTs + 30 * 60 * 1000, profile.id]);
             console.log(`[SkillGuard] 🛡️ guard 已激活 id=${guardId} skill=${newGuardSkillName} session=${sessionId}`);
             void appendTaskEvent(requestId, 'skill_guard_activated', {
                 guardId, skillId: newGuardSkillId, skillName: newGuardSkillName,

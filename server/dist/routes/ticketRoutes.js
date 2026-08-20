@@ -119,13 +119,14 @@ exports.ticketRouter.post('/', async (req, res) => {
         const token = (0, uuid_1.v4)().replace(/-/g, '');
         const now = Date.now();
         const expiresAt = (now + (await EXPIRY_DAYS()) * 24 * 60 * 60 * 1000);
+        const agentId = req.body.agent_id || 'default';
         await db.runAsync(`INSERT INTO tickets
         (id, skill_id, token, title, patient_name, patient_phone, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, skill_id, token,
+         created_by, status, return_count, expires_at, created_at, updated_at, agent_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [id, skill_id, token,
             title || `${skill.name} — ${new Date(now).toLocaleDateString('zh-CN')}`,
             patient_name || null, patient_phone || null, notes || null,
-            created_by || null, 'created', 0, expiresAt, now, now]);
+            created_by || null, 'created', 0, expiresAt, now, now, agentId]);
         const ticket = await db.getAsync('SELECT * FROM tickets WHERE id=?', [id]);
         res.status(201).json({ ticket: await ticketToResponse(ticket, skill) });
     }

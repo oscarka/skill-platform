@@ -14,7 +14,10 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
+import { enqueueDelivery, startDispatcherLoop } from '../dispatcherService';
 import * as db from '../db';
+
+export { startDispatcherLoop };  // 供 server.ts 在启动时调用
 
 
 export const agentRouter = express.Router();
@@ -25,62 +28,98 @@ const CUA_SEND_URL  = process.env.CUA_SEND_URL  || '';  // Mac mini 发消息接
 const JUHE_SEND_URL = process.env.JUHE_SEND_URL || '';  // juhe-api /api/send 接口
 
 // ── 渠道身份表查询 / 自动登记 ────────────────────────────────────────────
-interface ChannelIdentity {
-  unified_id:   string;   // unionid or generated id
+interface DeliveryRoute {
+  channel:      string;    // 'juhe' | 'wecom' | 'feishu' | ...
+  channel_uid:  string;
+  conv_id:      string | null;
   display_name: string;
-  juhe_conv_id: string | null;  // S:vid or R:roomid
+}
+
+interface ChannelIdentity {
+  unified_id:      string;
+  display_name:    string;
+  delivery_routes: DeliveryRoute[];  // 该客户所有已知的出站句柄
 }
 
 async function resolveIdentity(
-  channel: string, channel_uid: string,
-  from_name: string, conversation_id: string
+  channel: string,
+  channel_uid: string,
+  from_name: string,
+  conversation_id: string,
+  extra?: { unionid?: string | null; conv_id?: string | null }
 ): Promise<ChannelIdentity> {
-  // 1. 查询当前渠道的映射
-  const row = await db.getAsync<any>(
-    `SELECT ci.unified_id, ci.display_name,
-            jci.conv_id AS juhe_conv_id
-     FROM skill_platform.channel_identities ci
-     LEFT JOIN skill_platform.channel_identities jci
-       ON jci.unified_id = ci.unified_id AND jci.channel = 'juhe'
-     WHERE ci.channel = $1 AND ci.channel_uid = $2`,
+  const incomingUnionid = extra?.unionid || null;
+  const incomingConvId  = extra?.conv_id  || conversation_id || null;
+
+  // ── 步骤 1：尝试按当前渠道 (channel, channel_uid) 查现有记录 ──
+  let row = await db.getAsync<any>(
+    `SELECT unified_id, display_name FROM skill_platform.channel_identities
+     WHERE channel = $1 AND channel_uid = $2`,
     [channel, channel_uid]
   );
 
+  let unified_id: string;
+
   if (row) {
-    // 如果 juhe 渠道且有新 conv_id，更新一下
-    if (channel === 'juhe' && conversation_id && conversation_id !== row.juhe_conv_id) {
-      await db.runAsync(
-        `UPDATE skill_platform.channel_identities SET conv_id=$1, updated_at=now() WHERE channel='juhe' AND channel_uid=$2`,
-        [conversation_id, channel_uid]
-      ).catch(() => {});
+    unified_id = row.unified_id;
+    // 有新 conv_id 或 unionid 就顺手更新
+    await db.runAsync(
+      `UPDATE skill_platform.channel_identities
+       SET conv_id    = COALESCE($1, conv_id),
+           unionid    = COALESCE($2, unionid),
+           updated_at = now()
+       WHERE channel = $3 AND channel_uid = $4`,
+      [incomingConvId || null, incomingUnionid, channel, channel_uid]
+    ).catch(() => {});
+  } else {
+    // ── 步骤 2：新客户 — 先按 unionid 查是否已有其他渠道的记录（跨渠道合并）
+    if (incomingUnionid) {
+      const existing = await db.getAsync<any>(
+        `SELECT unified_id FROM skill_platform.channel_identities
+         WHERE unionid = $1 LIMIT 1`,
+        [incomingUnionid]
+      );
+      unified_id = existing?.unified_id || incomingUnionid;  // 优先用已有的，否则用 unionid 本身
+    } else {
+      // 无 unionid：生成 channel-prefixed id（临时，后续获取到 unionid 后可更新）
+      unified_id = `${channel}_${channel_uid}`;
     }
-    return {
-      unified_id:   row.unified_id,
-      display_name: row.display_name || from_name,
-      juhe_conv_id: channel === 'juhe' ? (conversation_id || row.juhe_conv_id) : row.juhe_conv_id,
-    };
+
+    // INSERT 新行（ON CONFLICT 兜底，防止并发重复）
+    await db.runAsync(
+      `INSERT INTO skill_platform.channel_identities
+         (unified_id, channel, channel_uid, display_name, conv_id, unionid, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,now(),now())
+       ON CONFLICT (channel,channel_uid) DO UPDATE
+         SET unified_id  = EXCLUDED.unified_id,
+             conv_id     = COALESCE(EXCLUDED.conv_id, skill_platform.channel_identities.conv_id),
+             unionid     = COALESCE(EXCLUDED.unionid, skill_platform.channel_identities.unionid),
+             updated_at  = now()`,
+      [unified_id, channel, channel_uid, from_name,
+       incomingConvId || null, incomingUnionid]
+    ).catch(() => {});
+
+    console.log(`[Identity] 新客户注册: channel=${channel} uid=${channel_uid} unified=${unified_id} unionid=${incomingUnionid || 'none'}`);
   }
 
-  // 2. 新客户：自动创建（unified_id = channel_uid 先用原始 ID，后续关联后替换）
-  const new_unified_id = channel === 'juhe'
-    ? `juhe_${channel_uid}`
-    : `wecom_${channel_uid}`;
+  // ── 步骤 3：查出该 unified_id 下所有渠道的出站句柄（delivery_routes）──
+  const allRows = await db.allAsync<any>(
+    `SELECT channel, channel_uid, conv_id, display_name
+     FROM skill_platform.channel_identities
+     WHERE unified_id = $1`,
+    [unified_id]
+  );
 
-  await db.runAsync(
-    `INSERT INTO skill_platform.channel_identities
-       (unified_id, channel, channel_uid, display_name, conv_id, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,now(),now())
-     ON CONFLICT (channel,channel_uid) DO NOTHING`,
-    [new_unified_id, channel, channel_uid, from_name,
-     channel === 'juhe' ? conversation_id : null]
-  ).catch(() => {});
+  const delivery_routes: DeliveryRoute[] = (allRows || []).map((r: any) => ({
+    channel:      r.channel,
+    channel_uid:  r.channel_uid,
+    conv_id:      r.conv_id || null,
+    display_name: r.display_name || from_name,
+  }));
 
-  console.log(`[Orch/Ingest] 新客户自动注册: channel=${channel} uid=${channel_uid} unified=${new_unified_id}`);
-  return {
-    unified_id:   new_unified_id,
-    display_name: from_name,
-    juhe_conv_id: channel === 'juhe' ? conversation_id : null,
-  };
+  const display_name = allRows?.[0]?.display_name || from_name;
+
+  return { unified_id, display_name, delivery_routes };
 }
 
 // 回复优先 juhe，失败再 fallback CUA
@@ -168,11 +207,16 @@ agentRouter.post('/ingest', async (req, res) => {
     const history   = Array.isArray(req.body.history) ? req.body.history : [];
     const notes     = req.body.notes || '';
 
-    // 身份统一：查 channel_identities，新客户自动注册
-    const identity   = await resolveIdentity(channel, from_user_id, from_name || from_user_id, sessionId);
-    const unified_id   = identity.unified_id;
-    const display_name = identity.display_name;
-    const juhe_conv_id = identity.juhe_conv_id;
+    // 身份统一：查 channel_identities，新客户自动注册，带 unionid 时自动跨渠道合并
+    const identity       = await resolveIdentity(channel, from_user_id, from_name || from_user_id, sessionId, {
+      unionid: req.body.unionid || null,
+      conv_id: conversation_id || null,
+    });
+    const unified_id      = identity.unified_id;
+    const display_name    = identity.display_name;
+    const delivery_routes = identity.delivery_routes;
+    // 向后兼容：从 routes 中找 juhe 的 conv_id（sendReply 和 dispatcherService 都会用）
+    const juhe_conv_id    = delivery_routes.find((r: DeliveryRoute) => r.channel === 'juhe')?.conv_id || null;
 
     // ── 附件暂存：记录用户最近24小时上传的文件 ──────────────────────────────
     const media_url = req.body.media_url || null;
@@ -271,17 +315,19 @@ agentRouter.post('/ingest', async (req, res) => {
 
         if (result.reply) {
           const t0Send = Date.now();
-          await sendReply({
-            reply:        result.reply,
-            juhe_conv_id,
-            display_name,
-            request_id:  result.request_id || '',
-            session_id:  unified_id,
-            status:      result.status,
-            reasoning:   result.reasoning,
-            delivery:    result.delivery,
-          }).catch(e => console.warn('[Orch/Ingest] sendReply error:', e.message));
-          console.log(`[Orch/Ingest] ⏱️ total: process=${processMs}ms send=${Date.now() - t0Send}ms e2e=${Date.now() - t0Process}ms`);
+          // 出站持久化入队（<5ms），实际发送由 Dispatcher 后台异步处理
+          await enqueueDelivery({
+            taskId:     result.request_id || '',
+            customerId: unified_id,
+            reply:      result.reply,
+            routes:     delivery_routes,
+            requestId:  result.request_id || '',
+            sessionId:  unified_id,
+            status:     result.status,
+            reasoning:  result.reasoning,
+            delivery:   result.delivery,
+          }).catch(e => console.warn('[Orch/Ingest] enqueueDelivery error:', e.message));
+          console.log(`[Orch/Ingest] ⏱️ process=${processMs}ms enqueue=${Date.now() - t0Send}ms`);
         }
       }).catch(err => {
         console.error(`[Orch/Ingest] processAgentChat error:`, err.message);
@@ -297,8 +343,31 @@ agentRouter.post('/ingest', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/orch/identity-sync
+ * 轻量接口：juhe-api / 其他渠道上报身份信息，不触发 Agent。
+ * 用于同步 conv_id、unionid 到 channel_identities。
+ */
+agentRouter.post('/identity-sync', async (req, res) => {
+  try {
+    const { channel, channel_uid, conv_id, display_name, unionid } = req.body;
+    if (!channel || !channel_uid) {
+      return res.status(400).json({ error: 'channel and channel_uid are required' });
+    }
+    await resolveIdentity(
+      channel, channel_uid,
+      display_name || channel_uid,
+      conv_id || '',
+      { unionid: unionid || null, conv_id: conv_id || null }
+    );
+    res.json({ ok: true, channel, channel_uid });
+  } catch (err: any) {
+    console.error('[IdentitySync] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-// ─── GET /api/v1/agent/tasks — 统一任务日志 ──────────────────────────────────
+
 
 agentRouter.get('/tasks', async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
