@@ -14,6 +14,7 @@ import AgentProfile from './pages/AgentProfile';
 import AgentInstances from './pages/AgentInstances';
 import AgentLogs from './pages/AgentLogs';
 import SkillResult from './pages/SkillResult';
+import AgentFactory from './pages/AgentFactory';
 
 export default function App() {
   return (
@@ -30,6 +31,7 @@ export default function App() {
           <Route path="tickets/new" element={<TicketCreate />} />
           <Route path="tickets/:id" element={<TicketDetail />} />
           <Route path="agent-logs" element={<AgentLogs />} />
+          <Route path="agent-factory" element={<AgentFactory />} />
           <Route path="test" element={<SkillTest />} />
           <Route path="mcp-configs" element={<McpConfigs />} />
           <Route path="oauth" element={<OAuthManager />} />
