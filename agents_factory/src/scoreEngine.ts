@@ -123,17 +123,25 @@ export async function assertCaseAsync(
         detail = passed ? `✅ 未意外建单` : `❌ 意外创建了工单`;
         break;
 
-      case 'skill_triggered':
-        passed = !!(context?.skill_triggered?.includes(assertion.skill_name));
+      case 'skill_triggered': {
+        const skillStr = typeof context?.skill_triggered === 'string'
+          ? context.skill_triggered
+          : (context?.skill_triggered ? JSON.stringify(context.skill_triggered) : '');
+        passed = !!(skillStr && assertion.skill_name && skillStr.includes(assertion.skill_name));
         detail = passed
           ? `✅ Skill "${assertion.skill_name}" 被正确触发`
-          : `❌ Skill "${assertion.skill_name}" 未被触发（实际: ${context?.skill_triggered || '无'}）`;
+          : `❌ Skill "${assertion.skill_name}" 未被触发（实际: ${skillStr || '无'}）`;
         break;
+      }
 
-      case 'no_skill_triggered':
-        passed = !context?.skill_triggered;
-        detail = passed ? `✅ 未误触发 Skill` : `❌ 误触发了 Skill: ${context?.skill_triggered}`;
+      case 'no_skill_triggered': {
+        const skillStr = typeof context?.skill_triggered === 'string'
+          ? context.skill_triggered
+          : (context?.skill_triggered ? JSON.stringify(context.skill_triggered) : '');
+        passed = !skillStr || skillStr === 'null' || skillStr === 'undefined' || skillStr === 'false';
+        detail = passed ? `✅ 未误触发 Skill` : `❌ 误触发了 Skill: ${skillStr}`;
         break;
+      }
 
       case 'reply_in_chinese':
         const chineseRatio = (reply.match(/[\u4e00-\u9fa5]/g) || []).length / Math.max(reply.length, 1);
