@@ -8,7 +8,7 @@
   "total_cases": 113,
   "target_score": 95,
   "max_rounds": 10,
-  "rounds_completed": 2,
+  "rounds_completed": 3,
   "best_score": 82,
   "current_status": "in_progress",
   "score_history": [
@@ -34,6 +34,18 @@
       "total_cases": 112,
       "taboo_violated": true,
       "changed_fields": ["reply_style", "delivery_config.max_reply_length"]
+    },
+    {
+      "round": 3,
+      "score": 0,
+      "score_compliance": 93,
+      "score_business": 100,
+      "score_ticket_skill": 95,
+      "score_memory": 64,
+      "passed_cases": 104,
+      "total_cases": 112,
+      "taboo_violated": true,
+      "changed_fields": ["reply_style", "taboos", "delivery_config.max_reply_length"]
     }
   ],
 

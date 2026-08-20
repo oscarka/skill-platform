@@ -272,8 +272,14 @@ export async function runRalphLoop(params: {
       // 会话隔离：多轮记忆/上下文类测试共享 shared session，其余测试独立 session 防止上下文污染
       const isSharedSession = evalCase.precondition === 'sandbox_session' || evalCase.category === 'memory_context' || evalCase.tags?.includes('memory');
       const sessionId = isSharedSession ? `${mockUserId}_shared` : `${mockUserId}_${evalCase.id}`;
-      const caseHistory = sessionHistories.get(sessionId) || [];
-      const historyToSend = evalCase.conversation || caseHistory;
+      let historyToSend = evalCase.conversation || caseHistory;
+      if (evalCase.inject_context && !historyToSend.some((m: any) => m.content?.includes(evalCase.inject_context))) {
+        historyToSend = [
+          { role: 'user' as const, content: evalCase.inject_context },
+          { role: 'assistant' as const, content: `好的，已记录：${evalCase.inject_context}` },
+          ...historyToSend,
+        ];
+      }
 
       try {
         const result = await sendChatMessage({
