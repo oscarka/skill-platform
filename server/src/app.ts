@@ -13,6 +13,7 @@ import { testRouter } from './routes/testRoutes';
 import { mcpRouter } from './routes/mcpRoutes';
 import { oauthRouter } from './routes/oauthRoutes';
 import { agentRouter, startDispatcherLoop } from './routes/agentRoutes';
+import { reconcileStaleTasks } from './agentService';
 import cookieParser from 'cookie-parser';
 
 const app = express();
@@ -68,6 +69,15 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 async function start() {
   await Promise.resolve(initDb());
   startDispatcherLoop();  // 启动出站消息分发后台循环（每 5s 扫 delivery_queue）
+
+  // 启动僵尸任务自动收敛看门狗（每 5 分钟扫描一次，收敛超过 1 小时未完成的任务）
+  setInterval(() => {
+    void reconcileStaleTasks(60 * 60 * 1000);
+  }, 5 * 60 * 1000);
+  setTimeout(() => {
+    void reconcileStaleTasks(60 * 60 * 1000);
+  }, 3000);
+
   app.listen(PORT, () => {
     console.log(`\n🚀 Skill Platform API running at http://localhost:${PORT}`);
     console.log(`   Health: http://localhost:${PORT}/api/health`);

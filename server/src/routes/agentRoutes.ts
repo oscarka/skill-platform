@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus, reconcileStaleTasks } from '../agentService';
 import { enqueueDelivery, startDispatcherLoop } from '../dispatcherService';
 import * as db from '../db';
 
@@ -375,6 +375,9 @@ agentRouter.get('/tasks', async (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
   try {
+    // 自动收敛超过 1 小时的僵尸任务（对应已完成工单的自动同步，超时的自动标记超时）
+    await reconcileStaleTasks(60 * 60 * 1000);
+
     const limit  = Math.min(parseInt(String(req.query.limit  || '50')), 200);
     const offset = parseInt(String(req.query.offset || '0'));
     const channel = req.query.channel as string | undefined;

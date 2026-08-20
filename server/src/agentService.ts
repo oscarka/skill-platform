@@ -99,6 +99,71 @@ export function appendTaskEvent(taskId: string, eventType: string, payload?: Rec
   });
 }
 
+/**
+ * 自动收敛超过 1 小时的僵尸任务（Zombie Task Watchdog）
+ * 1. 若对应工单已 done，自动同步状态为 done 并补齐耗时
+ * 2. 若对应工单为 error/expired，自动同步为 failed
+ * 3. 若无关联工单或普通任务超过 1 小时未完成，标记为 failed (timeout)
+ */
+export async function reconcileStaleTasks(thresholdMs: number = 60 * 60 * 1000): Promise<number> {
+  const cutoff = Date.now() - thresholdMs;
+  try {
+    const staleTasks = await db.allAsync<any>(
+      `SELECT id, meta, session_id, started_at, status, route_type 
+       FROM agent_tasks 
+       WHERE status IN ('processing', 'executing', 'routing', 'pending') 
+         AND started_at < ?`,
+      [cutoff]
+    );
+    if (!staleTasks || staleTasks.length === 0) return 0;
+
+    let updatedCount = 0;
+    for (const t of staleTasks) {
+      let meta: any = null;
+      try { meta = t.meta ? JSON.parse(t.meta) : null; } catch {}
+      const ticketId = meta?.ticketId || (t.session_id?.startsWith('h5_') ? t.session_id.replace(/^h5_/, '') : null);
+
+      if (ticketId) {
+        const ticket = await db.getAsync<any>(`SELECT status, ai_completed_at, updated_at FROM tickets WHERE id=?`, [ticketId]);
+        if (ticket && ticket.status === 'done') {
+          const completedAt = Number(ticket.ai_completed_at || ticket.updated_at || Date.now());
+          const startedAt = Number(t.started_at || completedAt);
+          const duration = Math.max(0, completedAt - startedAt);
+          await db.runAsync(
+            `UPDATE agent_tasks SET status='done', ended_at=?, duration_ms=? WHERE id=?`,
+            [completedAt, duration, t.id]
+          );
+          updatedCount++;
+          continue;
+        } else if (ticket && (ticket.status === 'error' || ticket.status === 'expired')) {
+          const endedAt = Number(ticket.updated_at || Date.now());
+          await db.runAsync(
+            `UPDATE agent_tasks SET status='failed', error_message=?, ended_at=? WHERE id=?`,
+            [`工单已${ticket.status === 'expired' ? '过期' : '异常'}`, endedAt, t.id]
+          );
+          updatedCount++;
+          continue;
+        }
+      }
+
+      // 无工单或超时未完成的普通任务
+      await db.runAsync(
+        `UPDATE agent_tasks SET status='failed', error_message=?, ended_at=? WHERE id=?`,
+        ['任务超时（超过1小时未完成）', Date.now(), t.id]
+      );
+      updatedCount++;
+    }
+
+    if (updatedCount > 0) {
+      console.log(`[Watchdog] 🐕 自动收敛了 ${updatedCount} 条超过 1 小时的僵尸任务`);
+    }
+    return updatedCount;
+  } catch (err: any) {
+    console.warn(`[Watchdog] 自动收敛僵尸任务异常:`, err.message);
+    return 0;
+  }
+}
+
 
 // ─── LLMWiki Integration ──────────────────────────────────────────────────────
 const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
