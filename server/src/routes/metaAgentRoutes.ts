@@ -285,20 +285,30 @@ metaAgentRouter.post('/:id/reject', async (req, res) => {
 
 // ─── 10. 清除沙箱测试数据（虚拟用户产生的数据）──────────────────────────
 metaAgentRouter.delete('/sandbox/:userId', async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    if (!userId.startsWith('eval_sandbox_')) {
-      return res.status(400).json({ error: '只允许删除 eval_sandbox_ 开头的虚拟用户数据' });
-    }
-
-    // 清理 agent_tasks、tickets、sessions 等中的沙箱数据
-    await db.runAsync(`DELETE FROM agent_tasks WHERE user_id = ?`, [userId]);
-    await db.runAsync(`DELETE FROM tickets WHERE user_id = ?`, [userId]);
-
-    res.json({ success: true, message: `已清理沙箱用户 "${userId}" 的测试数据` });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  const userId = req.params.userId;
+  if (!userId.startsWith('eval_sandbox_')) {
+    return res.status(400).json({ error: '只允许删除 eval_sandbox_ 开头的虚拟用户数据' });
   }
+
+  // 各表独立容错清理：某张表不存在或无对应列不影响其他表的清理
+  const cleaned: string[] = [];
+  const errors: string[] = [];
+  for (const [table, col] of [['agent_tasks', 'user_id'], ['tickets', 'user_id'], ['sessions', 'user_id']] as const) {
+    try {
+      await db.runAsync(`DELETE FROM ${table} WHERE ${col} = ?`, [userId]);
+      cleaned.push(table);
+    } catch {
+      // 表不存在或无该列时静默跳过
+      errors.push(table);
+    }
+  }
+
+  res.json({
+    success: true,
+    message: `已清理沙箱用户 "${userId}" 的测试数据`,
+    cleaned_tables: cleaned,
+    skipped_tables: errors,
+  });
 });
 
 // ─── Helper ───────────────────────────────────────────────────────────────
