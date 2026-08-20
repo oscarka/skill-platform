@@ -84,6 +84,9 @@ export async function upsertAgentProfile(spec: {
   reassurance_tpl?: string;
   skill_ids?: string[];
   routing_examples?: any[];
+  delivery_config?: any;
+  knowledge_domain?: string;
+  intent_prompt?: string;
 }): Promise<{ id: string }> {
   const res = await fetch(`${PLATFORM_BASE}/api/v1/meta/agents`, {
     method: 'POST',

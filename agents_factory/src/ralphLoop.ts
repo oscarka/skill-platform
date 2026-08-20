@@ -287,3 +287,66 @@ function generateGraduationReport(
     `\`\`\``,
   ].join('\n');
 }
+
+// ─── CLI 入口（npx ts-node src/ralphLoop.ts <agentId>）────────────────────────
+if (require.main === module) {
+  const agentId = process.argv[2];
+  if (!agentId) {
+    console.error('用法: npx ts-node src/ralphLoop.ts <agentId>');
+    process.exit(1);
+  }
+
+  // 从草稿文件加载 Spec
+  const draftPath = path.join(__dirname, '..', 'drafts', `${agentId}.json`);
+  if (!fs.existsSync(draftPath)) {
+    console.error(`[Ralph] 找不到草稿文件: ${draftPath}`);
+    console.error('请先通过 hireAgent.ts 生成并提交候选 Agent。');
+    process.exit(1);
+  }
+
+  const draft = JSON.parse(fs.readFileSync(draftPath, 'utf-8'));
+  const agentSpec = draft.spec || draft;
+
+  const { saveRunScore: _save, getMetaAgentStatus: _status } = require('./apiClient');
+
+  runRalphLoop({
+    agentId,
+    agentSpec,
+    onRoundComplete: async (round, score, diagnosis) => {
+      // 将本轮结果上报到 meta_agent_eval_runs 表
+      try {
+        const { default: fetch } = await import('node-fetch').catch(() => ({ default: globalThis.fetch }));
+        const PLATFORM_BASE = process.env.PLATFORM_BASE_URL || 'https://skill-platform-yo5337ccva-de.a.run.app';
+        await fetch(`${PLATFORM_BASE}/api/v1/meta/agents/${agentId}/eval-runs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            run_id: score.run_id,
+            round,
+            agent_version: score.agent_version,
+            total_score: score.total_score,
+            score_compliance: score.score_compliance,
+            score_business: score.score_business,
+            score_ticket_skill: score.score_ticket_skill,
+            score_memory: score.score_memory,
+            taboo_violated: score.taboo_violated ? 1 : 0,
+            taboo_violations: score.taboo_violations,
+            passed_cases: score.passed_cases,
+            failed_cases: score.failed_cases,
+            total_cases: score.total_cases,
+            case_results: score.case_results,
+            diagnosis,
+          }),
+        });
+        console.log(`[Ralph] 第 ${round} 轮结果已上报到平台`);
+      } catch (err: any) {
+        console.warn(`[Ralph] 上报第 ${round} 轮结果失败（不影响评测继续）: ${err.message}`);
+      }
+    },
+  }).then(({ finalScore, status, totalRounds }) => {
+    console.log(`\n[Ralph] 🏁 评测完成: 最终得分 ${finalScore}/100，状态: ${status}，共 ${totalRounds} 轮`);
+  }).catch(err => {
+    console.error(`[Ralph] ❌ 评测异常: ${err.message}`);
+    process.exit(1);
+  });
+}

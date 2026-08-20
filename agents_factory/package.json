@@ -5,8 +5,9 @@
   "private": true,
   "scripts": {
     "build": "tsc",
-    "create-agent": "node --loader ts-node/esm src/metaAgent.ts create",
-    "run-ralph": "node --loader ts-node/esm src/ralphLoop.ts",
+    "hire-agent": "npx ts-node -P tsconfig.json src/hireAgent.ts",
+    "run-ralph": "npx ts-node -P tsconfig.json src/ralphLoop.ts",
+    "create-agent": "npx ts-node -P tsconfig.json src/hireAgent.ts",
     "view-logs": "node --loader ts-node/esm src/viewLogs.ts"
   },
   "devDependencies": {
