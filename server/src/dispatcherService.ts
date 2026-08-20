@@ -20,6 +20,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
 import { appendTaskEvent } from './agentService';
+import { paceAgentMessage } from './messagePacer';
 
 const JUHE_SEND_URL = process.env.JUHE_SEND_URL || '';
 const CUA_SEND_URL  = process.env.CUA_SEND_URL  || '';
@@ -145,34 +146,91 @@ async function _dispatchJob(job: any): Promise<void> {
   let sent = false;
   let lastError = '';
 
+  // ── 节奏分段解析（严格保真，URL/工单保护，自动 fallback）──
+  const pacerRes = await paceAgentMessage(reply).catch(() => ({ segments: [reply], isSplit: false, originalText: reply }));
+  const sendSegments = pacerRes.segments.length > 0 ? pacerRes.segments : [reply];
+
   // ① 优先 juhe 直发
   const juheRoute = routes.find((r: DeliveryRoute) => r.channel === 'juhe' && r.conv_id);
   if (juheRoute && JUHE_SEND_URL) {
-    const juheResult = await _sendViaJuhe(juheRoute.conv_id!, reply, job.id);
-    sent = juheResult.ok;
-    if (sent) {
-      if (job.task_id) {
-        appendTaskEvent(job.task_id, 'channel_delivery_success', {
-          channel:      'juhe',
-          channelLabel: '聚合接口 (直发)',
-          conv_id:      juheRoute.conv_id,
-          durationMs:   juheResult.durationMs,
-          replyPreview: reply.slice(0, 200),
-          retryCount,
-        });
+    if (sendSegments.length <= 1) {
+      // 单条快速路径（100% 兼容现有单条逻辑）
+      const juheResult = await _sendViaJuhe(juheRoute.conv_id!, sendSegments[0] || reply, job.id);
+      sent = juheResult.ok;
+      if (sent) {
+        if (job.task_id) {
+          appendTaskEvent(job.task_id, 'channel_delivery_success', {
+            channel:      'juhe',
+            channelLabel: '聚合接口 (直发)',
+            conv_id:      juheRoute.conv_id,
+            durationMs:   juheResult.durationMs,
+            replyPreview: reply.slice(0, 200),
+            retryCount,
+          });
+        }
+      } else {
+        lastError = juheResult.error || 'juhe send failed';
+        if (job.task_id) {
+          appendTaskEvent(job.task_id, 'channel_delivery_failed', {
+            channel:      'juhe',
+            channelLabel: '聚合接口 (直发)',
+            conv_id:      juheRoute.conv_id,
+            error:        lastError,
+            status:       juheResult.httpStatus,
+            durationMs:   juheResult.durationMs,
+            fallback:     CUA_SEND_URL ? 'CUA桌面自动化' : 'none',
+          });
+        }
       }
     } else {
-      lastError = juheResult.error || 'juhe send failed';
-      if (job.task_id) {
-        appendTaskEvent(job.task_id, 'channel_delivery_failed', {
-          channel:      'juhe',
-          channelLabel: '聚合接口 (直发)',
-          conv_id:      juheRoute.conv_id,
-          error:        lastError,
-          status:       juheResult.httpStatus,
-          durationMs:   juheResult.durationMs,
-          fallback:     CUA_SEND_URL ? 'CUA桌面自动化' : 'none',
-        });
+      // 多段节奏发送：逐条发送，每段间隔 1.5s 模拟真人打字
+      let allOk = true;
+      let totalDurationMs = 0;
+      for (let idx = 0; idx < sendSegments.length; idx++) {
+        const seg = sendSegments[idx];
+        const juheResult = await _sendViaJuhe(juheRoute.conv_id!, seg, `${job.id}_p${idx + 1}`);
+        totalDurationMs += juheResult.durationMs;
+        if (!juheResult.ok) {
+          allOk = false;
+          lastError = juheResult.error || 'juhe segment send failed';
+          break;
+        }
+        if (job.task_id) {
+          appendTaskEvent(job.task_id, 'channel_delivery_segment', {
+            channel:       'juhe',
+            segmentIndex:  idx + 1,
+            totalSegments: sendSegments.length,
+            segmentText:   seg.slice(0, 80),
+          });
+        }
+        if (idx < sendSegments.length - 1) {
+          await new Promise(r => setTimeout(r, 1500)); // 1.5s 呼吸感节奏
+        }
+      }
+      sent = allOk;
+      if (sent) {
+        if (job.task_id) {
+          appendTaskEvent(job.task_id, 'channel_delivery_success', {
+            channel:       'juhe',
+            channelLabel:  '聚合接口 (直发·节奏分段)',
+            conv_id:       juheRoute.conv_id,
+            totalSegments: sendSegments.length,
+            durationMs:    totalDurationMs,
+            replyPreview:  reply.slice(0, 200),
+            retryCount,
+          });
+        }
+      } else {
+        if (job.task_id) {
+          appendTaskEvent(job.task_id, 'channel_delivery_failed', {
+            channel:      'juhe',
+            channelLabel: '聚合接口 (直发)',
+            conv_id:      juheRoute.conv_id,
+            error:        lastError,
+            durationMs:   totalDurationMs,
+            fallback:     CUA_SEND_URL ? 'CUA桌面自动化' : 'none',
+          });
+        }
       }
     }
   } else if (!juheRoute && JUHE_SEND_URL) {
