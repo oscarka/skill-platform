@@ -760,6 +760,11 @@ function AgentTasksPanel() {
                   skill_guard_closed:    { icon: '🔒', label: '守卫已关闭', dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' },
                   ticket_created:        { icon: '📋', label: '工单已创建', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
                   ticket_result_sent:    { icon: '📊', label: '报告已发送', dotBg: '#0d9488', cardBg: '#f0fdfa', cardBorder: '#99f6e4', textColor: '#0f766e' },
+                  identity_resolved:     { icon: '🔍', label: '渠道身份解析', dotBg: '#6366f1', cardBg: '#eef2ff', cardBorder: '#c7d2fe', textColor: '#4338ca' },
+                  delivery_enqueued:     { icon: '📦', label: '出站队列就绪', dotBg: '#8b5cf6', cardBg: '#f5f3ff', cardBorder: '#ddd6fe', textColor: '#6d28d9' },
+                  channel_delivery_success: { icon: '⚡', label: '渠道直发送达', dotBg: '#10b981', cardBg: '#ecfdf5', cardBorder: '#a7f3d0', textColor: '#047857' },
+                  channel_delivery_failed:  { icon: '⚠️', label: '渠道发送异常', dotBg: '#f59e0b', cardBg: '#fffbeb', cardBorder: '#fde68a', textColor: '#b45309' },
+                  channel_delivery_skipped: { icon: '⏭️', label: '渠道跳过直发', dotBg: '#6b7280', cardBg: '#f9fafb', cardBorder: '#e5e7eb', textColor: '#374151' },
                 };
                 const cfg = evCfg[evType] || { icon: '•', label: evType, dotBg: '#64748b', cardBg: '#f8fafc', cardBorder: '#e2e8f0', textColor: '#374151' };
 
@@ -910,6 +915,104 @@ function AgentTasksPanel() {
                           <div>
                             <div style={{ fontSize: '.85rem', color: '#dc2626', fontFamily: 'monospace', marginBottom: 6 }}>{p.error}</div>
                             {p.stack && <details><summary style={{ fontSize: '.72rem', color: '#9ca3af', cursor: 'pointer' }}>Stack Trace</summary><pre style={{ fontSize: '10px', color: '#7f1d1d', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', marginTop: 4 }}>{p.stack}</pre></details>}
+                          </div>
+                        )}
+                        {evType === 'identity_resolved' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, marginBottom: 6 }}>
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#e0e7ff', color: '#4338ca', fontWeight: 600 }}>
+                                🆔 {p.display_name || '未知用户'}
+                              </span>
+                              {p.unionid && (
+                                <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: '#ede9fe', color: '#6d28d9' }}>
+                                  跨平台 ID: <code style={{ fontFamily: 'monospace' }}>{p.unionid.slice(0, 10)}...</code>
+                                </span>
+                              )}
+                              <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 4, background: p.has_juhe ? '#d1fae5' : '#fee2e2', color: p.has_juhe ? '#065f46' : '#991b1b' }}>
+                                {p.has_juhe ? '⚡ 聚合接口: 可用' : '⚠️ 聚合接口: 未关联会话'}
+                              </span>
+                            </div>
+                            {p.routes && p.routes.length > 0 && (
+                              <div style={{ fontSize: '.75rem', color: '#475569', marginTop: 4 }}>
+                                <span style={{ color: '#64748b' }}>可用出站路由 ({p.routes.length})：</span>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, marginTop: 4 }}>
+                                  {(p.routes as any[]).map((r: any, i: number) => (
+                                    <span key={i} style={{ fontSize: '.7rem', background: '#f8fafc', border: '1px solid #e2e8f0', padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                                      {r.channel === 'juhe' ? '⚡ 聚合' : '🏢 企微'}: {r.conv_id || r.channel_uid || '-'}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {evType === 'delivery_enqueued' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+                              <span style={{ fontSize: '.82rem', fontWeight: 600, color: '#6d28d9' }}>
+                                📦 已加入出站分发队列
+                              </span>
+                              {p.replyLen && <span style={{ fontSize: '.72rem', background: '#f5f3ff', color: '#7c3aed', padding: '1px 6px', borderRadius: 4 }}>{p.replyLen} 字符</span>}
+                              <span style={{ fontSize: '.72rem', background: p.hasJuheRoute ? '#ecfdf5' : '#fffbeb', color: p.hasJuheRoute ? '#047857' : '#b45309', padding: '1px 6px', borderRadius: 4 }}>
+                                {p.hasJuheRoute ? '优先聚合直发' : '降级 CUA 桌面'}
+                              </span>
+                            </div>
+                            {p.jobId && <div style={{ fontSize: '.7rem', color: '#9ca3af', fontFamily: 'monospace' }}>Job ID: {p.jobId}</div>}
+                          </div>
+                        )}
+                        {evType === 'channel_delivery_success' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                              <span style={{ fontSize: '.88rem', fontWeight: 700, color: '#047857' }}>
+                                ✅ {p.channelLabel || (p.channel === 'juhe' ? '聚合接口 (直发)' : 'CUA (桌面操控)')} 发送成功
+                              </span>
+                              {p.durationMs && <span style={{ fontSize: '.72rem', background: '#d1fae5', color: '#065f46', padding: '1px 6px', borderRadius: 4 }}>⏱ {p.durationMs}ms</span>}
+                              {p.retryCount > 0 && <span style={{ fontSize: '.72rem', background: '#fef3c7', color: '#92400e', padding: '1px 6px', borderRadius: 4 }}>重试第 {p.retryCount} 次</span>}
+                            </div>
+                            <div style={{ fontSize: '.78rem', color: '#475569' }}>
+                              {p.conv_id && <span>会话 ID: <code style={{ fontFamily: 'monospace' }}>{p.conv_id}</code></span>}
+                              {p.recipient && <span>接收人: {p.recipient}</span>}
+                            </div>
+                            {p.replyPreview && (
+                              <div style={{ fontSize: '.8rem', color: '#14532d', background: 'rgba(255,255,255,.7)', padding: '6px 10px', borderRadius: 6, marginTop: 6, borderLeft: '3px solid #10b981' }}>
+                                {p.replyPreview}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {evType === 'channel_delivery_failed' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                              <span style={{ fontSize: '.88rem', fontWeight: 700, color: '#b45309' }}>
+                                ⚠️ {p.channelLabel || p.channel} 发送失败
+                              </span>
+                              {p.durationMs && <span style={{ fontSize: '.72rem', background: '#fee2e2', color: '#991b1b', padding: '1px 6px', borderRadius: 4 }}>⏱ {p.durationMs}ms</span>}
+                              {p.fallback && p.fallback !== 'none' && (
+                                <span style={{ fontSize: '.72rem', background: '#e0e7ff', color: '#4338ca', padding: '1px 6px', borderRadius: 4 }}>
+                                  自动降级 → {p.fallback}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: '.8rem', color: '#dc2626', fontFamily: 'monospace', background: 'rgba(255,255,255,.8)', padding: '6px 10px', borderRadius: 6, border: '1px solid #fecaca' }}>
+                              {p.error}
+                            </div>
+                          </div>
+                        )}
+                        {evType === 'channel_delivery_skipped' && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+                              <span style={{ fontSize: '.85rem', fontWeight: 600, color: '#475569' }}>
+                                ⏭️ 跳过 {p.channelLabel || p.channel}
+                              </span>
+                              {p.fallback && p.fallback !== 'none' && (
+                                <span style={{ fontSize: '.72rem', background: '#e0e7ff', color: '#4338ca', padding: '1px 6px', borderRadius: 4 }}>
+                                  已转入 → {p.fallback}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: '.78rem', color: '#64748b' }}>
+                              原因：{p.reason}
+                            </div>
                           </div>
                         )}
                         {evType === 'cua_delivered' && (

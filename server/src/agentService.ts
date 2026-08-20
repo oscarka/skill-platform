@@ -407,7 +407,16 @@ export interface AgentChatRequest {
   content:          string;
   source:           string;
   session_id:       string;
-  meta:             { from_name: string; user_id: string; company?: string };
+  meta:             {
+    from_name:        string;
+    user_id:          string;
+    company?:         string;
+    unionid?:         string | null;
+    channel_uid?:     string;
+    juhe_conv_id?:    string;
+    delivery_routes?: any[];
+    [key: string]:    any;
+  };
   context:          { available_apps: string[]; current_recipient?: string };
   history?:         { role: 'user' | 'assistant'; content: string }[];
   notes?:           string;
@@ -2071,6 +2080,19 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     history_count: (req.history || []).length,
     has_notes: !!(req.notes),
   });
+
+  if (req.meta?.delivery_routes && Array.isArray(req.meta.delivery_routes)) {
+    void appendTaskEvent(requestId, 'identity_resolved', {
+      unified_id:     req.session_id,
+      unionid:        req.meta.unionid || null,
+      display_name:   req.meta.from_name || '',
+      channel_uid:    req.meta.channel_uid,
+      source_channel: srcChannel,
+      routes_count:   req.meta.delivery_routes.length,
+      routes:         req.meta.delivery_routes,
+      has_juhe:       req.meta.delivery_routes.some((r: any) => r.channel === 'juhe' && !!r.conv_id),
+    });
+  }
 
   // ── 第三道防线：纯文件占位内容不回复 ────────────────────────────────────────
   // 正常流程下文件消息被 ingest 守卫拦截（第二道），archiver 拦截（第一道）

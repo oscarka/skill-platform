@@ -19,6 +19,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import * as db from './db';
+import { appendTaskEvent } from './agentService';
 
 const JUHE_SEND_URL = process.env.JUHE_SEND_URL || '';
 const CUA_SEND_URL  = process.env.CUA_SEND_URL  || '';
@@ -71,6 +72,17 @@ export async function enqueueDelivery(opts: EnqueueOpts): Promise<void> {
   );
 
   console.log(`[Dispatcher] enqueue job=${id} task=${taskId} customer=${customerId} routes=${routes.length}`);
+
+  if (taskId) {
+    appendTaskEvent(taskId, 'delivery_enqueued', {
+      jobId: id,
+      customerId,
+      routesCount: routes.length,
+      routes: routes.map(r => ({ channel: r.channel, conv_id: r.conv_id, display_name: r.display_name })),
+      hasJuheRoute: routes.some(r => r.channel === 'juhe' && !!r.conv_id),
+      replyLen: reply.length,
+    });
+  }
 }
 
 /**
@@ -126,21 +138,57 @@ async function _dispatchJob(job: any): Promise<void> {
     routes = [];
   }
 
-  const reply      = job.reply;
-  const retryCount = job.retry_count || 0;
+  const reply       = job.reply;
+  const retryCount  = job.retry_count || 0;
   const displayName = routes[0]?.display_name || ctx.sessionId || 'unknown';
 
   let sent = false;
+  let lastError = '';
 
   // ① 优先 juhe 直发
   const juheRoute = routes.find((r: DeliveryRoute) => r.channel === 'juhe' && r.conv_id);
   if (juheRoute && JUHE_SEND_URL) {
-    sent = await _sendViaJuhe(juheRoute.conv_id!, reply, job.id);
+    const juheResult = await _sendViaJuhe(juheRoute.conv_id!, reply, job.id);
+    sent = juheResult.ok;
+    if (sent) {
+      if (job.task_id) {
+        appendTaskEvent(job.task_id, 'channel_delivery_success', {
+          channel:      'juhe',
+          channelLabel: '聚合接口 (直发)',
+          conv_id:      juheRoute.conv_id,
+          durationMs:   juheResult.durationMs,
+          replyPreview: reply.slice(0, 200),
+          retryCount,
+        });
+      }
+    } else {
+      lastError = juheResult.error || 'juhe send failed';
+      if (job.task_id) {
+        appendTaskEvent(job.task_id, 'channel_delivery_failed', {
+          channel:      'juhe',
+          channelLabel: '聚合接口 (直发)',
+          conv_id:      juheRoute.conv_id,
+          error:        lastError,
+          status:       juheResult.httpStatus,
+          durationMs:   juheResult.durationMs,
+          fallback:     CUA_SEND_URL ? 'CUA桌面自动化' : 'none',
+        });
+      }
+    }
+  } else if (!juheRoute && JUHE_SEND_URL) {
+    if (job.task_id) {
+      appendTaskEvent(job.task_id, 'channel_delivery_skipped', {
+        channel:      'juhe',
+        channelLabel: '聚合接口 (直发)',
+        reason:       '客户暂无聚合会话ID(conv_id)，无法通过JUHE直发',
+        fallback:     CUA_SEND_URL ? 'CUA桌面自动化' : 'none',
+      });
+    }
   }
 
   // ② 兜底 CUA
   if (!sent && CUA_SEND_URL) {
-    sent = await _sendViaCua({
+    const cuaResult = await _sendViaCua({
       reply,
       displayName,
       requestId: ctx.requestId || job.task_id,
@@ -149,6 +197,28 @@ async function _dispatchJob(job: any): Promise<void> {
       reasoning: ctx.reasoning,
       delivery:  ctx.delivery,
     });
+    sent = cuaResult.ok;
+    if (sent) {
+      if (job.task_id) {
+        appendTaskEvent(job.task_id, 'channel_delivery_success', {
+          channel:      'cua',
+          channelLabel: 'CUA (桌面操控)',
+          recipient:    displayName,
+          durationMs:   cuaResult.durationMs,
+          retryCount,
+        });
+      }
+    } else {
+      lastError = cuaResult.error || 'cua fallback failed';
+      if (job.task_id) {
+        appendTaskEvent(job.task_id, 'channel_delivery_failed', {
+          channel:      'cua',
+          channelLabel: 'CUA (桌面操控)',
+          recipient:    displayName,
+          error:        lastError,
+        });
+      }
+    }
   }
 
   // 更新队列状态
@@ -162,22 +232,29 @@ async function _dispatchJob(job: any): Promise<void> {
     const newRetryCount = retryCount + 1;
     if (newRetryCount >= MAX_RETRY) {
       await db.runAsync(
-        `UPDATE skill_platform.delivery_queue SET status='dead', retry_count=$1, last_error='max retries exceeded' WHERE id=$2`,
-        [newRetryCount, job.id]
+        `UPDATE skill_platform.delivery_queue SET status='dead', retry_count=$1, last_error=$2 WHERE id=$3`,
+        [newRetryCount, lastError || 'max retries exceeded', job.id]
       ).catch(() => {});
       console.error(`[Dispatcher] ☠️ dead job=${job.id} customer=${job.customer_id}`);
+      if (job.task_id) {
+        appendTaskEvent(job.task_id, 'task_failed', {
+          error: `出站消息达到最大重试次数(${MAX_RETRY}次)，已移入死信队列: ${lastError}`,
+          stage: 'egress_dispatch',
+        });
+      }
     } else {
       const nextDelay = RETRY_DELAYS_MS[newRetryCount] || 120_000;
       await db.runAsync(
-        `UPDATE skill_platform.delivery_queue SET status='pending', retry_count=$1, retry_at=$2, last_error='send failed' WHERE id=$3`,
-        [newRetryCount, Date.now() + nextDelay, job.id]
+        `UPDATE skill_platform.delivery_queue SET status='pending', retry_count=$1, retry_at=$2, last_error=$3 WHERE id=$4`,
+        [newRetryCount, Date.now() + nextDelay, lastError || 'send failed', job.id]
       ).catch(() => {});
       console.warn(`[Dispatcher] ⏳ retry job=${job.id} attempt=${newRetryCount} nextIn=${nextDelay}ms`);
     }
   }
 }
 
-async function _sendViaJuhe(conv_id: string, reply: string, jobId: string): Promise<boolean> {
+async function _sendViaJuhe(conv_id: string, reply: string, jobId: string): Promise<{ ok: boolean; httpStatus?: number; error?: string; durationMs: number }> {
+  const t0 = Date.now();
   try {
     const r = await fetch(`${JUHE_SEND_URL.replace(/\/?$/, '')}/api/send`, {
       method: 'POST',
@@ -185,23 +262,27 @@ async function _sendViaJuhe(conv_id: string, reply: string, jobId: string): Prom
       body: JSON.stringify({ conversation_id: conv_id, content: reply }),
       signal: AbortSignal.timeout(20_000),
     });
+    const durationMs = Date.now() - t0;
     if (r.ok) {
-      console.log(`[Dispatcher] juhe OK conv=${conv_id} job=${jobId}`);
-      return true;
+      console.log(`[Dispatcher] juhe OK conv=${conv_id} job=${jobId} duration=${durationMs}ms`);
+      return { ok: true, httpStatus: r.status, durationMs };
     }
-    console.warn(`[Dispatcher] juhe HTTP ${r.status} conv=${conv_id} job=${jobId}`);
-    return false;
+    const errText = await r.text().catch(() => '');
+    console.warn(`[Dispatcher] juhe HTTP ${r.status} conv=${conv_id} job=${jobId} body=${errText}`);
+    return { ok: false, httpStatus: r.status, error: `HTTP ${r.status}: ${errText.slice(0, 150)}`, durationMs };
   } catch (e: any) {
-    console.warn(`[Dispatcher] juhe error: ${e.message} job=${jobId}`);
-    return false;
+    const durationMs = Date.now() - t0;
+    console.warn(`[Dispatcher] juhe error: ${e.message} job=${jobId} duration=${durationMs}ms`);
+    return { ok: false, error: e.message, durationMs };
   }
 }
 
 async function _sendViaCua(opts: {
   reply: string; displayName: string; requestId: string;
   sessionId: string; status: string; reasoning?: string; delivery?: any;
-}): Promise<boolean> {
+}): Promise<{ ok: boolean; httpStatus?: number; error?: string; durationMs: number }> {
   const { reply, displayName, requestId, sessionId, status, reasoning, delivery } = opts;
+  const t0 = Date.now();
   try {
     const cuaBody = {
       request_id: requestId,
@@ -220,10 +301,12 @@ async function _sendViaCua(opts: {
       body: JSON.stringify(cuaBody),
       signal: AbortSignal.timeout(30_000),
     });
-    console.log(`[Dispatcher] CUA HTTP ${r.status} recipient=${displayName}`);
-    return r.ok;
+    const durationMs = Date.now() - t0;
+    console.log(`[Dispatcher] CUA HTTP ${r.status} recipient=${displayName} duration=${durationMs}ms`);
+    return { ok: r.ok, httpStatus: r.status, durationMs };
   } catch (e: any) {
-    console.warn(`[Dispatcher] CUA error: ${e.message}`);
-    return false;
+    const durationMs = Date.now() - t0;
+    console.warn(`[Dispatcher] CUA error: ${e.message} duration=${durationMs}ms`);
+    return { ok: false, error: e.message, durationMs };
   }
 }
