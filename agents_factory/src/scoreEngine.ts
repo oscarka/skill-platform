@@ -123,7 +123,7 @@ export function assertCase(
         break;
 
       case 'skill_triggered':
-        passed = context?.skill_triggered?.includes(assertion.skill_name);
+        passed = !!(context?.skill_triggered?.includes(assertion.skill_name));
         detail = passed
           ? `✅ Skill "${assertion.skill_name}" 被正确触发`
           : `❌ Skill "${assertion.skill_name}" 未被触发（实际: ${context?.skill_triggered || '无'}）`;
