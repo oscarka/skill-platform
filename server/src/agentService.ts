@@ -1499,6 +1499,16 @@ function assembleAgentContext(params: {
 
 
 
+function resolvePreferredClientName(userProfile?: string, fallbackName?: string): string {
+  if (userProfile) {
+    const match = userProfile.match(/称呼偏好[：:]\s*(?:用户明确要求称呼其为)?【?([^，,\n\]\s]+)】?/);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return fallbackName || '您';
+}
+
 async function buildReassuranceMessage(
   fromName: string,
   content: string,
@@ -1526,13 +1536,13 @@ async function handleChatReply(
 ): Promise<AgentResponse> {
   const { content, meta, history = [], notes = '' } = req;
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
-  const fromName = meta.from_name || '您';
+  const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
   const { app } = delivery;
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
   const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
   const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
-  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问助理'}，正在通过${app}与客户${fromName}沟通。
+  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问助理'}，正在通过${app}与客户${fromName}沟通。必须称呼客户为${fromName}。
 
 回复风格：${profile.reply_style || '亲切、专业，回复简洁，通常不超过150字'}
 ${profile.service_flow ? `\n服务流程：\n${profile.service_flow}` : ''}${tabooText}
@@ -1601,7 +1611,7 @@ async function handleHealthDirect(
 ): Promise<AgentResponse> {
   const { content, meta, history = [], notes = '' } = req;
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
-  const fromName = meta.from_name || '您';
+  const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
   const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
@@ -1614,7 +1624,7 @@ async function handleHealthDirect(
   // 注意：不在 prompt 中注入报告原文（reportBlock），让 AI 通过 query_ticket 工具获取报告
   // 这样可确保 tool_query_ticket 事件被记录，保证日志链完整性
 
-  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
+  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，正在为客户${fromName}服务。必须称呼客户为${fromName}。根据客户的健康档案和问题提供专业且个性化的建议。
 回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
@@ -1677,7 +1687,7 @@ async function handleHealthSkill(
 ): Promise<AgentResponse> {
   const { content, meta, history = [], notes = '', session_id } = req;
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
-  const fromName = meta.from_name || '您';
+  const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
 
   // ── 检查 skill 类型：external → 工单流程，internal → 直接 sandbox ──────────
   const skillRow = await db.getAsync<any>('SELECT * FROM skills WHERE id=?', [skillId]);
