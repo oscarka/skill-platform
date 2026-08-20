@@ -1,0 +1,63 @@
+{
+  "projectName": "Skill Platform — Phase 5 Ralph 评测飞轮",
+  "branchName": "ralph/phase5-eval-loop",
+  "description": "用 Ralph 驱动 Agent 评测飞轮：运行测试集 → Gemini 3.7 Flash 分析诊断 → 优化 Spec → 迭代直到达标",
+  "userStories": [
+    {
+      "id": "RALPH-001",
+      "title": "为候选 Agent 运行第1轮完整评测",
+      "priority": 1,
+      "passes": false,
+      "description": "在 agents_factory/ 目录运行 ralphLoop.ts，加载候选 Agent 'agent_私域社群运营经理_fe0975' 的完整113题测试集，执行第1轮对话评测并输出诊断报告",
+      "acceptance_criteria": [
+        "所有113道题都已执行（通用23 + 专属90）",
+        "每道题的 passed/failed 状态已记录",
+        "诊断报告已生成到 agents_factory/reports/ 目录",
+        "本轮得分已写入 agents_factory/eval_logs/ 目录"
+      ],
+      "commands": [
+        "cd /Users/cc/skill-platform/agents_factory",
+        "export $(grep -v '^#' ../server/.env | xargs)",
+        "npx ts-node src/ralphLoop.ts agent_私域社群运营经理_fe0975"
+      ]
+    },
+    {
+      "id": "RALPH-002",
+      "title": "Gemini 3.7 Flash 分析诊断并优化 Spec",
+      "priority": 2,
+      "passes": false,
+      "description": "基于第1轮诊断报告，调用 Gemini 3.7 Flash（gemini-3.7-flash）分析失败原因，给出通用化 Spec 修改建议并自动应用到 currentSpec",
+      "acceptance_criteria": [
+        "callGeminiOptimizer 使用 gemini-3.7-flash 模型",
+        "修改建议必须是通用化规则，不得硬编码针对具体测试用例的规则",
+        "修改后的 Spec 已持久化到草稿文件",
+        "日志中清晰显示：修改了哪些字段、通用化理由、预期改善"
+      ]
+    },
+    {
+      "id": "RALPH-003",
+      "title": "爬山迭代直到分数达标或10轮上限",
+      "priority": 3,
+      "passes": false,
+      "description": "持续运行评测 → 优化循环，实现分数爬山：分数上升则晋级，下降则回滚到最优版本，直到达到95分或完成10轮",
+      "acceptance_criteria": [
+        "每轮得分变化趋势清晰可见",
+        "禁忌违反立即触发回滚且不计分",
+        "最优版本快照已正确维护",
+        "最终输出毕业报告或 max_rounds_reached 状态"
+      ]
+    },
+    {
+      "id": "RALPH-004",
+      "title": "将最优 Spec 同步到平台候选员工列表",
+      "priority": 4,
+      "passes": false,
+      "description": "评测完成后，将最优版本的 Spec 通过 API 同步到平台，更新候选员工状态为 pending_human_approval",
+      "acceptance_criteria": [
+        "平台 /api/v1/meta/agents/:id 已更新为最优版本",
+        "候选员工状态变为 pending_human_approval",
+        "毕业报告 Markdown 文件已生成"
+      ]
+    }
+  ]
+}

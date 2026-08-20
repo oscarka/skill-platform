@@ -28,6 +28,15 @@ const MAX_ROUNDS = 10;
 const PASSING_SCORE = 95;
 const SANDBOX_USER_PREFIX = 'eval_sandbox_';
 
+// ── Gemini 3.7 Flash 提示词优化模型 ──────────────────────────────────────────
+// gemini-3.7-flash: "Our latest and most capable Flash model, built for
+// complex coding, agentic workflows, and reliable multi-step execution"
+// https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash
+const RALPH_OPTIMIZER_MODEL = process.env.RALPH_OPTIMIZER_MODEL || 'gemini-3.7-flash';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
+
+
 interface AgentVersionSnapshot {
   version_hash: string;
   spec: any;
@@ -64,18 +73,39 @@ function updateBestSnapshot(agentId: string, snapshot: AgentVersionSnapshot) {
   console.log(`[Ralph] ✅ 新最优版本: ${snapshot.version_hash} (得分: ${snapshot.score})`);
 }
 
-/** 加载评测题库 */
-function loadEvalSuites(suiteFiles: string[]): any[] {
+/** 加载评测题库 — 自动合并固定通用卷 + 候选 Agent 专属测试集 */
+function loadEvalSuites(agentId: string, extraSuiteFiles: string[] = []): any[] {
   const suitesDir = path.join(__dirname, '..', 'eval_suites');
-  return suiteFiles.flatMap(file => {
+  const draftsDir = path.join(__dirname, '..', 'drafts');
+
+  // 固定通用卷
+  const fixedFiles = ['base_universal.json', 'advanced_lifecycle.json', ...extraSuiteFiles];
+  const fixedCases = fixedFiles.flatMap(file => {
     const fullPath = path.join(suitesDir, file);
     if (!fs.existsSync(fullPath)) {
-      console.warn(`[Ralph] 评测题库文件不存在: ${fullPath}`);
+      console.warn(`[Ralph] 通用题库不存在: ${fullPath}`);
       return [];
     }
     const suite = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+    console.log(`[Ralph]   通用卷 ${file}: ${suite.cases?.length || 0} 题`);
     return suite.cases || [];
   });
+
+  // 专属测试集
+  const evalPath = path.join(draftsDir, `${agentId}_eval.json`);
+  let domainCases: any[] = [];
+  if (fs.existsSync(evalPath)) {
+    const evalSuite = JSON.parse(fs.readFileSync(evalPath, 'utf-8'));
+    domainCases = evalSuite.cases || [];
+    const fallbackCount = domainCases.filter((c: any) => c.fallback_used).length;
+    console.log(`[Ralph]   专属测试集: ${domainCases.length} 题（兜底 ${fallbackCount} 道，Judge: ${evalSuite.judge_model}）`);
+  } else {
+    console.warn(`[Ralph] ⚠️  未找到专属测试集: ${evalPath}，仅运行通用卷`);
+  }
+
+  const all = [...fixedCases, ...domainCases];
+  console.log(`[Ralph] 📋 合计: ${all.length} 道题（通用 ${fixedCases.length} + 专属 ${domainCases.length}）`);
+  return all;
 }
 
 /** 生成失败归因诊断书 */
@@ -116,18 +146,93 @@ function generateDiagnosis(round: number, score: RunScore): string {
   return lines.join('\n');
 }
 
+/**
+ * Gemini 2.5 Flash 提示词优化器
+ * 读取诊断报告 → 分析失败原因 → 输出精准 Spec 修改建议
+ * 严格遵循：不硬编码特例，按分层策略通用化优化
+ */
+async function callGeminiOptimizer(
+  currentSpec: any,
+  diagnosis: string,
+  round: number,
+): Promise<Record<string, any> | null> {
+  if (!GEMINI_API_KEY) {
+    console.warn('[Ralph] GEMINI_API_KEY 未配置，跳过 Gemini 优化');
+    return null;
+  }
+
+  const systemPrompt = `你是 Ralph 评测飞轮的 Spec 优化专家，使用 ${RALPH_OPTIMIZER_MODEL}。
+你的职责：基于 Gemini Judge 严苛裁判报告，精准修改 Agent Spec，使下一轮得分更高。
+
+【优化原则——必须遵守】
+1. 不针对具体失败用例硬编码特例规则
+2. 改动要"通用"——改一处解决多道题的共同根因
+3. 按分层策略：
+   - 格式/安全 → 修改 reply_style 或 taboos
+   - 意图识别 → 优化 routing_examples 或 intent_prompt
+   - 流程问题 → 调整 service_flow 或 role_desc
+   - 安抚问题 → 改进 reassurance_tpl
+4. 每轮只改 1~3 个字段，不大改重写
+5. 修改描述必须仍然"通用"，不能针对某个测试输入
+
+【只输出 JSON，不含其他文字】
+{
+  "fields_to_update": { "field_name": "new_value" },
+  "rationale": "一句话通用化理由",
+  "expected_improvement": "预期改善的题目类型"
+}`;
+
+  const userPrompt = `第 ${round} 轮 Gemini Judge 诊断报告：
+
+${diagnosis}
+
+当前 Spec：
+${JSON.stringify(currentSpec, null, 2)}
+
+请给出通用化修改建议。`;
+
+  try {
+    const url = `${GEMINI_BASE_URL}/v1beta/models/${RALPH_OPTIMIZER_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json() as any;
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const cleaned = raw.replace(/^```json?\s*/m, '').replace(/```\s*$/m, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    console.log(`[Ralph] 🤖 Gemini Optimizer 建议：`);
+    console.log(`   理由: ${parsed.rationale}`);
+    console.log(`   预期改善: ${parsed.expected_improvement}`);
+    console.log(`   修改字段: ${Object.keys(parsed.fields_to_update || {}).join(', ')}`);
+
+    return parsed.fields_to_update || null;
+  } catch (err: any) {
+    console.warn(`[Ralph] Gemini Optimizer 调用失败（${err.message}），本轮跳过`);
+    return null;
+  }
+}
+
 /** 主循环入口 */
 export async function runRalphLoop(params: {
   agentId: string;
   agentSpec: any;
-  suiteFiles?: string[];
+  extraSuiteFiles?: string[];   // 额外题库（专属测试集由 agentId 自动推断加载）
   maxRounds?: number;
   targetScore?: number;
   onRoundComplete?: (round: number, score: RunScore, diagnosis: string) => Promise<any>;
 }): Promise<{ finalScore: number; status: 'pending_human_approval' | 'max_rounds_reached'; totalRounds: number }> {
   const {
     agentId,
-    suiteFiles = ['base_universal.json', 'advanced_lifecycle.json'],
+    extraSuiteFiles = [],
     maxRounds = MAX_ROUNDS,
     targetScore = PASSING_SCORE,
     onRoundComplete,
@@ -138,9 +243,10 @@ export async function runRalphLoop(params: {
   let round = 0;
 
   console.log(`[Ralph] 🚀 开始候选 Agent "${agentId}" 的试用期考评（最多 ${maxRounds} 轮，目标 ${targetScore} 分）`);
+  console.log(`[Ralph] 🤖 提示词优化器: ${RALPH_OPTIMIZER_MODEL}`);
 
-  const allCases = loadEvalSuites(suiteFiles);
-  console.log(`[Ralph] 📋 加载考评题库: ${allCases.length} 道题（来自 ${suiteFiles.join(', ')}）`);
+  // 动态加载：固定通用卷 + 专属测试集
+  const allCases = loadEvalSuites(agentId, extraSuiteFiles);
 
   while (round < maxRounds) {
     round++;
@@ -217,12 +323,22 @@ export async function runRalphLoop(params: {
       await upsertAgentProfile({ id: agentId, ...currentSpec });
     }
 
-    // 允许外部 callback（如 Meta-Agent 根据诊断书调整 Spec）
+    // 允许外部 callback（优先级高）
+    let externalUpdate: any = null;
     if (onRoundComplete) {
-      const updatedSpec = await onRoundComplete(round, runScore, diagnosis);
-      if (updatedSpec) {
-        currentSpec = { ...currentSpec, ...updatedSpec };
-        console.log(`[Ralph] 🔄 Meta-Agent 已根据诊断书更新配置，下轮生效`);
+      externalUpdate = await onRoundComplete(round, runScore, diagnosis);
+      if (externalUpdate) {
+        currentSpec = { ...currentSpec, ...externalUpdate };
+        console.log(`[Ralph] 🔄 外部 callback 已更新配置，下轮生效`);
+      }
+    }
+
+    // Gemini 2.5 Flash 自动优化（无外部覆盖 且 分数未达标 时运行）
+    if (!externalUpdate && runScore.total_score < targetScore) {
+      const geminiUpdate = await callGeminiOptimizer(currentSpec, diagnosis, round);
+      if (geminiUpdate) {
+        currentSpec = { ...currentSpec, ...geminiUpdate };
+        console.log(`[Ralph] 🤖 Gemini (${RALPH_OPTIMIZER_MODEL}) 已更新配置，下轮生效`);
       }
     }
 

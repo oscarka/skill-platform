@@ -1,0 +1,15 @@
+# Ralph Progress Log
+Started: 2026-08-20 19:08
+
+## Codebase Patterns
+
+- **ralphLoop.ts 与 ralph.sh 的关系**：ralph.sh 是 Snarktank Ralph 框架（循环调用 AI 工具执行 PRD 任务），ralphLoop.ts 是项目内部的 TypeScript 评测飞轮引擎。两者各司其职。
+- **评测模型架构**：测试集由 base_universal(10) + advanced_lifecycle(13) + {agentId}_eval.json(90) 三层组成，合计113题
+- **Judge vs Optimizer**：Gemini-2.0-flash 做 Judge（严苛裁判），Gemini-3.7-flash 做 Optimizer（提示词优化）
+- **eval 文件路径**：专属测试集保存在 agents_factory/drafts/{agentId}_eval.json，不在 eval_suites/ 目录
+- **禁忌触发**：触发禁忌 → 本轮得分归零 → 不更新最优快照 → 直接回滚
+- **草稿文件**：agents_factory/drafts/{agentId}.json 包含 spec + eval_suite_id + eval_case_count
+- **Gemini API**：GEMINI_API_KEY 在 server/.env，ralphLoop.ts 通过 export $(grep -v '^#' ../server/.env | xargs) 加载
+- **沙箱用户**：系统集成测试用 eval_sandbox_{agentId}_r{round} 前缀，每轮结束后清理
+
+---
