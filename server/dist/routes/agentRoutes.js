@@ -263,8 +263,10 @@ exports.agentRouter.post('/ingest', async (req, res) => {
                 meta: {
                     from_name: display_name,
                     user_id: unified_id,
+                    unionid: req.body.unionid || null,
                     channel_uid: from_user_id,
                     juhe_conv_id: juhe_conv_id || '',
+                    delivery_routes: delivery_routes,
                 },
                 context: {
                     available_apps: ['企业微信'],
@@ -329,6 +331,8 @@ exports.agentRouter.get('/tasks', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
     try {
+        // 自动收敛超过 1 小时的僵尸任务（对应已完成工单的自动同步，超时的自动标记超时）
+        await (0, agentService_1.reconcileStaleTasks)(60 * 60 * 1000);
         const limit = Math.min(parseInt(String(req.query.limit || '50')), 200);
         const offset = parseInt(String(req.query.offset || '0'));
         const channel = req.query.channel;

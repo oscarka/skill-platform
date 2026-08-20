@@ -51,6 +51,9 @@ exports.taskEventBus = void 0;
 exports.createAgentTask = createAgentTask;
 exports.updateAgentTask = updateAgentTask;
 exports.appendTaskEvent = appendTaskEvent;
+exports.reconcileStaleTasks = reconcileStaleTasks;
+exports.checkAndTriggerWikiSync = checkAndTriggerWikiSync;
+exports.reconcileActiveClientsWikiSync = reconcileActiveClientsWikiSync;
 exports.writeWikiLog = writeWikiLog;
 exports.triggerWikiSyncPublic = triggerWikiSyncPublic;
 exports.saveAgentProfile = saveAgentProfile;
@@ -162,6 +165,60 @@ function appendTaskEvent(taskId, eventType, payload) {
         await db.runAsync(`INSERT INTO agent_task_events (id, task_id, event_type, payload, ts) VALUES (?, ?, ?, ?, ?)`, [eventId, taskId, eventType, payload ? JSON.stringify(payload) : null, ts]);
     });
 }
+/**
+ * 自动收敛超过 1 小时的僵尸任务（Zombie Task Watchdog）
+ * 1. 若对应工单已 done，自动同步状态为 done 并补齐耗时
+ * 2. 若对应工单为 error/expired，自动同步为 failed
+ * 3. 若无关联工单或普通任务超过 1 小时未完成，标记为 failed (timeout)
+ */
+async function reconcileStaleTasks(thresholdMs = 60 * 60 * 1000) {
+    const cutoff = Date.now() - thresholdMs;
+    try {
+        const staleTasks = await db.allAsync(`SELECT id, meta, session_id, started_at, status, route_type 
+       FROM agent_tasks 
+       WHERE status IN ('processing', 'executing', 'routing', 'pending') 
+         AND started_at < ?`, [cutoff]);
+        if (!staleTasks || staleTasks.length === 0)
+            return 0;
+        let updatedCount = 0;
+        for (const t of staleTasks) {
+            let meta = null;
+            try {
+                meta = t.meta ? JSON.parse(t.meta) : null;
+            }
+            catch { }
+            const ticketId = meta?.ticketId || (t.session_id?.startsWith('h5_') ? t.session_id.replace(/^h5_/, '') : null);
+            if (ticketId) {
+                const ticket = await db.getAsync(`SELECT status, ai_completed_at, updated_at FROM tickets WHERE id=?`, [ticketId]);
+                if (ticket && ticket.status === 'done') {
+                    const completedAt = Number(ticket.ai_completed_at || ticket.updated_at || Date.now());
+                    const startedAt = Number(t.started_at || completedAt);
+                    const duration = Math.max(0, completedAt - startedAt);
+                    await db.runAsync(`UPDATE agent_tasks SET status='done', ended_at=?, duration_ms=? WHERE id=?`, [completedAt, duration, t.id]);
+                    updatedCount++;
+                    continue;
+                }
+                else if (ticket && (ticket.status === 'error' || ticket.status === 'expired')) {
+                    const endedAt = Number(ticket.updated_at || Date.now());
+                    await db.runAsync(`UPDATE agent_tasks SET status='failed', error_message=?, ended_at=? WHERE id=?`, [`工单已${ticket.status === 'expired' ? '过期' : '异常'}`, endedAt, t.id]);
+                    updatedCount++;
+                    continue;
+                }
+            }
+            // 无工单或超时未完成的普通任务
+            await db.runAsync(`UPDATE agent_tasks SET status='failed', error_message=?, ended_at=? WHERE id=?`, ['任务超时（超过1小时未完成）', Date.now(), t.id]);
+            updatedCount++;
+        }
+        if (updatedCount > 0) {
+            console.log(`[Watchdog] 🐕 自动收敛了 ${updatedCount} 条超过 1 小时的僵尸任务`);
+        }
+        return updatedCount;
+    }
+    catch (err) {
+        console.warn(`[Watchdog] 自动收敛僵尸任务异常:`, err.message);
+        return 0;
+    }
+}
 // ─── LLMWiki Integration ──────────────────────────────────────────────────────
 const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
 /**
@@ -193,19 +250,59 @@ function backgroundPostLog(userId, userMsg, aiReply) {
         body,
         signal: AbortSignal.timeout(10_000),
     })
-        .then(res => {
+        .then(async (res) => {
         console.log(`[WikiLog] ✓ 日志写入成功 userId=${userId} HTTP ${res.status}`);
-        // ── 30 轮计数器 ──
-        const count = (syncCounters.get(userId) || 0) + 1;
-        syncCounters.set(userId, count);
-        console.log(`[WikiSync] 计数器 userId=${userId} count=${count}/${SYNC_COUNTER_LIMIT}`);
-        if (count >= SYNC_COUNTER_LIMIT) {
-            console.log(`[WikiSync] 📊 ${SYNC_COUNTER_LIMIT} 轮计数器触发 sync userId=${userId}`);
-            syncCounters.set(userId, 0);
-            triggerWikiSync(userId, 'counter_30');
-        }
+        // ── 数据库驱动的未同步日志对账（废除易丢的内存计数器）──
+        void checkAndTriggerWikiSync(userId);
     })
         .catch(err => console.warn(`[WikiLog] ✗ 日志写入失败（不影响主流程）userId=${userId}:`, err.message));
+}
+/**
+ * 实时检查并触发未同步日志消化（阈值 >= 10 条）
+ */
+const _activeSyncLocks = new Set();
+async function checkAndTriggerWikiSync(userId) {
+    if (!LLMWIKI_BASE || !userId || _activeSyncLocks.has(userId))
+        return;
+    try {
+        const res = await fetch(`${LLMWIKI_BASE}/api/clients/${userId}/logs`, {
+            signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok)
+            return;
+        const logs = await res.json();
+        const unsyncedCount = Array.isArray(logs) ? logs.filter((l) => !l.synced).length : 0;
+        if (unsyncedCount >= 10) {
+            console.log(`[WikiSyncWatchdog] 📊 发现客户 userId=${userId} 积压未同步日志 ${unsyncedCount} 条，触发自动同步`);
+            triggerWikiSync(userId, `unsynced_threshold_${unsyncedCount}`, 30);
+        }
+    }
+    catch (err) {
+        console.debug(`[WikiSyncWatchdog] 检查未同步日志跳过 userId=${userId}:`, err.message);
+    }
+}
+/**
+ * 全局活跃客户定期未同步对账看门狗（定时巡检，兜底所有遗留未同步日志）
+ */
+async function reconcileActiveClientsWikiSync() {
+    if (!LLMWIKI_BASE)
+        return;
+    try {
+        // 找出最近 24 小时内有活跃任务的所有客户
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        const activeRows = await db.allAsync(`SELECT DISTINCT user_id FROM agent_tasks WHERE started_at >= ? LIMIT 20`, [cutoff]);
+        if (!activeRows || activeRows.length === 0)
+            return;
+        for (const r of activeRows) {
+            const uid = r.user_id;
+            if (uid && !_activeSyncLocks.has(uid)) {
+                await checkAndTriggerWikiSync(uid);
+            }
+        }
+    }
+    catch (err) {
+        console.warn('[WikiSyncWatchdog] 全局对账巡检异常:', err.message);
+    }
 }
 /**
  * 公开接口：写一条日志到 LLMWiki（用于报告确认等场景）
@@ -234,31 +331,37 @@ async function writeWikiLog(userId, content, type = 'wechat', title) {
         throw new Error(`LLMWiki log write failed: HTTP ${res.status} ${errText}`);
     }
     console.log(`[WriteWikiLog] ✓ 写入成功 userId=${userId} HTTP ${res.status}`);
+    void checkAndTriggerWikiSync(userId);
 }
 /**
  * 后台触发 LLMWiki Wiki sync Pipeline（Skill 完成后调用）
  */
 function triggerWikiSyncPublic(userId, reason) {
-    triggerWikiSync(userId, reason);
+    triggerWikiSync(userId, reason, 30);
 }
-function triggerWikiSync(userId, reason, maxLogs = 15) {
-    if (!LLMWIKI_BASE || !userId) {
-        console.log(`[WikiSync] 跳过：LLMWIKI_BASE=${LLMWIKI_BASE ? '✓' : '✗'} userId=${userId || '(empty)'}`);
+function triggerWikiSync(userId, reason, maxLogs = 30) {
+    if (!LLMWIKI_BASE || !userId || _activeSyncLocks.has(userId)) {
         return;
     }
+    _activeSyncLocks.add(userId);
     const url = `${LLMWIKI_BASE}/api/clients/${userId}/sync`;
     console.log(`[WikiSync] POST ${url} reason=${reason} userId=${userId} maxLogs=${maxLogs}`);
     fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason, maxLogs }),
-        signal: AbortSignal.timeout(600_000), // 10min: 3-stage LLM pipeline can take 5-10min
+        signal: AbortSignal.timeout(600_000), // 10min: 3-stage LLM pipeline
     })
         .then(async (res) => {
         const data = await res.json().catch(() => ({}));
         console.log(`[WikiSync] ✓ sync完成 userId=${userId} HTTP ${res.status} wikiUpdated=${data.wikiUpdated ?? '?'}`);
+        // 成功后清理该用户的内存 Wiki 上下文缓存，确保下次对话立即拉取最新 wiki
+        _wikiCache.delete(userId);
     })
-        .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message));
+        .catch(err => console.warn(`[WikiSync] ✗ sync失败（不影响主流程）userId=${userId}:`, err.message))
+        .finally(() => {
+        _activeSyncLocks.delete(userId);
+    });
 }
 const _wikiCache = new Map();
 const WIKI_CACHE_TTL_MS = 60_000;
@@ -1142,6 +1245,17 @@ function assembleAgentContext(params) {
     };
 }
 // ─── 3. 安抚消息生成 ──────────────────────────────────────────────────────────
+function resolvePreferredClientName(userProfile, fallbackName) {
+    if (userProfile) {
+        const m1 = userProfile.match(/称呼偏好[^\n]*?【([^】]+)】/);
+        if (m1 && m1[1])
+            return m1[1].trim();
+        const m2 = userProfile.match(/称呼偏好[：:]\s*([^\s,，\n]+)/);
+        if (m2 && m2[1])
+            return m2[1].replace(/^[【"“]|["”】]$/g, '').trim();
+    }
+    return fallbackName || '您';
+}
 async function buildReassuranceMessage(fromName, content, skillName, profile, _apiKey) {
     if (profile.reassurance_mode === 'template' && profile.reassurance_tpl) {
         return profile.reassurance_tpl.replace('{客户姓名}', fromName);
@@ -1155,7 +1269,7 @@ async function buildReassuranceMessage(fromName, content, skillName, profile, _a
 async function handleChatReply(req, apiKey, requestId, delivery, profile) {
     const { content, meta, history = [], notes = '' } = req;
     const wikiCtx = req._wikiContext;
-    const fromName = meta.from_name || '您';
+    const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
     const { app } = delivery;
     const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
     const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
@@ -1220,7 +1334,7 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 async function handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog, agentCtxPkg) {
     const { content, meta, history = [], notes = '' } = req;
     const wikiCtx = req._wikiContext;
-    const fromName = meta.from_name || '您';
+    const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
     const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
     const profileBlock = wikiCtx?.user_profile ? `\n\n【客户画像】\n${wikiCtx.user_profile}` : '';
     const healthBlock = wikiCtx?.health_wiki ? `\n\n【健康档案摘要】\n${wikiCtx.health_wiki}` : '';
@@ -1230,7 +1344,7 @@ async function handleHealthDirect(req, apiKey, requestId, delivery, profile, ski
         : '';
     // 注意：不在 prompt 中注入报告原文（reportBlock），让 AI 通过 query_ticket 工具获取报告
     // 这样可确保 tool_query_ticket 事件被记录，保证日志链完整性
-    const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，根据客户的健康档案和问题提供专业且个性化的建议。
+    const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，正在为客户${fromName}服务。根据客户的健康档案和问题提供专业且个性化的建议。
 回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
@@ -1280,7 +1394,7 @@ async function handleHealthDirect(req, apiKey, requestId, delivery, profile, ski
 async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skillId, skillName, skillRouteLog, serviceUrl) {
     const { content, meta, history = [], notes = '', session_id } = req;
     const wikiCtx = req._wikiContext;
-    const fromName = meta.from_name || '您';
+    const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
     // ── 检查 skill 类型：external → 工单流程，internal → 直接 sandbox ──────────
     const skillRow = await db.getAsync('SELECT * FROM skills WHERE id=?', [skillId]);
     const isExternal = skillRow?.type === 'external';
@@ -1508,7 +1622,7 @@ async function handleHealthSkill(req, apiKey, requestId, delivery, profile, skil
         userId: meta.user_id || '',
         userContent: content,
         skillName: skillName || '',
-        fromName: meta.from_name || '',
+        fromName: fromName, // 使用已解析的偏好称呼，而非原始微信昵称
     });
     const recentHistory = history.slice(-20)
         .map(h => `${h.role === 'user' ? '客户' : '助手'}：${h.content}`)
@@ -1732,6 +1846,18 @@ async function processAgentChat(req) {
         history_count: (req.history || []).length,
         has_notes: !!(req.notes),
     });
+    if (req.meta?.delivery_routes && Array.isArray(req.meta.delivery_routes)) {
+        void appendTaskEvent(requestId, 'identity_resolved', {
+            unified_id: req.session_id,
+            unionid: req.meta.unionid || null,
+            display_name: req.meta.from_name || '',
+            channel_uid: req.meta.channel_uid,
+            source_channel: srcChannel,
+            routes_count: req.meta.delivery_routes.length,
+            routes: req.meta.delivery_routes,
+            has_juhe: req.meta.delivery_routes.some((r) => r.channel === 'juhe' && !!r.conv_id),
+        });
+    }
     // ── 第三道防线：纯文件占位内容不回复 ────────────────────────────────────────
     // 正常流程下文件消息被 ingest 守卫拦截（第二道），archiver 拦截（第一道）
     // 但如果消息意外到达这里（直接调 /api/v1/agent/chat），也要保持静默

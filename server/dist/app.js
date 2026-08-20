@@ -18,6 +18,7 @@ const testRoutes_1 = require("./routes/testRoutes");
 const mcpRoutes_1 = require("./routes/mcpRoutes");
 const oauthRoutes_1 = require("./routes/oauthRoutes");
 const agentRoutes_1 = require("./routes/agentRoutes");
+const agentService_1 = require("./agentService");
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const app = (0, express_1.default)();
 const PORT = parseInt(process.env.PORT || '3100', 10);
@@ -65,6 +66,15 @@ app.use((err, _req, res, _next) => {
 async function start() {
     await Promise.resolve((0, db_1.initDb)());
     (0, agentRoutes_1.startDispatcherLoop)(); // 启动出站消息分发后台循环（每 5s 扫 delivery_queue）
+    // 启动僵尸任务自动收敛看门狗与 LLMWiki 未同步日志对账看门狗（每 5 分钟扫描一次）
+    setInterval(() => {
+        void (0, agentService_1.reconcileStaleTasks)(60 * 60 * 1000);
+        void (0, agentService_1.reconcileActiveClientsWikiSync)();
+    }, 5 * 60 * 1000);
+    setTimeout(() => {
+        void (0, agentService_1.reconcileStaleTasks)(60 * 60 * 1000);
+        void (0, agentService_1.reconcileActiveClientsWikiSync)();
+    }, 3000);
     app.listen(PORT, () => {
         console.log(`\n🚀 Skill Platform API running at http://localhost:${PORT}`);
         console.log(`   Health: http://localhost:${PORT}/api/health`);
