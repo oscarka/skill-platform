@@ -1552,7 +1552,6 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 
 任务：用自然、亲切的语气回复客户消息。
 要求：
-- 称呼铁律：【重要】你必须称呼客户为"${fromName}"（如"张先生"），绝对不要称呼客户为 Oscar 或其他未指定昵称！
 - 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
@@ -1625,11 +1624,10 @@ async function handleHealthDirect(
   // 注意：不在 prompt 中注入报告原文（reportBlock），让 AI 通过 query_ticket 工具获取报告
   // 这样可确保 tool_query_ticket 事件被记录，保证日志链完整性
 
-  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，正在为客户${fromName}服务。必须称呼客户为${fromName}。根据客户的健康档案和问题提供专业且个性化的建议。
+  const systemPrompt = `你是${profile.name}，${profile.role_desc || '专业的健康顾问'}，正在为客户${fromName}服务。根据客户的健康档案和问题提供专业且个性化的建议。
 回复风格：${profile.reply_style || '亲切专业，回复控制在300字以内'}${tabooText}${profileBlock}${healthBlock}${directiveBlock}
 
 要求：
-- 称呼铁律：【重要】你必须称呼客户为"${fromName}"（如"张先生"），绝对不要称呼客户为 Oscar 或其他未指定昵称！
 - 不要使用 Markdown 格式
 - 如无健康档案，基于对话内容给出通用建议` + buildKnowledgePromptHint(profile);
 
@@ -1958,7 +1956,7 @@ async function handleHealthSkill(
     userId:       meta.user_id || '',
     userContent:  content,
     skillName:    skillName || '',
-    fromName:     meta.from_name || '',
+    fromName:     fromName,  // 使用已解析的偏好称呼，而非原始微信昵称
   });
 
   const recentHistory = history.slice(-20)
