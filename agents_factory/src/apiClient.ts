@@ -49,6 +49,7 @@ export async function sendChatMessage(params: {
     body: JSON.stringify({
       content: params.content !== undefined && params.content !== null ? String(params.content) : ' ',
       source: 'eval_sandbox',
+      agent_id: params.agentId,
       session_id: params.sessionId || params.userId,
       history: params.history || [],
       context: {

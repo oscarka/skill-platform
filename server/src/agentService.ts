@@ -2415,8 +2415,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   if (sessionId) {
     const nowMs = Date.now();
     // Phase C: 加 agent_id 过滤，防止不同 Agent 的守卫相互干扰
-    // 此处 profile 尚未加载，直接从 req 读取 agent_id（未传则 'default'）
-    const _reqAgentId = req.agent_id || 'default';
+    const _reqAgentId = req.agent_id || req.meta?.agent_id || 'default';
     const activeGuard = await db.getAsync<any>(
       `SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>? AND (agent_id=? OR agent_id IS NULL OR agent_id='')
@@ -2469,10 +2468,10 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   }
 
   // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
-  // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
-  // 注：守卫查询时使用的是 req.agent_id（上面 _reqAgentId），不依赖此 profile
+  // agent_id 从请求顶层或 meta 透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
   void updateAgentTask(requestId, { status: 'routing' });
-  const profile = await loadAgentProfile(req.agent_id);
+  const agentIdToLoad = req.agent_id || req.meta?.agent_id || (req as any).agentId;
+  const profile = await loadAgentProfile(agentIdToLoad);
   console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
   const availableSkills = await getAvailableSkills(profile);
   console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
