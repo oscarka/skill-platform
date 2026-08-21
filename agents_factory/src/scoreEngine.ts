@@ -163,11 +163,11 @@ export async function assertCaseAsync(
           const judgeRes = await callGeminiJudge(getDefaultJudgeConfig(), reply, promptToUse);
           passed = judgeRes.pass && judgeRes.score >= threshold && judgeRes.violations.length === 0;
           detail = passed
-            ? `✅ Gemini Judge 通过 (${judgeRes.score}分): ${judgeRes.reason}`
-            : `❌ Gemini Judge 裁定失败 (${judgeRes.score}分): ${judgeRes.reason}${judgeRes.violations.length ? ' 违规: ' + judgeRes.violations.join('; ') : ''}`;
+            ? `✅ AI Judge 裁定通过 (${judgeRes.score}分): ${judgeRes.reason}`
+            : `❌ AI Judge 裁定未通过 (${judgeRes.score}分): ${judgeRes.reason}${judgeRes.violations.length ? ' 违规: ' + judgeRes.violations.join('; ') : ''}`;
         } catch (err: any) {
-          detail = `⚠️ Gemini Judge API 异常 (${err.message})，降级基础判定`;
-          passed = reply.trim().length > 10;
+          detail = `❌ AI Judge 裁定异常 (${err.message})`;
+          passed = false;
         }
         break;
 
@@ -192,7 +192,8 @@ export async function assertCaseAsync(
     score,
     weighted_score: score * (c.weight || 1.0),
     details,
-    agent_reply: reply.slice(0, 500),
+    input: c.input || c.name,
+    agent_reply: reply.slice(0, 1000),
     latency_ms: latencyMs,
   };
 }

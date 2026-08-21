@@ -44,6 +44,7 @@ interface CaseResult {
   score: number;
   passed: boolean;
   taboo_violated?: boolean;
+  input?: string;
   agent_reply?: string;
   latency_ms: number;
   details: string[];
@@ -1030,10 +1031,24 @@ export default function AgentInstances() {
                                 </div>
                               </div>
 
+                              {/* 用户提问 / 测试输入 */}
+                              <div style={{ marginBottom: 12 }}>
+                                <div style={{ fontSize: '.8rem', color: '#a5b4fc', marginBottom: 4, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span>💬</span> 用户提问 / 测试输入：
+                                </div>
+                                <div style={{
+                                  padding: '10px 14px', borderRadius: 8,
+                                  background: 'rgba(99,102,241,0.08)', fontSize: '.88rem', lineHeight: 1.6,
+                                  color: '#e0e7ff', whiteSpace: 'pre-wrap', border: '1px solid rgba(99,102,241,0.2)',
+                                }}>
+                                  {c.input || c.case_name}
+                                </div>
+                              </div>
+
                               {/* Agent 实际回复 */}
                               <div style={{ marginBottom: 12 }}>
-                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600 }}>
-                                  🤖 Agent 实际回复：
+                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span>🤖</span> Agent 实际回复：
                                 </div>
                                 <div style={{
                                   padding: '10px 14px', borderRadius: 8,
@@ -1044,25 +1059,35 @@ export default function AgentInstances() {
                                 </div>
                               </div>
 
-                              {/* 断言判定细节 */}
+                              {/* 断言判定细节与 AI Judge 裁定 */}
                               <div>
-                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600 }}>
-                                  ⚖️ 裁判判定明细：
+                                <div style={{ fontSize: '.8rem', color: '#a1a1aa', marginBottom: 4, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span>⚖️</span> 裁判判定依据与理由：
                                 </div>
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                                  {(c.details || []).map((d, di) => (
-                                    <span
-                                      key={di}
-                                      style={{
-                                        padding: '3px 8px', borderRadius: 6, fontSize: '.78rem',
-                                        background: d.includes('✅') ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)',
-                                        color: d.includes('✅') ? '#4ade80' : '#f87171',
-                                        border: `1px solid ${d.includes('✅') ? 'rgba(34,197,94,.25)' : 'rgba(239,68,68,.25)'}`,
-                                      }}
-                                    >
-                                      {d}
-                                    </span>
-                                  ))}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  {(c.details || []).map((d, di) => {
+                                    const isJudge = d.includes('Judge') || d.includes('裁判');
+                                    const isPass = d.includes('✅');
+                                    return (
+                                      <div
+                                        key={di}
+                                        style={{
+                                          padding: '6px 10px', borderRadius: 6, fontSize: '.82rem', lineHeight: 1.5,
+                                          background: isPass ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)',
+                                          color: isPass ? '#4ade80' : '#f87171',
+                                          border: `1px solid ${isPass ? 'rgba(34,197,94,.2)' : 'rgba(239,68,68,.2)'}`,
+                                          display: 'flex', alignItems: 'flex-start', gap: 6,
+                                        }}
+                                      >
+                                        <span style={{ fontWeight: 600, flexShrink: 0 }}>
+                                          {isJudge ? '🤖 AI Judge:' : '🛡️ 规则断言:'}
+                                        </span>
+                                        <span style={{ wordBreak: 'break-all' }}>
+                                          {d}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             </div>

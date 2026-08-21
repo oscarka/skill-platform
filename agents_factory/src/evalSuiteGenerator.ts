@@ -45,6 +45,17 @@ export interface JudgeConfig {
 }
 
 export function getDefaultJudgeConfig(): JudgeConfig {
+  const provider = (process.env.JUDGE_PROVIDER as any) || (process.env.DOUBAO_API_KEY ? 'doubao' : 'gemini');
+  if (provider === 'doubao') {
+    return {
+      provider: 'doubao',
+      model: process.env.JUDGE_MODEL || 'doubao-1-5-pro-32k-250115',
+      api_key: process.env.DOUBAO_API_KEY || '',
+      base_url: process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3',
+      strictness_level: parseFloat(process.env.JUDGE_STRICTNESS || '0.75'),
+    };
+  }
+
   return {
     provider: 'gemini',
     model: process.env.JUDGE_MODEL || 'gemini-2.0-flash',
