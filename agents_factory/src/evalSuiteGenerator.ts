@@ -49,7 +49,7 @@ export function getDefaultJudgeConfig(): JudgeConfig {
   if (provider === 'doubao') {
     return {
       provider: 'doubao',
-      model: process.env.DEFAULT_MODEL || process.env.JUDGE_MODEL || 'doubao-seed-1-8-251228',
+      model: process.env.ARK_MODEL || process.env.DEFAULT_MODEL || process.env.JUDGE_MODEL || 'deepseek-v4-flash-ga-260731',
       api_key: process.env.DOUBAO_API_KEY || '',
       base_url: process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3',
       strictness_level: parseFloat(process.env.JUDGE_STRICTNESS || '0.75'),

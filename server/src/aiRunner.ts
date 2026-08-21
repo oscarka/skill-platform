@@ -50,6 +50,8 @@ async function getConfig() {
 function inferProvider(modelName: string): ModelProvider {
   if (modelName.startsWith('gemini')) return 'gemini';
   if (modelName.startsWith('doubao') || modelName.startsWith('ep-')) return 'doubao';
+  // 火山引擎 Ark 托管的 deepseek-v4-flash 等端点，走火山 Ark 接口
+  if (modelName.includes('flash') || modelName.includes('ga-') || modelName.startsWith('deepseek-v4') || modelName.startsWith('deepseek-v3-') || modelName.startsWith('deepseek-r1-')) return 'doubao';
   if (modelName.startsWith('deepseek')) return 'deepseek';
   return 'gemini'; // fallback
 }
