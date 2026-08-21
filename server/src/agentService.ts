@@ -1283,7 +1283,7 @@ async function routeDecision(
   // 当 routing_examples 未配置时，使用原始提示词（一字不改，保证现有行为不变）
   // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
   let systemPrompt: string;
-  if (!routingExamples) {
+  if (!routingExamples || !routingExamples.high_desc) {
     // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
     systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
@@ -1306,16 +1306,16 @@ ${skillList}
   } else {
     // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
     const re = routingExamples;
-    const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
-    const exLow  = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
-    const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
+    const exHigh = Array.isArray(re.examples_high) ? re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、') : '';
+    const exLow  = Array.isArray(re.examples_low)  ? re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、')  : '';
+    const exNone = Array.isArray(re.examples_none) ? re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、') : '';
     systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
 1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
 2. 判断置信度（confidence）：
-   - "high"：${re.high_desc}（如：${exHigh}）
-   - "low"：${re.low_desc}（如：${exLow}）
-   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
+   - "high"：${re.high_desc || '客户明确表达了要使用某个专项服务'}${exHigh ? `（如：${exHigh}）` : ''}
+   - "low"：${re.low_desc || '客户有业务相关问题但未明确要求某项服务'}${exLow ? `（如：${exLow}）` : ''}
+   - "none"：普通聊天/问候/询问服务范围，直接回答${exNone ? `（如：${exNone}）` : ''}
 
 注意：
 - 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
