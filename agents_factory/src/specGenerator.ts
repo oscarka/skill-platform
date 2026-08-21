@@ -107,7 +107,7 @@ function generateAgentId(name: string): string {
 
 async function callLLM(systemPrompt: string, userPrompt: string): Promise<string> {
   const apiKey = process.env.DOUBAO_API_KEY || process.env.ARK_API_KEY;
-  const model = process.env.SPEC_GEN_MODEL || 'doubao-1.5-pro-32k-250115';
+  const model = process.env.SPEC_GEN_MODEL || process.env.DEFAULT_MODEL || 'doubao-seed-1-8-251228';
   const baseUrl = process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
 
   if (!apiKey) {
