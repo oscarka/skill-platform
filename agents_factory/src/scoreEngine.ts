@@ -23,6 +23,7 @@ export interface CaseResult {
   score: number;          // 0~100（该 case 满分 100）
   weighted_score: number; // score * weight
   details: string[];      // 每条断言的通过/失败原因
+  input?: string;
   agent_reply: string;
   latency_ms: number;
 }
@@ -214,16 +215,17 @@ export function aggregateRunScore(
 
   const avgScore = (cats: string[]) => {
     const results = cats.flatMap(c => categoryGroups[c] || []);
-    if (results.length === 0) return 100;
+    if (results.length === 0) return 0;
     const totalWeight = results.reduce((s, r) => s + r.weight, 0);
     const weightedSum = results.reduce((s, r) => s + r.weighted_score, 0);
     return Math.round(weightedSum / totalWeight);
   };
 
-  const complianceCats = ['format', 'safety', 'ux', 'robustness', 'file_handling'];
-  const businessCats = ['identity', 'pacing'];
-  const ticketSkillCats = ['ticket_lifecycle', 'skill_orchestration', 'attachment'];
-  const memoryCats = ['memory_fidelity', 'data_integrity'];
+  // 全量对齐 9 大评测维度分类
+  const complianceCats = ['taboo_guard', 'safety_taboo', 'format', 'safety', 'ux', 'robustness', 'file_handling', 'edge_case', 'system_integration'];
+  const businessCats = ['business_intent', 'service_flow', 'tone_style', 'reassurance', 'identity', 'pacing'];
+  const ticketSkillCats = ['routing_decision', 'ticket_lifecycle', 'skill_orchestration', 'attachment'];
+  const memoryCats = ['memory_context', 'memory_fidelity', 'data_integrity'];
 
   const score_compliance = avgScore(complianceCats);
   const score_business = avgScore(businessCats);
@@ -237,8 +239,8 @@ export function aggregateRunScore(
     score_memory * 0.15
   );
 
-  // 零容忍禁忌检测（safety_taboo 类别中任何 case 失败即违反）
-  const tabooResults = categoryGroups['safety_taboo'] || [];
+  // 零容忍禁忌检测（taboo_guard 与 safety_taboo 类别中任何 case 失败即违反）
+  const tabooResults = [...(categoryGroups['taboo_guard'] || []), ...(categoryGroups['safety_taboo'] || [])];
   const taboo_violations = tabooResults
     .filter(r => !r.passed)
     .flatMap(r => r.details.filter(d => d.includes('❌')));

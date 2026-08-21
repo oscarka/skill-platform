@@ -647,10 +647,34 @@ async function loadAgentProfile(agentId?: string): Promise<AgentProfile> {
   const cached = _profileCacheMap.get(id);
   if (cached && Date.now() < cached.expireAt) return cached.profile;
   try {
-    const row = await db.getAsync<any>(
+    let row = await db.getAsync<any>(
       'SELECT * FROM agent_profiles WHERE id = ?',
       [id]
     );
+    // ── 支持候选员工（meta_agents 试用期考评阶段直接按候选 Spec 运行）──
+    if (!row && id !== DEFAULT_PROFILE_ID) {
+      const metaRow = await db.getAsync<any>(
+        'SELECT * FROM meta_agents WHERE id = ?',
+        [id]
+      );
+      if (metaRow) {
+        row = {
+          id: metaRow.id,
+          name: metaRow.name,
+          role_desc: metaRow.role_desc,
+          reply_style: metaRow.reply_style,
+          service_flow: metaRow.service_flow,
+          taboos: metaRow.taboos,
+          reassurance_mode: 'ai',
+          reassurance_tpl: metaRow.reassurance_tpl || '',
+          skill_mode: 'auto',
+          skill_ids: '[]',
+          routing_examples: metaRow.routing_examples,
+          knowledge_config: null,
+        };
+      }
+    }
+
     // 若指定 id 不存在，自动 fallback 到 default
     const src = row ?? (id !== DEFAULT_PROFILE_ID
       ? await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID])
