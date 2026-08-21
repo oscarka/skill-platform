@@ -147,13 +147,12 @@ async function callGeminiOptimizer(
   diagnosis: string,
   round: number,
 ): Promise<Record<string, any> | null> {
-  if (!GEMINI_API_KEY) {
-    console.warn('[Ralph] GEMINI_API_KEY 未配置，跳过 Gemini 优化');
-    return null;
-  }
+  const arkKey = process.env.DOUBAO_API_KEY || process.env.ARK_API_KEY;
+  const arkBase = process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
+  const optimizerModel = process.env.ARK_MODEL || process.env.DEFAULT_MODEL || 'deepseek-v4-flash-ga-260731';
 
-  const systemPrompt = `你是 Ralph 评测飞轮的 Spec 优化专家，使用 ${RALPH_OPTIMIZER_MODEL}。
-你的职责：基于 Gemini Judge 严苛裁判报告，精准修改 Agent Spec，使下一轮得分更高。
+  const systemPrompt = `你是 Ralph 评测飞轮的 Spec 优化专家，使用 ${optimizerModel}。
+你的职责：基于 AI Judge 严苛裁判报告，精准修改 Agent Spec，使下一轮得分更高。
 
 【优化原则——必须遵守】
 1. 不针对具体失败用例硬编码特例规则
@@ -173,7 +172,7 @@ async function callGeminiOptimizer(
   "expected_improvement": "预期改善的题目类型"
 }`;
 
-  const userPrompt = `第 ${round} 轮 Gemini Judge 诊断报告：
+  const userPrompt = `第 ${round} 轮 AI Judge 诊断报告：
 
 ${diagnosis}
 
@@ -181,6 +180,44 @@ ${diagnosis}
 ${JSON.stringify(currentSpec, null, 2)}
 
 请给出通用化修改建议。`;
+
+  if (arkKey) {
+    try {
+      const res = await fetch(`${arkBase}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${arkKey}` },
+        body: JSON.stringify({
+          model: optimizerModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 1024,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as any;
+      const raw = data.choices?.[0]?.message?.content || '';
+      const cleaned = raw.replace(/^```json?\s*/m, '').replace(/```\s*$/m, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      console.log(`[Ralph] 🤖 DeepSeek Optimizer (${optimizerModel}) 优化建议：`);
+      console.log(`   理由: ${parsed.rationale}`);
+      console.log(`   预期改善: ${parsed.expected_improvement}`);
+      console.log(`   修改字段: ${Object.keys(parsed.fields_to_update || {}).join(', ')}`);
+
+      return parsed.fields_to_update || null;
+    } catch (err: any) {
+      console.warn(`[Ralph] Ark Optimizer 调用失败（${err.message}），尝试 Gemini 备用...`);
+    }
+  }
+
+  if (!GEMINI_API_KEY) {
+    console.warn('[Ralph] 未配置可用优化器 API Key，跳过自动优化');
+    return null;
+  }
 
   try {
     const url = `${GEMINI_BASE_URL}/v1beta/models/${RALPH_OPTIMIZER_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -207,7 +244,7 @@ ${JSON.stringify(currentSpec, null, 2)}
 
     return parsed.fields_to_update || null;
   } catch (err: any) {
-    console.warn(`[Ralph] Gemini Optimizer 调用失败（${err.message}），本轮跳过`);
+    console.warn(`[Ralph] Optimizer 调用失败（${err.message}），本轮跳过`);
     return null;
   }
 }
