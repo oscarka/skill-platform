@@ -200,7 +200,7 @@
       const prefilledHTML = prefilledFiles.map((f, i) => `
         <div class="file-item" style="border-left: 3px solid #10b981; background: #f0fdf4;">
           <span class="file-icon">${fileIcon(f.type || 'pdf')}</span>
-          <span class="file-name" title="微信自动载入附件">${f.name} <span style="font-size:11px;color:#10b981;margin-left:4px;font-weight:500;">(已自动载入)</span></span>
+          <a href="${f.url}" target="_blank" rel="noopener" class="file-name" style="color:#059669;text-decoration:underline;cursor:pointer;" title="点击预览">${f.name} <span style="font-size:11px;color:#10b981;margin-left:4px;font-weight:500;">(已自动载入)</span></a>
           <span class="file-size"></span>
           <button class="remove-btn" type="button" onclick="removePrefilledFile(${i})">✕</button>
         </div>`).join('');

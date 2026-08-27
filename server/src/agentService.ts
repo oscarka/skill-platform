@@ -1958,6 +1958,40 @@ async function handleHealthSkill(
       }
     }
 
+    // ── OCR 智能预填：报告类型 + 补充信息 ──────────────────────────────────────
+    if (allSummaryText) {
+      // 自动推断报告类型
+      if (!prefilledValues.reportType) {
+        if (/检验|化验|血常规|尿常规|生化|血液/.test(allSummaryText)) {
+          prefilledValues.reportType = '检验报告';
+        } else if (/影像|CT|MRI|X[光线]|超声|B超|彩超|胸片|磁共振/.test(allSummaryText)) {
+          prefilledValues.reportType = '影像报告';
+        } else if (/体检|健康检查|体格检查/.test(allSummaryText)) {
+          prefilledValues.reportType = '体检报告';
+        } else {
+          prefilledValues.reportType = '其他';
+        }
+        console.log(`[AgentService] 📋 自动识别报告类型: ${prefilledValues.reportType}`);
+      }
+
+      // 把 OCR 摘要填入 extraInfo（补充健康信息）
+      if (!prefilledValues.extraInfo) {
+        const ocrExtracts = prefilledFiles
+          .filter((f: any) => f.summary)
+          .map((f: any) => {
+            // 从 summary 里提取结构化的检验数据（去掉 [图片: ...] 外壳）
+            let text = f.summary;
+            const innerMatch = text.match(/\[图片内容[：:]\s*([\s\S]*)\]/);
+            if (innerMatch) text = innerMatch[1];
+            return text.trim();
+          })
+          .filter(Boolean);
+        if (ocrExtracts.length > 0) {
+          prefilledValues.extraInfo = ocrExtracts.join('\n\n').slice(0, 2000);
+        }
+      }
+    }
+
     const prefilledValuesJson = JSON.stringify(prefilledValues);
 
     const ticketId = require('crypto').randomUUID();
