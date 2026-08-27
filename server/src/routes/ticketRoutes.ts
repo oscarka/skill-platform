@@ -40,6 +40,9 @@ export interface TicketRecord {
   updated_at: number;
   request_id?: string | null;   // 关联 agent_tasks.id，供 AgentLogs 回写事件
   delivery_info?: string | null; // JSON: {callback_url, app, recipient, action}
+  actual_patient_id?: string | null; // 代问场景：真实患者 Wiki ID
+  agent_id?: string;
+  prefilled_values?: string | null;
 }
 
 
