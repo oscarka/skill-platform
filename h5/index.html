@@ -329,6 +329,8 @@
         patient_age:  prefilledValues.report_patient_age || '',
         age:          prefilledValues.report_patient_age || '',
         gender:       prefilledValues.report_patient_gender || '',
+        height:       '',  // 家人模式清空体型数据（不能用本人的）
+        weight:       '',
       };
       const fieldsHTML = fields.length
         ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(f => buildFieldHTML(f, initialPrefill)).join('')}</div>`
