@@ -1927,6 +1927,37 @@ async function handleHealthSkill(
       })(),
       prefilled_files:         prefilledFiles,
     };
+
+    // ── OCR 姓名比对：检测报告上的患者是否与发送者不同 ────────────────────────
+    const allSummaryText = prefilledFiles.map((f: any) => f.summary || '').join('\n');
+    if (allSummaryText) {
+      const reportNameMatch  = allSummaryText.match(/(?:姓\s*名|患者|病人|受检者|体检人)[：:\s]*([^\s,，;；\n]{2,5})/);
+      const reportAgeMatch   = allSummaryText.match(/(?:年\s*龄|Age)[：:\s]*(\d{1,3})\s*(?:岁|歲|years?)?/i);
+      const reportGenderMatch = allSummaryText.match(/(?:性\s*别|Sex|Gender)[：:\s]*(男|女|Male|Female)/i);
+      const reportName   = reportNameMatch ? reportNameMatch[1].trim() : '';
+      const reportAge    = reportAgeMatch ? reportAgeMatch[1] : '';
+      const reportGender = reportGenderMatch ? reportGenderMatch[1] : '';
+
+      if (reportName) {
+        const senderName = (meta.from_name || '').trim();
+        const isSamePatient = !reportName || reportName === senderName
+          || senderName.includes(reportName) || reportName.includes(senderName);
+
+        if (!isSamePatient) {
+          // 报告上的人和发送者不同 → 代问模式
+          prefilledValues.default_is_self = false;
+          prefilledValues.report_patient_name = reportName;
+          if (reportAge) prefilledValues.report_patient_age = reportAge;
+          if (reportGender) prefilledValues.report_patient_gender = reportGender;
+          console.log(`[AgentService] 👥 代问检测：发送者=${senderName}，报告患者=${reportName}，default_is_self=false`);
+        } else {
+          // 本人：用报告上的年龄/性别补充（可能比档案更准确）
+          if (reportAge && !prefilledValues.patient_age) prefilledValues.patient_age = reportAge;
+          if (reportGender && !prefilledValues.gender) prefilledValues.gender = reportGender;
+        }
+      }
+    }
+
     const prefilledValuesJson = JSON.stringify(prefilledValues);
 
     const ticketId = require('crypto').randomUUID();
