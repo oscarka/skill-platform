@@ -95,6 +95,43 @@ async function ticketToResponse(t: TicketRecord, skill?: any) {
 }
 
 
+// ─── 定时清理过期工单 ────────────────────────────────────────────────────────
+async function cleanupExpiredTickets() {
+  try {
+    const now = Date.now();
+    // 只清理 created / waiting_input 状态的过期工单
+    const expired = await db.allAsync<any>(
+      `SELECT id, request_id FROM tickets WHERE status IN ('created','waiting_input') AND expires_at < ?`,
+      [now]
+    );
+    if (expired.length === 0) return;
+
+    await db.runAsync(
+      `UPDATE tickets SET status='expired', updated_at=? WHERE status IN ('created','waiting_input') AND expires_at < ?`,
+      [now, now]
+    );
+
+    // 同步更新关联的 agent_tasks 状态
+    for (const t of expired) {
+      if (t.request_id) {
+        await db.runAsync(
+          `UPDATE agent_tasks SET status='failed', ended_at=? WHERE id=? AND status NOT IN ('done','failed')`,
+          [now, t.request_id]
+        ).catch(() => {});
+      }
+    }
+
+    console.log(`[TicketCleanup] 🧹 已标记 ${expired.length} 个过期工单为 expired`);
+  } catch (err: any) {
+    console.warn('[TicketCleanup] 清理失败:', err.message);
+  }
+}
+
+// 启动时立即清理一次，之后每 10 分钟清理
+cleanupExpiredTickets();
+setInterval(cleanupExpiredTickets, 10 * 60 * 1000);
+
+
 // ─── POST /api/tickets — Create ticket ────────────────────────────────────────
 ticketRouter.post('/', async (req, res) => {
   try {
