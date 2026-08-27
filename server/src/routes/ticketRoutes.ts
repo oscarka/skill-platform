@@ -87,6 +87,7 @@ async function ticketToResponse(t: TicketRecord, skill?: any) {
     updated_at: t.updated_at,
     report_url: reportUrl,  // done 状态才有值，供前端和测试直接读取
     request_id: t.request_id || null,
+    actual_patient_id: t.actual_patient_id || null,
   };
 }
 
