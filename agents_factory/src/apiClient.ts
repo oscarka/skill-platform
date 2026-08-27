@@ -10,6 +10,9 @@
  * - 所有调用均有超时保护（默认 30s）
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 const PLATFORM_BASE = process.env.PLATFORM_BASE_URL || 'https://skill-platform-yo5337ccva-de.a.run.app';
 const PLATFORM_API_KEY = process.env.PLATFORM_API_KEY || '';
 const TIMEOUT_MS = 30_000;
@@ -40,10 +43,95 @@ export async function sendChatMessage(params: {
   content: string;
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   sessionId?: string;
+  spec?: any;
 }): Promise<{ reply: string; request_id: string; skill_route?: string; ticket_created?: boolean }> {
   assertSandboxUser(params.userId);
 
-  const res = await fetch(`${PLATFORM_BASE}/api/v1/agent/chat`, {
+  // ── 纯净沙箱模式：直接使用候选员工 Spec 组装 Prompt 并调用火山模型（不侵入生产 agentService）──
+  if (params.spec) {
+    const spec = params.spec;
+    const arkKey = process.env.DOUBAO_API_KEY || process.env.ARK_API_KEY;
+    const arkBase = process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
+    const model = process.env.ARK_MODEL || process.env.DEFAULT_MODEL || 'deepseek-v4-flash-ga-260731';
+
+    const taboosText = Array.isArray(spec.taboos) && spec.taboos.length
+      ? `\n\n【严禁触碰的红线与禁忌】：\n${spec.taboos.map((t: string) => `- ${t}`).join('\n')}`
+      : '';
+
+    let knowledgeText = '';
+    const knowledgeDir = path.join(__dirname, '..', 'knowledge');
+    if (fs.existsSync(knowledgeDir)) {
+      const files = fs.readdirSync(knowledgeDir).filter(f => f.endsWith('.md'));
+      // 优先匹配包含产品名称或领域的 manual
+      const specDesc = `${spec.name || ''} ${spec.role_desc || ''} ${spec.intent_prompt || ''}`;
+      let matchedFile = files.find(f => {
+        if (specDesc.includes('益生菌') || specDesc.includes('轻体') || specDesc.includes('冻干粉')) {
+          return f.includes('probiotics');
+        }
+        if (specDesc.includes('胶原') || specDesc.includes('护肤') || specDesc.includes('抗老')) {
+          return f.includes('collagen');
+        }
+        return false;
+      }) || files[files.length - 1];
+
+      if (matchedFile) {
+        try {
+          const manualContent = fs.readFileSync(path.join(knowledgeDir, matchedFile), 'utf-8');
+          knowledgeText = `\n\n【已掌握的爆款产品实战手册（核心武器库）】：\n${manualContent.slice(0, 4000)}`;
+        } catch {}
+      }
+    }
+
+    const systemPrompt = `你是${spec.name || '服务助理'}，${spec.role_desc || ''}。
+
+回复风格：${spec.reply_style || '亲切自然，简明扼要，有温度'}
+${spec.service_flow ? `\n服务流程：\n${spec.service_flow}` : ''}${taboosText}${knowledgeText}
+
+【核心原则】：
+- 绝对不要使用 Markdown 语法（不要**加粗**，不要#标题，不要列表符号-）
+- 绝对不要在回复中输出任何 URL 或 http 链接
+- 面对用户的致谢（如'谢谢'、'好的'）只回一句话（简短不超过20字）
+- 严格遵循你的角色定位，亲切热情、专业地回复用户`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...(params.history || []).map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: params.content !== undefined && params.content !== null ? String(params.content) : ' ' },
+    ];
+
+    if (arkKey) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(`${arkBase}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${arkKey}` },
+            body: JSON.stringify({
+              model,
+              messages,
+              temperature: 0.3,
+              max_tokens: 512,
+            }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+          });
+          if (res.ok) {
+            const data = await res.json() as any;
+            const reply = data.choices?.[0]?.message?.content || '';
+            return { reply: reply.trim(), request_id: `sandbox_${Date.now()}` };
+          }
+        } catch (err: any) {
+          if (attempt === 3) {
+            console.warn(`[SandboxRunner] Ark call failed after 3 attempts: ${err.message}`);
+            return { reply: `[ERROR: AI 模型响应超时，请重试]`, request_id: `sandbox_err_${Date.now()}` };
+          }
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+    return { reply: `[ERROR: 未配置可用模型 API Key]`, request_id: `sandbox_err_${Date.now()}` };
+  }
+
+  try {
+    const res = await fetch(`${PLATFORM_BASE}/api/v1/agent/chat`, {
     method: 'POST',
     headers: defaultHeaders,
     body: JSON.stringify({
@@ -65,8 +153,11 @@ export async function sendChatMessage(params: {
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
 
-  if (!res.ok) throw new Error(`[API] Chat failed: HTTP ${res.status} ${await res.text()}`);
-  return res.json() as any;
+    if (!res.ok) throw new Error(`[API] Chat failed: HTTP ${res.status} ${await res.text()}`);
+    return res.json() as any;
+  } catch (err: any) {
+    return { reply: `[ERROR: 远程平台连接失败: ${err.message}]`, request_id: `sandbox_err_${Date.now()}` };
+  }
 }
 
 /** 读取 Agent Profile（只读查询，不做任何修改） */

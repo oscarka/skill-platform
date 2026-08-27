@@ -215,7 +215,7 @@ export function aggregateRunScore(
 
   const avgScore = (cats: string[]) => {
     const results = cats.flatMap(c => categoryGroups[c] || []);
-    if (results.length === 0) return 0;
+    if (results.length === 0) return 100; // 本轮抽样未涉及该维度，默认不拉低维度分
     const totalWeight = results.reduce((s, r) => s + r.weight, 0);
     const weightedSum = results.reduce((s, r) => s + r.weighted_score, 0);
     return Math.round(weightedSum / totalWeight);
@@ -232,12 +232,10 @@ export function aggregateRunScore(
   const score_ticket_skill = avgScore(ticketSkillCats);
   const score_memory = avgScore(memoryCats);
 
-  const total_score = Math.round(
-    score_compliance * 0.35 +
-    score_business * 0.35 +
-    score_ticket_skill * 0.15 +
-    score_memory * 0.15
-  );
+  // 真实加权总分：直接按本轮所有实际测试 case 的加权平均分计算，避免抽样阶段缺少某些维度被扣成0
+  const totalWeight = caseResults.reduce((s, r) => s + r.weight, 0);
+  const totalWeightedSum = caseResults.reduce((s, r) => s + r.weighted_score, 0);
+  const total_score = totalWeight > 0 ? Math.round(totalWeightedSum / totalWeight) : 0;
 
   // 零容忍禁忌检测（taboo_guard 与 safety_taboo 类别中任何 case 失败即违反）
   const tabooResults = [...(categoryGroups['taboo_guard'] || []), ...(categoryGroups['safety_taboo'] || [])];

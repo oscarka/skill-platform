@@ -60,8 +60,31 @@ function printSpecPreview(result: SpecGenResult) {
   console.log(`  知识领域: ${spec.knowledge_domain}`);
   console.log(`  置信度:   ${confidence >= 0.8 ? green(`${(confidence * 100).toFixed(0)}%`) : yellow(`${(confidence * 100).toFixed(0)}%`)}`);
 
-  console.log(`\n${bold('【职责描述】')}`);
+  console.log(`\n${bold('【核心职责与人设概括】')}`);
   console.log(`  ${spec.role_desc}`);
+
+  if (spec.persona_lore) {
+    console.log(`\n${bold('【3D 立体人设生活背景】')}`);
+    if (spec.persona_lore.identity_and_background) {
+      console.log(`  生活背景: ${spec.persona_lore.identity_and_background}`);
+    }
+    if (spec.persona_lore.vulnerable_origin_story) {
+      console.log(`  踩坑血泪史: ${spec.persona_lore.vulnerable_origin_story}`);
+    }
+    if (spec.persona_lore.lifestyle_habits?.length) {
+      console.log(`  生活锚点: ${spec.persona_lore.lifestyle_habits.join(' | ')}`);
+    }
+  }
+
+  if (spec.personal_stories?.length) {
+    console.log(`\n${bold('【自我举例故事库】')}`);
+    spec.personal_stories.forEach((s, idx) => console.log(`  📖 故事${idx + 1}: ${s}`));
+  }
+
+  if (spec.small_talk_anchors?.length) {
+    console.log(`\n${bold('【日常闲聊唠嗑谈资库】')}`);
+    spec.small_talk_anchors.forEach((a, idx) => console.log(`  ☕ 话题${idx + 1}: ${a}`));
+  }
 
   console.log(`\n${bold('【回复风格】')}`);
   console.log(`  ${spec.reply_style}`);
@@ -234,7 +257,11 @@ async function main() {
   }
 
   // ── 保存草稿（含测试集引用）─────────────────────────────────────────────────
-  const draftPath = saveDraft({ ...result, eval_suite_id: evalSuite?.suite_id, eval_case_count: evalSuite?.cases.length });
+  const draftPayload = {
+    ...result,
+    ...(evalSuite ? { eval_suite_id: evalSuite.suite_id, eval_case_count: evalSuite.cases.length } : {}),
+  } as any;
+  const draftPath = saveDraft(draftPayload);
   console.log(`\n💾 草稿已保存: ${dim(draftPath)}`);
   if (evalSuite) {
     console.log(`   测试集: ${dim(evalSuite.suite_id)} (${evalSuite.cases.length} 题)`);

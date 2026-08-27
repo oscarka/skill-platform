@@ -522,19 +522,33 @@ resultRouter.post('/:ticketId/confirm', async (req, res) => {
     res.json({ success: true, message: '报告已确认，正在写入健康档案' });
 
     // Async: write to LLMWiki (non-blocking)
-    const userId = ticket.created_by;
-    if (userId) {
+    const creatorUserId = ticket.created_by;
+    const actualPatientId = ticket.actual_patient_id; // 代问场景下为真实患者的 wiki ID
+    if (creatorUserId) {
       const content = result.revised_result || result.raw_result || '';
       const skillName = skill?.name || 'AI分析';
-      const logContent = `【${skillName}报告 - 患者已确认】\n\n${content}`;
 
       try {
-        await writeWikiLog(userId, logContent, 'ai_report', `${skillName}分析报告（患者确认版）`);
-        console.log(`[Confirm] 报告写入 LLMWiki log: userId=${userId}`);
-        triggerWikiSyncPublic(userId, `patient_confirmed_${ticket.id}`);
-        console.log(`[Confirm] 触发 Wiki sync: userId=${userId}`);
+        if (actualPatientId && actualPatientId !== creatorUserId) {
+          // ── 代问场景：医疗数据写入真实患者档案 ──
+          const logContent = `【${skillName}报告 - 患者已确认】\n\n${content}`;
+          await writeWikiLog(actualPatientId, logContent, 'ai_report', `${skillName}分析报告（患者确认版）`);
+          console.log(`[Confirm] 代问：报告写入患者档案 patientId=${actualPatientId}`);
+          triggerWikiSyncPublic(actualPatientId, `patient_confirmed_${ticket.id}`);
+
+          // 当前用户档案只记"代问"事实，不存医疗数据
+          const proxyNote = `代家人问诊：为 ${ticket.patient_name || '家人'} 提交了「${skillName}」分析，详见该患者独立档案。`;
+          await writeWikiLog(creatorUserId, proxyNote, 'wechat', `代问记录 - ${skillName}`);
+          console.log(`[Confirm] 代问：发送者档案仅记录代问事实 userId=${creatorUserId}`);
+        } else {
+          // ── 本人场景：正常写入 ──
+          const logContent = `【${skillName}报告 - 患者已确认】\n\n${content}`;
+          await writeWikiLog(creatorUserId, logContent, 'ai_report', `${skillName}分析报告（患者确认版）`);
+          console.log(`[Confirm] 报告写入 LLMWiki log: userId=${creatorUserId}`);
+          triggerWikiSyncPublic(creatorUserId, `patient_confirmed_${ticket.id}`);
+        }
       } catch (e: any) {
-        console.error(`[Confirm] LLMWiki write failed for userId=${userId}:`, e.message);
+        console.error(`[Confirm] LLMWiki write failed:`, e.message);
       }
     } else {
       console.log(`[Confirm] 跳过 Wiki sync: ticket ${ticket.id} 无 created_by`);

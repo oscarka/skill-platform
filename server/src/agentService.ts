@@ -169,6 +169,42 @@ export async function reconcileStaleTasks(thresholdMs: number = 60 * 60 * 1000):
 const LLMWIKI_BASE = process.env.LLMWIKI_BASE || '';
 
 /**
+ * 确保 LLMWiki 中存在指定患者的档案（用于代问场景）
+ * 如果患者不存在则自动创建，返回患者的 clientId
+ * 患者 ID 格式：proxy_{创建者userId}_{患者姓名}
+ */
+export async function ensureWikiPatient(creatorUserId: string, patientName: string): Promise<string | null> {
+  if (!LLMWIKI_BASE || !patientName) return null;
+  const patientId = `proxy_${creatorUserId}_${patientName}`;
+  try {
+    // 先检查是否已存在
+    const checkRes = await fetch(`${LLMWIKI_BASE}/api/clients/${patientId}`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (checkRes.ok) {
+      console.log(`[WikiPatient] 患者档案已存在 id=${patientId}`);
+      return patientId;
+    }
+    // 不存在则创建
+    const createRes = await fetch(`${LLMWIKI_BASE}/api/clients`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: patientId, name: patientName }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (createRes.ok) {
+      console.log(`[WikiPatient] ✓ 为代问患者创建档案 id=${patientId} name=${patientName}`);
+      return patientId;
+    }
+    console.warn(`[WikiPatient] 创建患者档案失败 HTTP ${createRes.status}`);
+    return patientId; // 即使创建失败也返回 ID，后续 writeWikiLog 会处理 404 → 自动创建
+  } catch (err: any) {
+    console.warn(`[WikiPatient] 异常:`, err.message);
+    return patientId;
+  }
+}
+
+/**
  * 30 轮计数器：每个用户独立，满 30 轮自动触发 wiki sync
  * 对应 wiki_sync_trigger.cjs 的 WikiSyncTrigger 逻辑
  */
@@ -331,11 +367,6 @@ const WIKI_CACHE_TTL_MS = 60_000;
 async function fetchWikiContext(userId: string, query: string, fromName?: string): Promise<{ user_profile: string; health_wiki: string; mode: string }> {
   if (!LLMWIKI_BASE || !userId) {
     return { user_profile: '', health_wiki: '', mode: 'none' };
-  }
-
-  // 测试沙箱用户跳过外部 LLMWiki 阻塞创建（从 8s 降至 <1s 极速响应）
-  if (userId.startsWith('eval_sandbox_')) {
-    return { user_profile: '', health_wiki: '', mode: 'sandbox' };
   }
 
   // 缓存命中
@@ -647,34 +678,10 @@ async function loadAgentProfile(agentId?: string): Promise<AgentProfile> {
   const cached = _profileCacheMap.get(id);
   if (cached && Date.now() < cached.expireAt) return cached.profile;
   try {
-    let row = await db.getAsync<any>(
+    const row = await db.getAsync<any>(
       'SELECT * FROM agent_profiles WHERE id = ?',
       [id]
     );
-    // ── 支持候选员工（meta_agents 试用期考评阶段直接按候选 Spec 运行）──
-    if (!row && id !== DEFAULT_PROFILE_ID) {
-      const metaRow = await db.getAsync<any>(
-        'SELECT * FROM meta_agents WHERE id = ?',
-        [id]
-      );
-      if (metaRow) {
-        row = {
-          id: metaRow.id,
-          name: metaRow.name,
-          role_desc: metaRow.role_desc,
-          reply_style: metaRow.reply_style,
-          service_flow: metaRow.service_flow,
-          taboos: metaRow.taboos,
-          reassurance_mode: 'ai',
-          reassurance_tpl: metaRow.reassurance_tpl || '',
-          skill_mode: 'auto',
-          skill_ids: '[]',
-          routing_examples: metaRow.routing_examples,
-          knowledge_config: null,
-        };
-      }
-    }
-
     // 若指定 id 不存在，自动 fallback 到 default
     const src = row ?? (id !== DEFAULT_PROFILE_ID
       ? await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID])
@@ -1283,7 +1290,7 @@ async function routeDecision(
   // 当 routing_examples 未配置时，使用原始提示词（一字不改，保证现有行为不变）
   // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
   let systemPrompt: string;
-  if (!routingExamples || !routingExamples.high_desc) {
+  if (!routingExamples) {
     // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
     systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
@@ -1306,16 +1313,16 @@ ${skillList}
   } else {
     // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
     const re = routingExamples;
-    const exHigh = Array.isArray(re.examples_high) ? re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、') : '';
-    const exLow  = Array.isArray(re.examples_low)  ? re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、')  : '';
-    const exNone = Array.isArray(re.examples_none) ? re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、') : '';
+    const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
+    const exLow  = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
+    const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
     systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
 1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
 2. 判断置信度（confidence）：
-   - "high"：${re.high_desc || '客户明确表达了要使用某个专项服务'}${exHigh ? `（如：${exHigh}）` : ''}
-   - "low"：${re.low_desc || '客户有业务相关问题但未明确要求某项服务'}${exLow ? `（如：${exLow}）` : ''}
-   - "none"：普通聊天/问候/询问服务范围，直接回答${exNone ? `（如：${exNone}）` : ''}
+   - "high"：${re.high_desc}（如：${exHigh}）
+   - "low"：${re.low_desc}（如：${exLow}）
+   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
 
 注意：
 - 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
@@ -1832,11 +1839,14 @@ async function handleHealthSkill(
     console.log(`[AgentService] 📋 External skill「${skillName}」→ 创建工单`);
 
     const patientName = meta.from_name || null;
-    const prefilledNotes = [
+
+    // 文件 summary 放在 prefilledNotes 里（在查询 user_recent_files 之后补充）
+    // 先构建基础 notes，文件 summary 在下方查完后追加
+    const baseNotes = [
       notes ? `【备注】${notes}` : '',
       wikiCtx?.user_profile ? `【用户画像】${wikiCtx.user_profile.slice(0, 300)}` : '',
       content ? `【用户问题】${content}` : '',
-    ].filter(Boolean).join('\n\n').slice(0, 800) || null;
+    ].filter(Boolean).join('\n\n');
 
     // ── 从 wiki 提取 H5 表单预填字段 ─────────────────────────────────────────
     const wikiText = [wikiCtx?.user_profile || '', wikiCtx?.health_wiki || ''].join('\n');
@@ -1887,6 +1897,15 @@ async function handleHealthSkill(
       type: f.file_type || 'file',
       summary: f.summary || '',
     }));
+
+    // 把文件 summary（OCR/AI摘要）追加到 prefilledNotes，让 skill 处理方能看到报告内容
+    const fileSummaries = prefilledFiles
+      .filter((f: any) => f.summary)
+      .map((f: any) => `【附件内容: ${f.name}】\n${f.summary}`)
+      .join('\n\n');
+
+    const prefilledNotes = [baseNotes, fileSummaries]
+      .filter(Boolean).join('\n\n').slice(0, 3000) || null;
 
     const prefilledValues: Record<string, any> = {
       contact_name:            meta.from_name || '',
@@ -2415,7 +2434,8 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   if (sessionId) {
     const nowMs = Date.now();
     // Phase C: 加 agent_id 过滤，防止不同 Agent 的守卫相互干扰
-    const _reqAgentId = req.agent_id || req.meta?.agent_id || 'default';
+    // 此处 profile 尚未加载，直接从 req 读取 agent_id（未传则 'default'）
+    const _reqAgentId = req.agent_id || 'default';
     const activeGuard = await db.getAsync<any>(
       `SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>? AND (agent_id=? OR agent_id IS NULL OR agent_id='')
@@ -2468,10 +2488,10 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   }
 
   // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
-  // agent_id 从请求顶层或 meta 透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
+  // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
+  // 注：守卫查询时使用的是 req.agent_id（上面 _reqAgentId），不依赖此 profile
   void updateAgentTask(requestId, { status: 'routing' });
-  const agentIdToLoad = req.agent_id || req.meta?.agent_id || (req as any).agentId;
-  const profile = await loadAgentProfile(agentIdToLoad);
+  const profile = await loadAgentProfile(req.agent_id);
   console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
   const availableSkills = await getAvailableSkills(profile);
   console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
@@ -2908,6 +2928,24 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     console.log(`[AgentService] 📦 agent_context_assembled: guardStatus=${agentCtxPkg.guardStatus} directive=${agentCtxPkg.directive?.slice(0,50)||'(none)'}`);
 
     const directResult = await handleHealthDirect(req, apiKey, requestId, delivery, profile, skillRouteLog, agentCtxPkg);
+
+    // 抢占检查：在准备发送给用户前，检查用户是否在此期间发了更新的消息
+    const newerTaskDirect = await db.getAsync<any>(
+      `SELECT id FROM agent_tasks WHERE session_id = ? AND id != ? AND started_at > ? ORDER BY started_at DESC LIMIT 1`,
+      [req.session_id, requestId, taskStartMs]
+    ).catch(() => null);
+
+    if (newerTaskDirect) {
+      console.log(`[AgentService] ✂️ 抢占: requestId=${requestId} 被 ${newerTaskDirect.id} 抢占 (health_direct)`);
+      void appendTaskEvent(requestId, 'reply_preempted', {
+        reason: '用户在思考期间发送了新消息，丢弃旧回复',
+        newer_task_id: newerTaskDirect.id,
+        skipped_reply_preview: directResult.reply?.slice(0, 60) || '',
+      });
+      void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: '[已抢占，未发送]', endedAt: Date.now(), durationMs: Date.now() - taskStartMs });
+      return { ...directResult, reply: '' };
+    }
+
     const endMs = Date.now();
     void updateAgentTask(requestId, { status: 'done', routeType: 'health_direct', replyContent: directResult.reply?.slice(0, 500), endedAt: endMs, durationMs: endMs - taskStartMs });
     void appendTaskEvent(requestId, 'reply_sent', { replyLen: directResult.reply?.length, reply: directResult.reply?.slice(0, 600), channel: delivery.app, recipient: delivery.recipient });

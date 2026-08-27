@@ -5,7 +5,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db';
 import { processTicket } from '../aiProcessor';
-import { createAgentTask, updateAgentTask, appendTaskEvent } from '../agentService';
+import { createAgentTask, updateAgentTask, appendTaskEvent, ensureWikiPatient } from '../agentService';
 
 export const h5Router = express.Router();
 
@@ -178,11 +178,20 @@ h5Router.post('/:token/submit', upload.array('files', 10), async (req, res) => {
       );
     }
 
+    // ── 代问场景：is_self=false 时为真实患者创建/关联 LLMWiki 档案 ──────────────
+    let actualPatientId: string | null = null;
+    if (!isSelf) {
+      const realPatientName = String(fields.patient_name || fields.name || '').trim();
+      if (realPatientName && ticket.created_by) {
+        actualPatientId = await ensureWikiPatient(ticket.created_by, realPatientName);
+        console.log(`[H5] 代问场景：创建者=${ticket.created_by}，真实患者=${realPatientName}，actual_patient_id=${actualPatientId}`);
+      }
+    }
 
-    // Update ticket status
+    // Update ticket status + actual_patient_id
     await db.runAsync(
-      `UPDATE tickets SET status='submitted', h5_submitted_at=?, updated_at=? WHERE id=?`,
-      [now, now, ticket.id]
+      `UPDATE tickets SET status='submitted', h5_submitted_at=?, actual_patient_id=?, updated_at=? WHERE id=?`,
+      [now, actualPatientId, now, ticket.id]
     );
 
     // ── 创建独立处理任务（左侧列表独立显示，状态 processing → done）───────────────

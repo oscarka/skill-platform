@@ -21,6 +21,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as https from 'https';
 import { sendChatMessage, upsertAgentProfile, cleanupSandboxUser } from './apiClient';
 import { assertCaseAsync, aggregateRunScore, saveRunScore, RunScore, CaseResult } from './scoreEngine';
 
@@ -28,11 +29,7 @@ const MAX_ROUNDS = 10;
 const PASSING_SCORE = 95;
 const SANDBOX_USER_PREFIX = 'eval_sandbox_';
 
-// ── Gemini 3.7 Flash 提示词优化模型 ──────────────────────────────────────────
-// gemini-3.7-flash: "Our latest and most capable Flash model, built for
-// complex coding, agentic workflows, and reliable multi-step execution"
-// https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash
-const RALPH_OPTIMIZER_MODEL = process.env.RALPH_OPTIMIZER_MODEL || 'gemini-3.7-flash';
+const RALPH_OPTIMIZER_MODEL = process.env.RALPH_OPTIMIZER_MODEL || process.env.ARK_MODEL || process.env.DEFAULT_MODEL || 'deepseek-v4-flash-ga-260731';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 
@@ -158,12 +155,15 @@ async function callGeminiOptimizer(
 1. 不针对具体失败用例硬编码特例规则
 2. 改动要"通用"——改一处解决多道题的共同根因
 3. 按分层策略：
-   - 格式/安全 → 修改 reply_style 或 taboos
+   - 格式/安全 → 使用 reply_style_patch 追加规则（禁止重写 reply_style 全文！）
    - 意图识别 → 优化 routing_examples 或 intent_prompt
    - 流程问题 → 调整 service_flow 或 role_desc
    - 安抚问题 → 改进 reassurance_tpl
 4. 每轮只改 1~3 个字段，不大改重写
 5. 修改描述必须仍然"通用"，不能针对某个测试输入
+6. ⚠️ 严禁在 fields_to_update 中包含 "reply_style" 键！reply_style 已有 6000+ 字，
+   直接赋值会导致 JSON 截断。若需补充规则，请用 "reply_style_patch" 键（只写新增内容，≤200字）。
+7. 每个 value 不超过 500 字，确保 JSON 完整输出
 
 【只输出 JSON，不含其他文字】
 {
@@ -172,72 +172,139 @@ async function callGeminiOptimizer(
   "expected_improvement": "预期改善的题目类型"
 }`;
 
+  // 只提取与失败相关的核心字段，避免把整个 spec（30KB+）全量发给优化器
+  // 这能显著减少 token 消耗并提升输出格式稳定性
+  const OPTIMIZER_RELEVANT_FIELDS = [
+    'reply_style', 'role_desc', 'service_flow', 'taboos',
+    'routing_examples', 'reassurance_tpl', 'persona',
+  ];
+  const compactSpec: Record<string, any> = {};
+  for (const k of OPTIMIZER_RELEVANT_FIELDS) {
+    if (k in currentSpec) compactSpec[k] = currentSpec[k];
+  }
+
   const userPrompt = `第 ${round} 轮 AI Judge 诊断报告：
 
 ${diagnosis}
 
-当前 Spec：
-${JSON.stringify(currentSpec, null, 2)}
+当前 Spec（核心字段）：
+${JSON.stringify(compactSpec, null, 2)}
 
 请给出通用化修改建议。`;
 
   if (arkKey) {
     try {
-      const res = await fetch(`${arkBase}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${arkKey}` },
-        body: JSON.stringify({
-          model: optimizerModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.2,
-          max_tokens: 1024,
-        }),
-        signal: AbortSignal.timeout(30_000),
+      // 使用非流式请求：该模型 stream:true 模式下响应极慢（已验证），stream:false 约 2s 返回
+      const payload = JSON.stringify({
+        model: optimizerModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        stream: false,
+        temperature: 0.2,
+        max_tokens: 800,  // 限制输出长度：每个字段 value ≤ 800 字，避免模型重写 reply_style 导致 JSON 截断
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as any;
-      const raw = data.choices?.[0]?.message?.content || '';
-      const cleaned = raw.replace(/^```json?\s*/m, '').replace(/```\s*$/m, '').trim();
-      const parsed = JSON.parse(cleaned);
+
+      const OPTIMIZER_TIMEOUT_MS = 60_000;
+      const raw = await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+        const globalTimer = setTimeout(() => {
+          req.destroy();
+          done(() => reject(new Error(`优化器超时 (${OPTIMIZER_TIMEOUT_MS / 1000}s)`)));
+        }, OPTIMIZER_TIMEOUT_MS);
+
+        const req = https.request({
+          hostname: 'ark.cn-beijing.volces.com',
+          port: 443,
+          path: '/api/v3/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${arkKey}`,
+            'Content-Length': Buffer.byteLength(payload),
+          },
+          timeout: OPTIMIZER_TIMEOUT_MS,
+        }, (res) => {
+          let body = '';
+          res.on('data', chunk => { body += chunk.toString(); });
+          res.on('end', () => {
+            clearTimeout(globalTimer);
+            try {
+              const json = JSON.parse(body);
+              // 非流式响应：直接取 message.content 或 reasoning_content
+              const msg = json.choices?.[0]?.message;
+              const text = (msg?.content || msg?.reasoning_content || '').trim();
+              if (text) {
+                done(() => resolve(text));
+              } else {
+                done(() => reject(new Error(`优化器未返回有效内容 (HTTP ${res.statusCode}): ${body.slice(0, 200)}`)));
+              }
+            } catch (e: any) {
+              done(() => reject(new Error(`优化器响应 JSON 解析失败: ${e.message}`)));
+            }
+          });
+          res.on('error', (err) => { clearTimeout(globalTimer); done(() => reject(err)); });
+        });
+
+        req.on('error', (err) => { clearTimeout(globalTimer); done(() => reject(err)); });
+        req.on('timeout', () => {
+          clearTimeout(globalTimer);
+          req.destroy();
+          done(() => reject(new Error('优化器请求超时')));
+        });
+        req.write(payload);
+        req.end();
+      });
+
+      // 强健 JSON 提取（兼容外层包裹与代码块）
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error(`未在优化器输出中找到有效 JSON:\n${raw.slice(0, 200)}`);
+      }
+      const parsed = JSON.parse(jsonMatch[0]);
 
       console.log(`[Ralph] 🤖 DeepSeek Optimizer (${optimizerModel}) 优化建议：`);
-      console.log(`   理由: ${parsed.rationale}`);
-      console.log(`   预期改善: ${parsed.expected_improvement}`);
+      console.log(`   理由: ${parsed.rationale || '根据诊断报告优化'}`);
+      console.log(`   预期改善: ${parsed.expected_improvement || '提升整体得分'}`);
       console.log(`   修改字段: ${Object.keys(parsed.fields_to_update || {}).join(', ')}`);
 
       return parsed.fields_to_update || null;
     } catch (err: any) {
+      // 打印详细错误，方便排查是内容问题还是网络问题
       console.warn(`[Ralph] Ark Optimizer 调用失败（${err.message}），尝试 Gemini 备用...`);
+      console.warn(`[Ralph] 错误详情:`, err.stack?.split('\n')[1] || '');
     }
   }
 
   if (!GEMINI_API_KEY) {
-    console.warn('[Ralph] 未配置可用优化器 API Key，跳过自动优化');
+    console.warn('[Ralph] 未配置可用 Gemini API Key，本轮跳过自动优化');
     return null;
   }
 
   try {
-    const url = `${GEMINI_BASE_URL}/v1beta/models/${RALPH_OPTIMIZER_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const geminiModel = 'gemini-2.0-flash-001';
+    const url = `${GEMINI_BASE_URL}/v1beta/models/${geminiModel}:generateContent?key=${GEMINI_API_KEY}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+        generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
       }),
       signal: AbortSignal.timeout(30_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as any;
     const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const cleaned = raw.replace(/^```json?\s*/m, '').replace(/```\s*$/m, '').trim();
-    const parsed = JSON.parse(cleaned);
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Gemini 未返回有效 JSON');
+    const parsed = JSON.parse(jsonMatch[0]);
 
-    console.log(`[Ralph] 🤖 Gemini Optimizer 建议：`);
+    console.log(`[Ralph] 🤖 Gemini Optimizer (${geminiModel}) 建议：`);
     console.log(`   理由: ${parsed.rationale}`);
     console.log(`   预期改善: ${parsed.expected_improvement}`);
     console.log(`   修改字段: ${Object.keys(parsed.fields_to_update || {}).join(', ')}`);
@@ -249,14 +316,38 @@ ${JSON.stringify(currentSpec, null, 2)}
   }
 }
 
-/** 主循环入口 */
+export interface ProgressiveStage {
+  name: string;
+  stepCount: number;  // 本阶段新增考题数
+  targetScore: number;
+}
+
+export const DEFAULT_PROGRESSIVE_STAGES: ProgressiveStage[] = [
+  { name: '初试摸底（快速排雷）', stepCount: 10, targetScore: 85 },
+  { name: '复试进阶（业务深挖）', stepCount: 20, targetScore: 90 },
+  { name: '高难大考（异议抗辩）', stepCount: 40, targetScore: 92 },
+  { name: '终极收官（全量通关）', stepCount: 9999, targetScore: 95 },
+];
+
+/** Fisher-Yates 随机打乱题库 */
+export function shuffleArray<T>(array: T[]): T[] {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/** 主循环入口（支持真随机打乱 + 游标递进无重复考评） */
 export async function runRalphLoop(params: {
   agentId: string;
   agentSpec: any;
   extraSuiteFiles?: string[];
   maxRounds?: number;
   targetScore?: number;
-  skipAutoOptimizer?: boolean;  // true = ralph.sh 模式，由外部 AI 做优化
+  skipAutoOptimizer?: boolean;
+  progressiveMode?: boolean;
   onRoundComplete?: (round: number, score: RunScore, diagnosis: string) => Promise<any>;
 }): Promise<{ finalScore: number; status: 'pending_human_approval' | 'max_rounds_reached'; totalRounds: number }> {
   const {
@@ -265,39 +356,53 @@ export async function runRalphLoop(params: {
     maxRounds = MAX_ROUNDS,
     targetScore = PASSING_SCORE,
     skipAutoOptimizer = false,
+    progressiveMode = true,
     onRoundComplete,
   } = params;
 
   let currentSpec = { ...params.agentSpec };
   let bestSnapshot = loadBestSnapshot(agentId) || saveSnapshot(agentId, currentSpec, 0);
   let round = 0;
+  let stageIdx = 0;
+  let cursor = 0;
+  const stages = progressiveMode ? DEFAULT_PROGRESSIVE_STAGES : [{ name: '全量考评', stepCount: 9999, targetScore }];
 
-  console.log(`[Ralph] 🚀 开始候选 Agent "${agentId}" 的试用期考评（最多 ${maxRounds} 轮，目标 ${targetScore} 分）`);
+  // 动态加载并【真随机打乱】纯领域测试集
+  const rawCases = loadEvalSuites(agentId, extraSuiteFiles);
+  const allCases = shuffleArray(rawCases);
+
+  console.log(`[Ralph] 🚀 开始候选 Agent "${agentId}" 的试用期考评（最多 ${maxRounds} 轮，终极目标 ${targetScore} 分）`);
+  console.log(`[Ralph] 🎲 题库已完成随机洗牌（共 ${allCases.length} 题）`);
+  console.log(`[Ralph] ⚡ 模式: ${progressiveMode ? '📈 游标递进不重复考评 (前10题 ➔ 新20题 ➔ 新40题 ➔ 剩余题收官)' : '🎯 全量单阶段考评'}`);
   console.log(`[Ralph] 🤖 提示词优化器: ${RALPH_OPTIMIZER_MODEL}`);
-
-  // 动态加载：固定通用卷 + 专属测试集
-  const allCases = loadEvalSuites(agentId, extraSuiteFiles);
 
   while (round < maxRounds) {
     round++;
+    const currentStage = stages[stageIdx];
+    // 根据游标切片获取当前阶段专属的、全新不重复的一批题目
+    const stageCases = progressiveMode
+      ? allCases.slice(cursor, cursor + currentStage.stepCount)
+      : allCases;
+
     const runId = `run_${round}_${Date.now()}`;
     const mockUserId = `${SANDBOX_USER_PREFIX}${agentId}_r${round}`;
 
-    console.log(`\n[Ralph] ━━━━━━━━━━━━ 第 ${round}/${maxRounds} 轮考评开始 ━━━━━━━━━━━━`);
+    console.log(`\n[Ralph] ━━━━━━━━━━━━ 第 ${round}/${maxRounds} 轮 · 【${currentStage.name}】(第 ${cursor + 1} ~ ${cursor + stageCases.length} 题，共 ${stageCases.length} 题，门槛 ${currentStage.targetScore} 分) ━━━━━━━━━━━━`);
 
-    // 推送当前版本到生产 Agent Config（通过 API，黑盒调用）
-    await upsertAgentProfile({ id: agentId, ...currentSpec });
+    // 推送当前版本到生产 Agent Config（网络异常不阻断本地沙箱考评）
+    await upsertAgentProfile({ id: agentId, ...currentSpec }).catch(e => {
+      console.warn(`[Ralph] 同步远程配置失败（本地沙箱继续运行）: ${e.message}`);
+    });
 
     const sessionHistories = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
     const caseResults: CaseResult[] = [];
 
-    for (const evalCase of allCases) {
+    for (const evalCase of stageCases) {
       const startMs = Date.now();
       let reply = '';
       let ticketCreated = false;
       let skillTriggered: string | undefined;
 
-      // 会话隔离：多轮记忆/上下文类测试共享 shared session，其余测试独立 session 防止上下文污染
       const isSharedSession = evalCase.precondition === 'sandbox_session' || evalCase.category === 'memory_context' || evalCase.tags?.includes('memory');
       const sessionId = isSharedSession ? `${mockUserId}_shared` : `${mockUserId}_${evalCase.id}`;
       const caseHistory = sessionHistories.get(sessionId) || [];
@@ -317,12 +422,12 @@ export async function runRalphLoop(params: {
           content: evalCase.input,
           history: historyToSend,
           sessionId,
+          spec: currentSpec,
         });
         reply = result.reply || '';
         ticketCreated = !!result.ticket_created;
         skillTriggered = result.skill_route;
 
-        // 仅在成功回复且非空时记录到该 session 历史
         if (evalCase.input && evalCase.input.trim() && reply && reply.trim()) {
           const updated = [
             ...historyToSend,
@@ -340,14 +445,24 @@ export async function runRalphLoop(params: {
       caseResults.push(caseResult);
 
       const icon = caseResult.passed ? '✅' : '❌';
-      console.log(`  ${icon} [${evalCase.id}] ${evalCase.name} — ${caseResult.score}分 (${latencyMs}ms)`);
+      console.log(`\n  ${icon} [${evalCase.id}] [${evalCase.category}] ${evalCase.name} — ${caseResult.score}分 (${latencyMs}ms)`);
+      console.log(`     💬 用户输入: "${evalCase.input}"`);
+      console.log(`     🤖 员工回复: "${reply.replace(/\n+/g, ' ')}"`);
+      if (caseResult.details && caseResult.details.length > 0) {
+        const failedDetails = caseResult.details.filter(d => d.includes('❌'));
+        if (failedDetails.length > 0) {
+          console.log(`     ⚠️  扣分原因: ${failedDetails.join(' | ')}`);
+        } else {
+          console.log(`     ✨ 判定通过: ${caseResult.details.slice(0, 2).join(' | ')}`);
+        }
+      }
     }
 
     // 汇总本轮得分
     const runScore = aggregateRunScore(runId, agentId, hashSpec(currentSpec), round, caseResults);
     const logPath = saveRunScore(agentId, runId, runScore);
 
-    console.log(`\n[Ralph] 📊 第 ${round} 轮综合得分: ${runScore.total_score}/100`);
+    console.log(`\n[Ralph] 📊 第 ${round} 轮得分: ${runScore.total_score}/100（当前阶段门槛: ${currentStage.targetScore} 分）`);
     console.log(`  合规安全: ${runScore.score_compliance}  业务目标: ${runScore.score_business}  工单技能: ${runScore.score_ticket_skill}  记忆保真: ${runScore.score_memory}`);
     if (runScore.taboo_violated) {
       console.log(`  ⛔ 禁忌违反！直接视为本轮失败，分数归零`);
@@ -357,57 +472,68 @@ export async function runRalphLoop(params: {
     const diagnosis = generateDiagnosis(round, runScore);
     const diagPath = path.join(__dirname, '..', 'reports', `${agentId}_round${round}_diagnosis.md`);
     fs.writeFileSync(diagPath, diagnosis, 'utf-8');
-    console.log(`[Ralph] 📝 归因诊断书: ${diagPath}`);
 
-    // ── 分数爬山与回滚机制 ──────────────────────────────────────────────────
-    if (!runScore.taboo_violated && runScore.total_score > bestSnapshot.score) {
-      // 🎉 分数上升：晋级采纳
+    // ── 阶梯晋级判定 ────────────────────────────────────────────────────────
+    const stagePassed = !runScore.taboo_violated && runScore.total_score >= currentStage.targetScore;
+
+    if (stagePassed) {
+      const isLastStage = stageIdx >= stages.length - 1;
       const newSnapshot = saveSnapshot(agentId, currentSpec, runScore.total_score);
       updateBestSnapshot(agentId, newSnapshot);
       bestSnapshot = newSnapshot;
-      console.log(`[Ralph] 📈 分数从 ${bestSnapshot.score} 上升到 ${runScore.total_score}，晋级采纳！`);
+
+      if (isLastStage) {
+        console.log(`\n[Ralph] 🎓🎉 恭喜！候选 Agent "${agentId}" 已通过全量终极考核（${runScore.total_score} ≥ ${targetScore} 分）！进入转正审批。`);
+        fs.writeFileSync(
+          path.join(__dirname, '..', 'reports', `${agentId}_graduation_report.md`),
+          generateGraduationReport(agentId, round, bestSnapshot, runScore),
+          'utf-8'
+        );
+        return { finalScore: bestSnapshot.score, status: 'pending_human_approval', totalRounds: round };
+      } else {
+        cursor += currentStage.stepCount;
+        stageIdx++;
+        const nextStage = stages[stageIdx];
+        const nextCount = Math.min(nextStage.stepCount, allCases.length - cursor);
+        console.log(`\n[Ralph] 🎉 阶段通关！【${currentStage.name}】达标（${runScore.total_score}分 ≥ ${currentStage.targetScore}分），游标推进到第 ${cursor + 1} 题，晋级下一阶段 ➔ 【${nextStage.name} (${nextCount}道全新考题)】！`);
+        continue;
+      }
     } else {
-      // 📉 分数下降或禁忌违反：自动回滚
-      console.log(`[Ralph] 📉 分数未提升（当前 ${runScore.total_score} vs 最优 ${bestSnapshot.score}），自动回滚到版本 ${bestSnapshot.version_hash}`);
-      currentSpec = { ...bestSnapshot.spec };
-      await upsertAgentProfile({ id: agentId, ...currentSpec });
+      console.log(`[Ralph] ⚠️ 当前阶段【${currentStage.name}】未达标（${runScore.total_score}分 < ${currentStage.targetScore}分），启动优化器调优并在当前阶段复测...`);
     }
 
-    // 允许外部 callback（优先级高）
-    let externalUpdate: any = null;
-    if (onRoundComplete) {
-      externalUpdate = await onRoundComplete(round, runScore, diagnosis);
-      if (externalUpdate) {
-        currentSpec = { ...currentSpec, ...externalUpdate };
-        console.log(`[Ralph] 🔄 外部 callback 已更新配置，下轮生效`);
+    // 自动优化 Spec
+    if (!skipAutoOptimizer) {
+      const update = await callGeminiOptimizer(currentSpec, diagnosis, round);
+      if (update) {
+        // 特殊处理 reply_style_patch：追加到已有 reply_style 末尾，而非替换全文
+        if (update.reply_style_patch) {
+          const patch = update.reply_style_patch;
+          currentSpec = {
+            ...currentSpec,
+            ...update,
+            reply_style: (currentSpec.reply_style || '') + '\n' + patch,
+          };
+          delete currentSpec.reply_style_patch;
+          console.log(`[Ralph] 📝 reply_style_patch 已追加 (${patch.length} 字): ${patch.slice(0, 80)}...`);
+        } else {
+          currentSpec = { ...currentSpec, ...update };
+        }
+        const draftPath = path.join(__dirname, '..', 'drafts', `${agentId}.json`);
+        fs.writeFileSync(draftPath, JSON.stringify(currentSpec, null, 2), 'utf-8');
+        console.log(`[Ralph] 💾 Spec 已热更新并同步写入: ${draftPath}`);
+        for (const [k, v] of Object.entries(update)) {
+          if (k === 'reply_style_patch') continue;
+          const preview = typeof v === 'string' ? (v.length > 90 ? v.slice(0, 90) + '...' : v) : JSON.stringify(v);
+          console.log(`     📝 修改字段 [${k}]: ${preview}`);
+        }
       }
     }
 
-    // Gemini 3.7 Flash 自动优化（skipAutoOptimizer=false 时才运行）
-    if (!externalUpdate && !skipAutoOptimizer && runScore.total_score < targetScore) {
-      const geminiUpdate = await callGeminiOptimizer(currentSpec, diagnosis, round);
-      if (geminiUpdate) {
-        currentSpec = { ...currentSpec, ...geminiUpdate };
-        console.log(`[Ralph] 🤖 Gemini (${RALPH_OPTIMIZER_MODEL}) 已更新配置，下轮生效`);
-      }
-    }
-
-    // 清理沙箱测试数据
     await cleanupSandboxUser(mockUserId).catch(() => {});
-
-    // ── 目标达成判定 ────────────────────────────────────────────────────────
-    if (bestSnapshot.score >= targetScore) {
-      console.log(`\n[Ralph] 🎉 候选 Agent "${agentId}" 已达到目标分数 ${targetScore}！进入 pending_human_approval 等待转正审批。`);
-      fs.writeFileSync(
-        path.join(__dirname, '..', 'reports', `${agentId}_graduation_report.md`),
-        generateGraduationReport(agentId, round, bestSnapshot, runScore),
-        'utf-8'
-      );
-      return { finalScore: bestSnapshot.score, status: 'pending_human_approval', totalRounds: round };
-    }
   }
 
-  console.log(`\n[Ralph] ⚠️ 已完成 ${maxRounds} 轮评测，最终最优分数: ${bestSnapshot.score}（目标: ${targetScore}）`);
+  console.log(`\n[Ralph] ⚠️ 已达到最大轮数 ${maxRounds}，最终最优分数: ${bestSnapshot.score}`);
   return { finalScore: bestSnapshot.score, status: 'max_rounds_reached', totalRounds: round };
 }
 

@@ -15,6 +15,7 @@
  */
 
 import * as crypto from 'crypto';
+import * as https from 'https';
 import { listAvailableSkills } from './apiClient';
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
@@ -23,6 +24,13 @@ export interface MetaAgentSpec {
   id: string;
   name: string;
   role_desc: string;        // 职位描述（是什么、做什么）
+  persona_lore?: {          // 3D 立体人设背景（针对客户侧/私域销售类）
+    identity_and_background?: string;
+    vulnerable_origin_story?: string;
+    lifestyle_habits?: string[];
+  };
+  personal_stories?: string[];  // 拿自己真实经历举例的故事库
+  small_talk_anchors?: string[]; // 日常闲聊扯淡与共情谈资库
   reply_style: string;      // 回复风格约束（字数、语气、禁止格式）
   service_flow: string;     // 服务流程（简洁动词序列，不超过6步）
   taboos: string[];         // 零容忍禁忌（基线 + 领域扩展）
@@ -70,6 +78,8 @@ const DOMAIN_KEYWORDS: Record<string, string> = {
   '群运营': 'social_ops',
   '私域': 'social_ops',
   '社群': 'social_ops',
+  '微商': 'social_ops',
+  '主理人': 'social_ops',
   '运营': 'social_ops',
   '销售': 'sales',
   '商务': 'sales',
@@ -108,76 +118,137 @@ function generateAgentId(name: string): string {
 async function callLLM(systemPrompt: string, userPrompt: string): Promise<string> {
   const apiKey = process.env.DOUBAO_API_KEY || process.env.ARK_API_KEY;
   const model = process.env.SPEC_GEN_MODEL || process.env.ARK_MODEL || process.env.DEFAULT_MODEL || 'deepseek-v4-flash-ga-260731';
-  const baseUrl = process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3';
 
   if (!apiKey) {
     throw new Error('[SpecGen] 未配置 LLM API Key（需要 DOUBAO_API_KEY 或 ARK_API_KEY）');
   }
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.3,  // 低温度保证输出稳定、可解析
-      max_tokens: 2048,
-    }),
-    signal: AbortSignal.timeout(30_000),
+  const payload = JSON.stringify({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    stream: true,
+    temperature: 0.3,
+    max_tokens: 4000,
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`[SpecGen] LLM API 调用失败: HTTP ${res.status} — ${body.slice(0, 200)}`);
-  }
+  return new Promise<string>((resolve, reject) => {
+    const req = https.request({
+      hostname: 'ark.cn-beijing.volces.com',
+      port: 443,
+      path: '/api/v3/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 180_000,
+    }, (res) => {
+      let fullText = '';
+      let buffer = '';
+      let lastPrint = Date.now();
 
-  const data = await res.json() as any;
-  return data.choices?.[0]?.message?.content || '';
+      res.on('data', chunk => {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const l of lines) {
+          const trimmed = l.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          if (trimmed === 'data: [DONE]') continue;
+          try {
+            const d = JSON.parse(trimmed.slice(6));
+            const delta = d.choices?.[0]?.delta?.content || '';
+            if (delta) {
+              fullText += delta;
+              if (Date.now() - lastPrint > 1200) {
+                process.stdout.write(`\r[SpecGen] HR Agent 正在生成画像中... 已产出 ${fullText.length} 字`);
+                lastPrint = Date.now();
+              }
+            }
+          } catch {}
+        }
+      });
+
+      res.on('end', () => {
+        console.log(`\n[SpecGen] ✅ 画像生成完毕，总字符数: ${fullText.length}`);
+        if (!fullText.trim()) return reject(new Error('[SpecGen] 未接收到有效画像内容'));
+        resolve(fullText.trim());
+      });
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('[SpecGen] 请求超时 (180s)'));
+    });
+    req.write(payload);
+    req.end();
+  });
 }
 
 // ─── Spec 生成提示词 ──────────────────────────────────────────────────────────
 
 function buildSpecGenSystemPrompt(availableSkillsDesc: string): string {
-  return `你是一个 AI 员工招募顾问，专门负责将人类的"招聘意图"转化为结构化的"员工画像配置"。
+  return `你是一位专业严谨的高级 AI 招聘主管与人才架构专家（Enterprise HR Director & Talent Architect）。
+你的内部职责是精准理解业务负责人的“招聘意图”，并自动转化设计出结构化、高质量的「AI 员工画像配置 Spec JSON」。
 
-【核心原则】
-1. 你生成的是「员工画像」，不是「业务脚本」。画像描述员工的性格、风格、职责边界，不要把具体的业务知识硬写进去。
-2. reply_style 只描述"怎么说话"（语气、字数、格式约束），不描述"说什么内容"。
-3. service_flow 只描述"做事步骤"（动词序列），不超过6步，不含具体台词。
-4. taboos 是零容忍的行为禁区，必须具体且可测试（能用代码判断违反）。
-5. 不要过拟合：不要把招聘需求里的例子直接写进 spec，要提炼为通用行为准则。
+【核心招聘原则】
+1. **区分岗位类型（内部员工 vs 客户侧员工）**：
+   - **对于面向 C 端/私域/微商/销售/客户运营岗位**：人是有厚度和温度的，必须赋予其 **3D 立体丰满人设**（生活背景、踩坑血泪史、自我举例故事库、日常闲聊谈资库），坚决不做只会念参数的冷血复读机！
+   - **对于内部工具/技术/分析岗位**：保持专业、严谨、客观、高效的工具画像。
+2. **reply_style 规范**：对客户侧员工要求口语化、真诚短句、闺蜜亲切称呼、严禁任何 Markdown 语法（无**加粗**、无#标题、无-列表）、严禁输出 URL。
+3. **service_flow 规范**：包含日常闲聊破冰、痛点共情与自我举例、保姆级方案、逼单与打卡复购等闭环步骤（不超过6步）。
+4. **taboos 是零容忍红线**：虚假宣传、绝对化承诺（保证100%）、泄露隐私、使用确诊/治疗等医疗词汇。
+5. **routing_examples 覆盖全场景**：必须包含日常生活闲聊扯淡、业务咨询直答、极端客诉转人工、大额代理转渠道总监等典型用例。
 
 【可用技能列表】
 ${availableSkillsDesc}
 
 【输出格式】
-必须输出合法的 JSON，格式如下（不加 Markdown 代码块）：
+必须输出合法的 JSON 格式（不加额外 Markdown 代码块说明）：
 {
-  "name": "员工岗位名称",
-  "role_desc": "职责描述（2-3句话，说明这个员工是谁、负责什么、边界在哪里）",
-  "reply_style": "回复风格（说明语气、字数上限、禁止格式，不超过100字）",
-  "service_flow": "步骤1 → 步骤2 → 步骤3（最多6步）",
-  "taboos": ["禁忌1", "禁忌2", "禁忌3"],
-  "reassurance_tpl": "当用户情绪激动时使用的安抚话术（1-2句，自然语言）",
-  "suggested_skill_ids": ["skill_id_1"],
+  "name": "员工岗位名称（如：XX私域金牌主理人）",
+  "role_desc": "核心人设概括（说明这个员工是谁、生活背景、边界在哪里，如：35岁同龄二胎宝妈/高压职场实战派大姐姐，自用口碑背书）",
+  "persona_lore": {
+    "identity_and_background": "详细生活背景（年龄、家庭、白天工作/晚上主理人、作息与生活小烦恼）",
+    "vulnerable_origin_story": "曾经经历过的至暗时刻与踩坑血泪史（曾经多难受/试了什么错/花了多少冤枉钱/怎么通过这套方案走出来的真实经历）",
+    "lifestyle_habits": ["晨间打卡", "深夜哄睡独处", "空气炸锅低卡餐", "大餐前心虚急救"]
+  },
+  "personal_stories": [
+    "拿自己真实经历举例的故事1（踩坑受罪故事）",
+    "拿自己真实经历举例的故事2（第一次见证蜕变的惊喜故事）",
+    "拿自己真实经历举例的故事3（大餐聚会/日常急救亲测故事）"
+  ],
+  "small_talk_anchors": [
+    "日常闲聊谈资1（聊娃/家庭/辅导作业抓狂）",
+    "日常闲聊谈资2（聊职场/加班/外卖摸鱼）",
+    "日常闲聊谈资3（聊吃货心虚/想吃火锅炸鸡又怕长肉）",
+    "日常闲聊谈资4（聊换季天气/降温添衣/生活八卦）"
+  ],
+  "reply_style": "回复风格要求（热情真诚、短句节奏、称呼宝子/姐、严禁Markdown、严禁URL、高情商化解）",
+  "service_flow": "生活闲聊破冰 -> 痛点共情与自我举例 -> 保姆级定制方案 -> 专属福利与赠品逼单 -> 周期回访锁客",
+  "taboos": ["虚假宣传", "过度承诺", "泄露用户信息", "自行生成URL或链接", "使用Markdown格式"],
+  "reassurance_tpl": "当用户情绪激动或心存疑虑时的高情商安抚模版（掏心窝子共情、全程陪跑负责到底）",
+  "suggested_skill_ids": [],
   "routing_examples": [
-    { "user_says": "用户说了什么", "route_to": "skill_id或human_handoff", "reason": "路由原因" }
+    { "user_says": "今天周一又被老板抓着开会，好烦啊", "route_to": "answer_directly", "reason": "日常闲聊吐槽共情，陪聊唠嗑拉近距离，不生硬推销" },
+    { "user_says": "我经常熬夜便秘肚子大，有适合我的吗", "route_to": "answer_directly", "reason": "产品痛点咨询，拿自己经历共情并给出保姆级定制搭配" },
+    { "user_says": "吃了拉肚子特别严重，你们是不是假货？", "route_to": "human_handoff", "reason": "极端客诉，先安抚不争辩，转1对1售后专家排查" },
+    { "user_says": "我想拿50箱在我的健身房卖，怎么做代理？", "route_to": "human_handoff", "reason": "大额代理招商咨询，转渠道商务总监对接政策" }
   ],
   "delivery_config": {
     "max_reply_length": 150,
     "use_emoji": true,
-    "greeting_style": "casual",
-    "response_tone": "friendly"
+    "greeting_style": "warm",
+    "response_tone": "empathetic"
   },
-  "confidence": 0.9,
+  "confidence": 0.95,
   "clarification_needed": null,
-  "generation_notes": ["注意点1"]
+  "generation_notes": ["赋予3D立体人设与闲聊共情库，兼顾销售力与真实人情味"]
 }`;
 }
 
@@ -254,6 +325,9 @@ ${options.extraTaboos?.length ? `【额外禁忌（必须包含）】\n${options
     id: generateAgentId(parsed.name || '未命名员工'),
     name: parsed.name || '未命名员工',
     role_desc: parsed.role_desc || '',
+    persona_lore: parsed.persona_lore,
+    personal_stories: parsed.personal_stories,
+    small_talk_anchors: parsed.small_talk_anchors,
     reply_style: parsed.reply_style || '',
     service_flow: parsed.service_flow || '',
     taboos: allTaboos,
@@ -263,8 +337,8 @@ ${options.extraTaboos?.length ? `【额外禁忌（必须包含）】\n${options
     delivery_config: {
       max_reply_length: parsed.delivery_config?.max_reply_length || 150,
       use_emoji: parsed.delivery_config?.use_emoji ?? true,
-      greeting_style: parsed.delivery_config?.greeting_style || 'casual',
-      response_tone: parsed.delivery_config?.response_tone || 'friendly',
+      greeting_style: parsed.delivery_config?.greeting_style || 'warm',
+      response_tone: parsed.delivery_config?.response_tone || 'empathetic',
     },
     knowledge_domain: domain,
     intent_prompt: intent,

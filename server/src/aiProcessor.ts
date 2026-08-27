@@ -100,8 +100,14 @@ function buildPromptFromTemplate(template: string, inputs: TicketInput[]): strin
 // ─── Build user message for plugin-type skill (SKILL.md 无占位符，用输入构建 user message)───────────────
 // 这种情况下 SKILL.md 作为 system prompt，客户填写的表单字段作为 user message
 // 文件附件通过 GCS __attachments__ 单独传递，不在此处内联（sandbox runner 负责提取内容）
-function buildUserMessageFromInputs(inputs: TicketInput[]): string {
+function buildUserMessageFromInputs(inputs: TicketInput[], ticket?: any): string {
   const lines: string[] = ['以下是客户提交的信息，请根据这些信息完成任务：'];
+  if (ticket?.patient_name) {
+    lines.push(`《客户姓名》: ${ticket.patient_name}`);
+  }
+  if (ticket?.notes) {
+    lines.push(`《补充信息》:\n${ticket.notes}`);
+  }
   for (const inp of inputs) {
     if (inp.field_type === 'text' && inp.value) {
       // Try to pretty-print JSON values (e.g. objects submitted by scripts)
@@ -450,7 +456,8 @@ async function submitTicketToSandboxService(
     }
   } catch { /* ignore */ }
 
-  const userMessage = buildUserMessageFromInputs(inputs);
+  const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
+  const userMessage = buildUserMessageFromInputs(inputs, ticket);
   const testInputs: Record<string, any> = { ticket: userMessage };
 
   // 附件处理（支持本地文件上传GCS及已有GCS链接直接透传）
@@ -557,7 +564,8 @@ async function submitTicketAgentJob(
   } catch { /* ignore */ }
 
   // Build customer data as single test case
-  const userMessage = buildUserMessageFromInputs(inputs);
+  const ticket = await db.getAsync<any>('SELECT * FROM tickets WHERE id=?', [ticketId]);
+  const userMessage = buildUserMessageFromInputs(inputs, ticket);
   const testInputs: Record<string, any> = { ticket: userMessage };  // CASE_COUNT=1, one case
 
   // ── 上传文件附件到 GCS，通过 __attachments__ 传给 sandbox runner ──────────

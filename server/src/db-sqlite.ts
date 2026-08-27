@@ -251,6 +251,8 @@ export function initDb(): void {
     `ALTER TABLE meta_agent_eval_runs ADD COLUMN failed_cases INTEGER DEFAULT 0`,
     `ALTER TABLE meta_agent_eval_runs ADD COLUMN diagnosis TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_meta_eval_runs_agent ON meta_agent_eval_runs(agent_id, round DESC)`,
+    // 代问场景：actual_patient_id 存储真实患者的 LLMWiki userId（不是本人时 ≠ created_by）
+    `ALTER TABLE tickets ADD COLUMN actual_patient_id TEXT DEFAULT NULL`,
   ];
   for (const sql of migrations) {
     try { db.prepare(sql).run(); } catch { /* column already exists, ignore */ }

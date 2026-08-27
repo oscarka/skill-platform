@@ -18,6 +18,7 @@ const testRoutes_1 = require("./routes/testRoutes");
 const mcpRoutes_1 = require("./routes/mcpRoutes");
 const oauthRoutes_1 = require("./routes/oauthRoutes");
 const agentRoutes_1 = require("./routes/agentRoutes");
+const metaAgentRoutes_1 = require("./routes/metaAgentRoutes");
 const agentService_1 = require("./agentService");
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const app = (0, express_1.default)();
@@ -39,6 +40,7 @@ app.use('/api/h5', h5Routes_1.h5Router);
 app.use('/api/results', resultRoutes_1.resultRouter);
 app.use('/api/test', testRoutes_1.testRouter);
 app.use('/api/mcp-configs', mcpRoutes_1.mcpRouter);
+app.use('/api/v1/meta/agents', metaAgentRoutes_1.metaAgentRouter); // Meta-Agent 候选员工招聘与评测接口
 app.use('/api/v1/agent', agentRoutes_1.agentRouter); // 通用 Agent 接口
 app.use('/api/orch', agentRoutes_1.agentRouter); // 渠道统一入口（/api/orch/ingest）
 app.use('/', oauthRoutes_1.oauthRouter); // OAuth routes: /auth/google/start, /auth/google/callback, /api/oauth/*

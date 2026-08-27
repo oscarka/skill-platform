@@ -270,24 +270,30 @@
     window.toggleIdentity = function(val) {
       isSelf = (val === 'self');
       const fields = h5Config?.fields || [];
-      const prefill = isSelf ? prefilledValues : {
-        // 家人时保留联系人信息，患者信息清空
-        contact_name:  prefilledValues.contact_name || '',
-        contact_phone: prefilledValues.contact_phone || '',
-        name:          '',   // 清空患者姓名（两种 key 都处理）
-        phone:         prefilledValues.contact_phone || '',  // 联系方式保留
-      };
-      fields.forEach(f => {
-        const el = document.getElementById('f_' + f.key);
-        if (!el) return;
-        // 患者年龄/体重/身高等个人数据在家人模式下清空
-        const patientOnlyKeys = ['age', 'patient_age', 'patient_name', 'height', 'weight', 'gender'];
-        if (!isSelf && patientOnlyKeys.includes(f.key)) {
-          el.value = '';
-        } else {
-          el.value = resolvePrefilledVal(f.key, prefill) || '';
-        }
-      });
+      if (isSelf) {
+        // 本人：恢复所有预填值
+        fields.forEach(f => {
+          const el = document.getElementById('f_' + f.key);
+          if (el) el.value = resolvePrefilledVal(f.key, prefilledValues) || '';
+        });
+      } else {
+        // 家人/代问：保留联系人信息，患者字段用报告中提取的信息填入
+        const reportPrefill = {
+          contact_name:  prefilledValues.contact_name || '',
+          contact_phone: prefilledValues.contact_phone || '',
+          phone:         prefilledValues.contact_phone || '',
+          patient_name:  prefilledValues.report_patient_name || '',
+          name:          prefilledValues.report_patient_name || '',
+          patient_age:   prefilledValues.report_patient_age || '',
+          age:           prefilledValues.report_patient_age || '',
+          gender:        prefilledValues.report_patient_gender || '',
+        };
+        fields.forEach(f => {
+          const el = document.getElementById('f_' + f.key);
+          if (!el) return;
+          el.value = reportPrefill[f.key] !== undefined ? reportPrefill[f.key] : '';
+        });
+      }
     };
 
     function renderForm(data) {
@@ -300,21 +306,32 @@
 
       // 本人/家人选择器（有姓名/年龄类字段时显示）
       const hasPatient = fields.some(f => ['patient_name', 'patient_age', 'name', 'age'].includes(f.key));
+      const selfChecked = isSelf ? 'checked' : '';
+      const otherChecked = isSelf ? '' : 'checked';
       const identityToggle = hasPatient ? `
         <div class="card" style="margin-bottom:12px">
           <div class="form-label" style="margin-bottom:8px">👤 这份表单是谁的？</div>
           <div style="display:flex;gap:16px">
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-              <input type="radio" name="identity" value="self" checked onchange="toggleIdentity('self')" />本人
+              <input type="radio" name="identity" value="self" ${selfChecked} onchange="toggleIdentity('self')" />本人
             </label>
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-              <input type="radio" name="identity" value="other" onchange="toggleIdentity('other')" />家人或其他人
+              <input type="radio" name="identity" value="other" ${otherChecked} onchange="toggleIdentity('other')" />家人或其他人
             </label>
           </div>
         </div>` : '';
 
+      // 根据 isSelf 决定初始预填数据源
+      const initialPrefill = isSelf ? prefilledValues : {
+        ...prefilledValues,
+        patient_name: prefilledValues.report_patient_name || '',
+        name:         prefilledValues.report_patient_name || '',
+        patient_age:  prefilledValues.report_patient_age || '',
+        age:          prefilledValues.report_patient_age || '',
+        gender:       prefilledValues.report_patient_gender || '',
+      };
       const fieldsHTML = fields.length
-        ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(f => buildFieldHTML(f, prefilledValues)).join('')}</div>`
+        ? `<div class="card"><div class="card-title">📝 请填写信息</div>${fields.map(f => buildFieldHTML(f, initialPrefill)).join('')}</div>`
         : '';
 
       const uploadHTML = uploads ? `
@@ -448,6 +465,10 @@
         h5Config = data.h5_config;
         ticketId = data.ticket_id;
         prefilledValues = data.prefilled_values || {};
+        // 根据后端判断结果设置默认本人/家人
+        if (prefilledValues.default_is_self === false) {
+          isSelf = false;
+        }
         // prefilled_files may be inside prefilled_values or at top level
         const rawFiles = prefilledValues.prefilled_files || data.prefilled_files || [];
         prefilledFiles = Array.isArray(rawFiles) ? [...rawFiles] : [];

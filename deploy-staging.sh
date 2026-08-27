@@ -50,9 +50,8 @@ gcloud run deploy "${STAGING_SERVICE}" \
   --min-instances=0 \
   --max-instances=2 \
   --timeout=300 \
-  --set-env-vars="IS_STAGING=true,STAGING_AGENT_ONLY=true,PORT=3100" \
-  --set-secrets="DATABASE_URL=skill-platform-db-url:latest,DOUBAO_API_KEY=doubao-api-key:latest,GEMINI_API_KEY=gemini-api-key:latest" \
-  --service-account="skill-platform-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --set-env-vars="IS_STAGING=true,STAGING_AGENT_ONLY=true" \
+  --set-secrets="DATABASE_URL=skill-platform-db-url:latest,DOUBAO_API_KEY=skill-platform-doubao-key:latest,DEEPSEEK_API_KEY=skill-platform-deepseek-key:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,TAVILY_API_KEY=TAVILY_API_KEY:latest" \
   2>&1
 
 STAGING_URL=$(gcloud run services describe "${STAGING_SERVICE}" \

@@ -139,16 +139,21 @@ const CHANNEL_STATUS: Record<string, { label: string; dot: string }> = {
 };
 
 const EVENT_ICONS: Record<string, string> = {
-  message_received: '📨',
-  wiki_fetched:     '📚',
-  app_prewarm:      '📱',
-  route_decided:    '🔀',
-  skill_selected:   '🎯',
-  skill_started:    '⚙️',
-  reassurance_sent: '💬',
-  skill_done:       '✅',
-  reply_sent:       '📤',
-  task_failed:      '❌',
+  message_received:       '📨',
+  wiki_fetched:           '📚',
+  app_prewarm:            '📱',
+  route_decided:          '🔀',
+  skill_selected:         '🎯',
+  skill_guard_activated:  '🛡️',
+  guard_lifecycle:        '🛡️',
+  skill_suggest:          '💡',
+  skill_started:          '⚙️',
+  tool_query_ticket:      '🔧',
+  reassurance_sent:       '💬',
+  skill_done:             '✅',
+  reply_sent:             '📤',
+  reply_preempted:        '✂️',
+  task_failed:            '❌',
 };
 
 function AgentTasksPanel() {

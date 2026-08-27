@@ -369,6 +369,10 @@ async function fetchWikiContext(userId, query, fromName) {
     if (!LLMWIKI_BASE || !userId) {
         return { user_profile: '', health_wiki: '', mode: 'none' };
     }
+    // 测试沙箱用户跳过外部 LLMWiki 阻塞创建（从 8s 降至 <1s 极速响应）
+    if (userId.startsWith('eval_sandbox_')) {
+        return { user_profile: '', health_wiki: '', mode: 'sandbox' };
+    }
     // 缓存命中
     const cacheKey = userId;
     const cached = _wikiCache.get(cacheKey);
@@ -566,7 +570,27 @@ async function loadAgentProfile(agentId) {
     if (cached && Date.now() < cached.expireAt)
         return cached.profile;
     try {
-        const row = await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [id]);
+        let row = await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [id]);
+        // ── 支持候选员工（meta_agents 试用期考评阶段直接按候选 Spec 运行）──
+        if (!row && id !== DEFAULT_PROFILE_ID) {
+            const metaRow = await db.getAsync('SELECT * FROM meta_agents WHERE id = ?', [id]);
+            if (metaRow) {
+                row = {
+                    id: metaRow.id,
+                    name: metaRow.name,
+                    role_desc: metaRow.role_desc,
+                    reply_style: metaRow.reply_style,
+                    service_flow: metaRow.service_flow,
+                    taboos: metaRow.taboos,
+                    reassurance_mode: 'ai',
+                    reassurance_tpl: metaRow.reassurance_tpl || '',
+                    skill_mode: 'auto',
+                    skill_ids: '[]',
+                    routing_examples: metaRow.routing_examples,
+                    knowledge_config: null,
+                };
+            }
+        }
         // 若指定 id 不存在，自动 fallback 到 default
         const src = row ?? (id !== DEFAULT_PROFILE_ID
             ? await db.getAsync('SELECT * FROM agent_profiles WHERE id = ?', [DEFAULT_PROFILE_ID])
@@ -1054,7 +1078,7 @@ async function routeDecision(content, history, notes, availableSkills, apiKey, r
     // 当 routing_examples 未配置时，使用原始提示词（一字不改，保证现有行为不变）
     // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
     let systemPrompt;
-    if (!routingExamples) {
+    if (!routingExamples || !routingExamples.high_desc) {
         // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
         systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
@@ -1078,16 +1102,16 @@ ${skillList}
     else {
         // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
         const re = routingExamples;
-        const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
-        const exLow = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
-        const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
+        const exHigh = Array.isArray(re.examples_high) ? re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、') : '';
+        const exLow = Array.isArray(re.examples_low) ? re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、') : '';
+        const exNone = Array.isArray(re.examples_none) ? re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、') : '';
         systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
 
 1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
 2. 判断置信度（confidence）：
-   - "high"：${re.high_desc}（如：${exHigh}）
-   - "low"：${re.low_desc}（如：${exLow}）
-   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
+   - "high"：${re.high_desc || '客户明确表达了要使用某个专项服务'}${exHigh ? `（如：${exHigh}）` : ''}
+   - "low"：${re.low_desc || '客户有业务相关问题但未明确要求某项服务'}${exLow ? `（如：${exLow}）` : ''}
+   - "none"：普通聊天/问候/询问服务范围，直接回答${exNone ? `（如：${exNone}）` : ''}
 
 注意：
 - 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
@@ -2020,8 +2044,7 @@ async function processAgentChat(req) {
     if (sessionId) {
         const nowMs = Date.now();
         // Phase C: 加 agent_id 过滤，防止不同 Agent 的守卫相互干扰
-        // 此处 profile 尚未加载，直接从 req 读取 agent_id（未传则 'default'）
-        const _reqAgentId = req.agent_id || 'default';
+        const _reqAgentId = req.agent_id || req.meta?.agent_id || 'default';
         const activeGuard = await db.getAsync(`SELECT * FROM skill_confirm_guards
        WHERE session_id=? AND status='active' AND expires_at>? AND (agent_id=? OR agent_id IS NULL OR agent_id='')
        ORDER BY created_at DESC LIMIT 1`, [sessionId, nowMs, _reqAgentId]);
@@ -2065,10 +2088,10 @@ async function processAgentChat(req) {
         }
     }
     // ── Step 1 (v2): 加载 Agent Profile + 可用 skill（前置，供 routeDecision 使用）──
-    // agent_id 从请求透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
-    // 注：守卫查询时使用的是 req.agent_id（上面 _reqAgentId），不依赖此 profile
+    // agent_id 从请求顶层或 meta 透传而来；不传则 loadAgentProfile 自动 fallback 到 'default'
     void updateAgentTask(requestId, { status: 'routing' });
-    const profile = await loadAgentProfile(req.agent_id);
+    const agentIdToLoad = req.agent_id || req.meta?.agent_id || req.agentId;
+    const profile = await loadAgentProfile(agentIdToLoad);
     console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
     const availableSkills = await getAvailableSkills(profile);
     console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);

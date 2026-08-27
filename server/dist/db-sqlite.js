@@ -204,8 +204,52 @@ function initDb() {
         // agent_id：守卫与工单绑定到具体 Agent 实例（多 Agent 隔离用）
         `ALTER TABLE skill_confirm_guards ADD COLUMN agent_id TEXT DEFAULT 'default'`,
         `ALTER TABLE tickets ADD COLUMN agent_id TEXT DEFAULT 'default'`,
-        // ── Skill 标签系统：tags 用于过滤哪些 Skill 可配置给 Agent ──
-        `ALTER TABLE skills ADD COLUMN tags TEXT DEFAULT NULL`,
+        // ── Meta-Agent 候选员工体系 (agents_factory Phase 2) ──
+        `CREATE TABLE IF NOT EXISTS meta_agents (
+      id                TEXT PRIMARY KEY,
+      name              TEXT NOT NULL,
+      role_desc         TEXT NOT NULL,
+      reply_style       TEXT NOT NULL,
+      service_flow      TEXT DEFAULT '',
+      taboos            TEXT DEFAULT '[]',
+      reassurance_tpl   TEXT DEFAULT '',
+      skill_ids         TEXT DEFAULT '[]',
+      routing_examples  TEXT DEFAULT '[]',
+      delivery_config   TEXT DEFAULT '{}',
+      knowledge_domain  TEXT DEFAULT '',
+      intent_prompt     TEXT DEFAULT '',
+      status            TEXT DEFAULT 'draft',
+      current_score     REAL DEFAULT 0,
+      best_score        REAL DEFAULT 0,
+      total_eval_rounds INTEGER DEFAULT 0,
+      reject_reason     TEXT,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    )`,
+        `CREATE TABLE IF NOT EXISTS meta_agent_eval_runs (
+      run_id              TEXT PRIMARY KEY,
+      agent_id            TEXT NOT NULL REFERENCES meta_agents(id) ON DELETE CASCADE,
+      round               INTEGER NOT NULL,
+      agent_version       TEXT NOT NULL,
+      total_score         REAL DEFAULT 0,
+      score_compliance    REAL DEFAULT 0,
+      score_business      REAL DEFAULT 0,
+      score_ticket_skill  REAL DEFAULT 0,
+      score_memory        REAL DEFAULT 0,
+      passed_cases        INTEGER DEFAULT 0,
+      failed_cases        INTEGER DEFAULT 0,
+      total_cases         INTEGER DEFAULT 0,
+      taboo_violated      INTEGER DEFAULT 0,
+      taboo_violations    TEXT DEFAULT '[]',
+      diagnosis           TEXT,
+      diagnosis_report    TEXT,
+      case_results        TEXT,
+      created_at          INTEGER NOT NULL
+    )`,
+        `ALTER TABLE meta_agent_eval_runs ADD COLUMN taboo_violations TEXT DEFAULT '[]'`,
+        `ALTER TABLE meta_agent_eval_runs ADD COLUMN failed_cases INTEGER DEFAULT 0`,
+        `ALTER TABLE meta_agent_eval_runs ADD COLUMN diagnosis TEXT`,
+        `CREATE INDEX IF NOT EXISTS idx_meta_eval_runs_agent ON meta_agent_eval_runs(agent_id, round DESC)`,
     ];
     for (const sql of migrations) {
         try {

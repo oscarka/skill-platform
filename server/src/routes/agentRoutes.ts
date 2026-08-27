@@ -13,8 +13,9 @@
 
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus, reconcileStaleTasks } from '../agentService';
+import { processAgentChat, handleJobCallback, saveAgentProfile, listAgentProfiles, deleteAgentProfile, updateAgentTask, appendTaskEvent, taskEventBus, reconcileStaleTasks, createAgentTask } from '../agentService';
 import { enqueueDelivery, startDispatcherLoop } from '../dispatcherService';
+import { processTicket } from '../aiProcessor';
 import * as db from '../db';
 
 export { startDispatcherLoop };  // 供 server.ts 在启动时调用
@@ -35,10 +36,22 @@ interface DeliveryRoute {
   display_name: string;
 }
 
+interface MergeCandidate {
+  peer_channel:      string;
+  peer_channel_uid:  string;
+  peer_unified_id:   string;
+  peer_display_name: string;
+  peer_avatar:       string | null;
+  name_match:        boolean;
+  avatar_match:      boolean;
+}
+
 interface ChannelIdentity {
-  unified_id:      string;
-  display_name:    string;
-  delivery_routes: DeliveryRoute[];  // 该客户所有已知的出站句柄
+  unified_id:       string;
+  display_name:     string;
+  delivery_routes:  DeliveryRoute[];
+  match_result?:    'auto_merged' | 'partial' | null;
+  merge_candidate?: MergeCandidate | null;
 }
 
 async function resolveIdentity(
@@ -46,10 +59,11 @@ async function resolveIdentity(
   channel_uid: string,
   from_name: string,
   conversation_id: string,
-  extra?: { unionid?: string | null; conv_id?: string | null }
+  extra?: { unionid?: string | null; conv_id?: string | null; avatar?: string | null }
 ): Promise<ChannelIdentity> {
   const incomingUnionid = extra?.unionid || null;
   const incomingConvId  = extra?.conv_id  || conversation_id || null;
+  const incomingAvatar  = extra?.avatar   || null;
 
   // ── 步骤 1：尝试按当前渠道 (channel, channel_uid) 查现有记录 ──
   let row = await db.getAsync<any>(
@@ -59,18 +73,78 @@ async function resolveIdentity(
   );
 
   let unified_id: string;
+  let match_result: 'auto_merged' | 'partial' | null = null;
+  let merge_candidate: MergeCandidate | null = null;
 
   if (row) {
     unified_id = row.unified_id;
-    // 有新 conv_id 或 unionid 就顺手更新
+    // 更新 conv_id / unionid / avatar
     await db.runAsync(
       `UPDATE skill_platform.channel_identities
        SET conv_id    = COALESCE($1, conv_id),
            unionid    = COALESCE($2, unionid),
+           avatar     = COALESCE($3, avatar),
            updated_at = now()
-       WHERE channel = $3 AND channel_uid = $4`,
-      [incomingConvId || null, incomingUnionid, channel, channel_uid]
+       WHERE channel = $4 AND channel_uid = $5`,
+      [incomingConvId || null, incomingUnionid, incomingAvatar, channel, channel_uid]
     ).catch(() => {});
+
+    // ── 跨渠道匹配检测（三级策略）──
+    if (incomingAvatar || from_name) {
+      // 1) name + avatar 都匹配 → 自动合并
+      if (incomingAvatar && from_name) {
+        const exactPeer = await db.getAsync<any>(
+          `SELECT unified_id, channel, channel_uid, display_name, avatar
+           FROM skill_platform.channel_identities
+           WHERE avatar = $1 AND display_name = $2
+             AND channel != $3 AND unified_id != $4 LIMIT 1`,
+          [incomingAvatar, from_name, channel, unified_id]
+        );
+        if (exactPeer) {
+          const oldId = unified_id;
+          unified_id = exactPeer.unified_id;
+          await db.runAsync(
+            `UPDATE skill_platform.channel_identities
+             SET unified_id = $1, updated_at = now()
+             WHERE unified_id = $2`,
+            [unified_id, oldId]
+          ).catch(() => {});
+          match_result = 'auto_merged';
+          console.log(`[Identity] ✅ 自动合并: ${oldId} → ${unified_id} (name=${from_name})`);
+        }
+      }
+
+      // 2) 只匹配一项 → 记录候选，调用方负责发通知
+      if (!match_result) {
+        const namePeer = from_name ? await db.getAsync<any>(
+          `SELECT unified_id, channel, channel_uid, display_name, avatar
+           FROM skill_platform.channel_identities
+           WHERE display_name = $1 AND channel != $2 AND unified_id != $3 LIMIT 1`,
+          [from_name, channel, unified_id]
+        ) : null;
+        const avatarPeer = incomingAvatar ? await db.getAsync<any>(
+          `SELECT unified_id, channel, channel_uid, display_name, avatar
+           FROM skill_platform.channel_identities
+           WHERE avatar = $1 AND channel != $2 AND unified_id != $3 LIMIT 1`,
+          [incomingAvatar, channel, unified_id]
+        ) : null;
+
+        // 确保两个 peer 不是同一条记录（否则已被 exactPeer 处理）
+        const peer = namePeer || avatarPeer;
+        if (peer) {
+          match_result = 'partial';
+          merge_candidate = {
+            peer_channel:      peer.channel,
+            peer_channel_uid:  peer.channel_uid,
+            peer_unified_id:   peer.unified_id,
+            peer_display_name: peer.display_name,
+            peer_avatar:       peer.avatar || null,
+            name_match:        !!namePeer,
+            avatar_match:      !!avatarPeer,
+          };
+        }
+      }
+    }
   } else {
     // ── 步骤 2：新客户 — 先按 unionid 查是否已有其他渠道的记录（跨渠道合并）
     if (incomingUnionid) {
@@ -79,27 +153,27 @@ async function resolveIdentity(
          WHERE unionid = $1 LIMIT 1`,
         [incomingUnionid]
       );
-      unified_id = existing?.unified_id || incomingUnionid;  // 优先用已有的，否则用 unionid 本身
+      unified_id = existing?.unified_id || incomingUnionid;
     } else {
-      // 无 unionid：生成 channel-prefixed id（临时，后续获取到 unionid 后可更新）
       unified_id = `${channel}_${channel_uid}`;
     }
 
     // INSERT 新行（ON CONFLICT 兜底，防止并发重复）
     await db.runAsync(
       `INSERT INTO skill_platform.channel_identities
-         (unified_id, channel, channel_uid, display_name, conv_id, unionid, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,now(),now())
+         (unified_id, channel, channel_uid, display_name, conv_id, unionid, avatar, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
        ON CONFLICT (channel,channel_uid) DO UPDATE
          SET unified_id  = EXCLUDED.unified_id,
-             conv_id     = COALESCE(EXCLUDED.conv_id, skill_platform.channel_identities.conv_id),
-             unionid     = COALESCE(EXCLUDED.unionid, skill_platform.channel_identities.unionid),
+             conv_id     = COALESCE(EXCLUDED.conv_id,    skill_platform.channel_identities.conv_id),
+             unionid     = COALESCE(EXCLUDED.unionid,    skill_platform.channel_identities.unionid),
+             avatar      = COALESCE(EXCLUDED.avatar,     skill_platform.channel_identities.avatar),
              updated_at  = now()`,
       [unified_id, channel, channel_uid, from_name,
-       incomingConvId || null, incomingUnionid]
+       incomingConvId || null, incomingUnionid, incomingAvatar]
     ).catch(() => {});
 
-    console.log(`[Identity] 新客户注册: channel=${channel} uid=${channel_uid} unified=${unified_id} unionid=${incomingUnionid || 'none'}`);
+    console.log(`[Identity] 新客户注册: channel=${channel} uid=${channel_uid} unified=${unified_id}`);
   }
 
   // ── 步骤 3：查出该 unified_id 下所有渠道的出站句柄（delivery_routes）──
@@ -119,7 +193,7 @@ async function resolveIdentity(
 
   const display_name = allRows?.[0]?.display_name || from_name;
 
-  return { unified_id, display_name, delivery_routes };
+  return { unified_id, display_name, delivery_routes, match_result, merge_candidate };
 }
 
 // 回复优先 juhe，失败再 fallback CUA
@@ -211,6 +285,7 @@ agentRouter.post('/ingest', async (req, res) => {
     const identity       = await resolveIdentity(channel, from_user_id, from_name || from_user_id, sessionId, {
       unionid: req.body.unionid || null,
       conv_id: conversation_id || null,
+      avatar:  req.body.avatar  || null,
     });
     const unified_id      = identity.unified_id;
     const display_name    = identity.display_name;
@@ -219,54 +294,141 @@ agentRouter.post('/ingest', async (req, res) => {
     const juhe_conv_id    = delivery_routes.find((r: DeliveryRoute) => r.channel === 'juhe')?.conv_id || null;
 
     // ── 附件暂存：记录用户最近24小时上传的文件 ──────────────────────────────
-    const media_url = req.body.media_url || null;
-    const file_name = req.body.file_name || '';
-    const file_type = req.body.file_type || (msgtype === 'image' ? 'image' : 'file');
+    const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+    const media_url   = req.body.media_url || null;
+    const file_name   = req.body.file_name || '';
+    const file_type   = req.body.file_type || (msgtype === 'image' ? 'image' : 'file');
 
-    if (media_url) {
-      const fileId = uuidv4();
+    const filesToSave = attachments.length > 0
+      ? attachments.map((a: any) => ({
+          fileUrl:  a.fileUrl || a.mediaUrl,
+          fileName: a.fileName || a.name || '未命名附件',
+          fileType: a.msgtype || a.fileType || 'file',
+          summary:  a.summary || a.extractedText || '',
+        })).filter((a: any) => a.fileUrl)
+      : (media_url ? [{ fileUrl: media_url, fileName: file_name || '未命名附件', fileType: file_type, summary: content }] : []);
+
+    if (filesToSave.length > 0) {
       const now = Date.now();
-      try {
+      for (const f of filesToSave) {
+        const fileId = uuidv4();
+        try {
+          await db.runAsync(
+            `INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, content_hash, created_at)
+             VALUES (?,?,?,?,?,?,NULL,?)`,
+            [fileId, unified_id, f.fileUrl, f.fileName, f.fileType, (f.summary || '').slice(0, 2000), now]
+          );
+          console.log(`[Orch/Ingest] 📎 保存用户 ${unified_id} 最近24小时附件: ${f.fileName} (${f.fileUrl})`);
+
+          // ── 异步计算文件内容 MD5，用于真正的内容去重 ──────────────────────────
+          // 不阻塞 ingest 响应，后台下载计算
+          (async () => {
+            try {
+              const https = await import('https');
+              const http  = await import('http');
+              const crypto = await import('crypto');
+              const fetchModule = f.fileUrl.startsWith('https') ? https : http;
+              const hash = crypto.createHash('md5');
+              await new Promise<void>((resolve, reject) => {
+                fetchModule.get(f.fileUrl, (resp) => {
+                  if (resp.statusCode && resp.statusCode >= 400) {
+                    reject(new Error(`HTTP ${resp.statusCode}`)); return;
+                  }
+                  resp.on('data', (chunk: Buffer) => hash.update(chunk));
+                  resp.on('end', resolve);
+                  resp.on('error', reject);
+                }).on('error', reject);
+              });
+              const md5 = hash.digest('hex');
+              await db.runAsync(`UPDATE user_recent_files SET content_hash=? WHERE id=?`, [md5, fileId]);
+              console.log(`[Orch/Ingest] 🔑 MD5 计算完成 file=${f.fileName} hash=${md5.slice(0,8)}…`);
+            } catch (hashErr: any) {
+              console.warn(`[Orch/Ingest] ⚠️ MD5 计算失败 file=${f.fileName}: ${hashErr.message}`);
+              // 失败不影响功能，content_hash 保持 NULL，回退到文件名去重
+            }
+          })();
+
+        } catch (err: any) {
+          console.warn(`[Orch/Ingest] 保存附件失败:`, err.message);
+        }
+      }
+      const cutoff24h = now - 24 * 60 * 60 * 1000;
+      await db.runAsync(`DELETE FROM user_recent_files WHERE created_at < ?`, [cutoff24h]).catch(() => {});
+
+      // ── 检查该用户是否有处于 waiting_input 的待填写工单 ──────────────────────
+      // 附件到达时只做"预填更新"，不改工单状态、不触发 AI 执行
+      const recentWaitingTicket = await db.getAsync<any>(
+        `SELECT * FROM tickets WHERE created_by=? AND status='waiting_input' AND created_at > ? ORDER BY created_at DESC LIMIT 1`,
+        [unified_id, now - 30 * 60 * 1000]
+      );
+
+      if (recentWaitingTicket && filesToSave.some((f: any) => f.summary)) {
+        // ① 更新 notes（追加 OCR 摘要）
+        const ocrItems = filesToSave.filter((f: any) => f.summary).map((f: any) => `【附件: ${f.fileName}】\n${f.summary}`);
+        const newNotesPart = ocrItems.join('\n\n');
+        const updatedNotes = recentWaitingTicket.notes
+          ? `${recentWaitingTicket.notes}\n\n${newNotesPart}`
+          : newNotesPart;
+
+        // ② 写入 ticket_inputs（文件记录）
+        for (const f of filesToSave) {
+          await db.runAsync(
+            `INSERT INTO ticket_inputs (id, ticket_id, field_key, field_type, file_path, file_name, mime_type, created_at)
+             VALUES (?,?,?,?,?,?,?,?)`,
+            [uuidv4(), recentWaitingTicket.id, 'file', 'file', f.fileUrl, f.fileName, f.fileType === 'image' ? 'image/jpeg' : 'application/pdf', now]
+          );
+        }
+
+        // ③ 从 OCR 摘要中提取报告上的患者姓名、年龄、性别
+        const allSummaryText = filesToSave.map((f: any) => f.summary || '').join('\n');
+        const reportNameMatch = allSummaryText.match(/(?:姓\s*名|患者|病人|受检者|体检人)[：:\s]*([^\s,，;；\n]{2,5})/);
+        const reportAgeMatch  = allSummaryText.match(/(?:年\s*龄|Age)[：:\s]*(\d{1,3})\s*(?:岁|歲|years?)?/i);
+        const reportGenderMatch = allSummaryText.match(/(?:性\s*别|Sex|Gender)[：:\s]*(男|女|Male|Female)/i);
+        const reportName   = reportNameMatch ? reportNameMatch[1].trim() : '';
+        const reportAge    = reportAgeMatch ? reportAgeMatch[1] : '';
+        const reportGender = reportGenderMatch ? reportGenderMatch[1] : '';
+
+        // ④ 判断本人/代问：比对报告上的姓名和工单当前的 patient_name
+        const ticketPatientName = (recentWaitingTicket.patient_name || '').trim();
+        const isSamePatient = !reportName || reportName === ticketPatientName
+          || ticketPatientName.includes(reportName) || reportName.includes(ticketPatientName);
+
+        // ⑤ 智能更新 prefilled_values
+        let existingPrefilled: Record<string, any> = {};
+        try { if (recentWaitingTicket.prefilled_values) existingPrefilled = JSON.parse(recentWaitingTicket.prefilled_values); } catch { /* ignore */ }
+
+        // 更新附件列表
+        const existingFiles = existingPrefilled.prefilled_files || [];
+        const newFiles = filesToSave.map((f: any) => ({
+          name: f.fileName || '附件',
+          url: f.fileUrl,
+          type: f.fileType || 'file',
+          summary: f.summary || '',
+        }));
+        existingPrefilled.prefilled_files = [...existingFiles, ...newFiles];
+
+        if (isSamePatient) {
+          // 本人：补充缺失字段
+          if (reportAge && !existingPrefilled.patient_age) existingPrefilled.patient_age = reportAge;
+          if (reportGender && !existingPrefilled.gender) existingPrefilled.gender = reportGender;
+        } else {
+          // 代问：标记不是本人，填入报告上的患者信息
+          existingPrefilled.default_is_self = false;
+          existingPrefilled.report_patient_name = reportName;
+          if (reportAge) existingPrefilled.report_patient_age = reportAge;
+          if (reportGender) existingPrefilled.report_patient_gender = reportGender;
+          console.log(`[Orch/Ingest] 👥 代问检测：工单患者=${ticketPatientName}，报告患者=${reportName}，default_is_self=false`);
+        }
+
+        const updatedPrefilledJson = JSON.stringify(existingPrefilled);
+
+        // ⑥ 只更新 notes + prefilled_values，不改 status
         await db.runAsync(
-          `INSERT INTO user_recent_files (id, user_id, file_url, file_name, file_type, summary, content_hash, created_at)
-           VALUES (?,?,?,?,?,?,NULL,?)`,
-          [fileId, unified_id, media_url, file_name || '未命名附件', file_type, content.slice(0, 500), now]
+          `UPDATE tickets SET notes=?, prefilled_values=?, updated_at=? WHERE id=?`,
+          [updatedNotes, updatedPrefilledJson, now, recentWaitingTicket.id]
         );
-        // 清理超过24小时的过期附件
-        const cutoff24h = now - 24 * 60 * 60 * 1000;
-        await db.runAsync(`DELETE FROM user_recent_files WHERE created_at < ?`, [cutoff24h]);
-        console.log(`[Orch/Ingest] 📎 保存用户 ${unified_id} 最近24小时附件: ${file_name} (${media_url})`);
 
-        // ── 异步计算文件内容 MD5，用于真正的内容去重 ──────────────────────────
-        // 不阻塞 ingest 响应，后台下载计算
-        (async () => {
-          try {
-            const https = await import('https');
-            const http  = await import('http');
-            const crypto = await import('crypto');
-            const fetchModule = media_url.startsWith('https') ? https : http;
-            const hash = crypto.createHash('md5');
-            await new Promise<void>((resolve, reject) => {
-              fetchModule.get(media_url, (resp) => {
-                if (resp.statusCode && resp.statusCode >= 400) {
-                  reject(new Error(`HTTP ${resp.statusCode}`)); return;
-                }
-                resp.on('data', (chunk: Buffer) => hash.update(chunk));
-                resp.on('end', resolve);
-                resp.on('error', reject);
-              }).on('error', reject);
-            });
-            const md5 = hash.digest('hex');
-            await db.runAsync(`UPDATE user_recent_files SET content_hash=? WHERE id=?`, [md5, fileId]);
-            console.log(`[Orch/Ingest] 🔑 MD5 计算完成 file=${file_name} hash=${md5.slice(0,8)}…`);
-          } catch (hashErr: any) {
-            console.warn(`[Orch/Ingest] ⚠️ MD5 计算失败 file=${file_name}: ${hashErr.message}`);
-            // 失败不影响功能，content_hash 保持 NULL，回退到文件名去重
-          }
-        })();
-
-      } catch (err: any) {
-        console.warn(`[Orch/Ingest] 保存附件失败:`, err.message);
+        console.log(`[Orch/Ingest] 📋 工单 ${recentWaitingTicket.id} 预填更新完成（状态保持 waiting_input），isSamePatient=${isSamePatient}，reportName=${reportName || '(未提取到)'}`);
       }
     }
 
@@ -348,23 +510,52 @@ agentRouter.post('/ingest', async (req, res) => {
 /**
  * POST /api/orch/identity-sync
  * 轻量接口：juhe-api / 其他渠道上报身份信息，不触发 Agent。
- * 用于同步 conv_id、unionid 到 channel_identities。
+ * 用于同步 conv_id、unionid、avatar 到 channel_identities，并检测跨渠道匹配。
  */
 agentRouter.post('/identity-sync', async (req, res) => {
   try {
-    const { channel, channel_uid, conv_id, display_name, unionid } = req.body;
+    const { channel, channel_uid, conv_id, display_name, unionid, avatar } = req.body;
     if (!channel || !channel_uid) {
       return res.status(400).json({ error: 'channel and channel_uid are required' });
     }
-    await resolveIdentity(
+    const result = await resolveIdentity(
       channel, channel_uid,
       display_name || channel_uid,
       conv_id || '',
-      { unionid: unionid || null, conv_id: conv_id || null }
+      { unionid: unionid || null, conv_id: conv_id || null, avatar: avatar || null }
     );
-    res.json({ ok: true, channel, channel_uid });
+    res.json({
+      ok: true, channel, channel_uid,
+      unified_id:      result.unified_id,
+      match_result:    result.match_result    || null,
+      merge_candidate: result.merge_candidate || null,
+    });
   } catch (err: any) {
     console.error('[IdentitySync] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/orch/identity-merge
+ * 管理员手动确认合并两个 unified_id。
+ */
+agentRouter.post('/identity-merge', async (req, res) => {
+  try {
+    const { unified_id_from, unified_id_to } = req.body;
+    if (!unified_id_from || !unified_id_to) {
+      return res.status(400).json({ error: 'unified_id_from and unified_id_to are required' });
+    }
+    await db.runAsync(
+      `UPDATE skill_platform.channel_identities
+       SET unified_id = $1, updated_at = now()
+       WHERE unified_id = $2`,
+      [unified_id_to, unified_id_from]
+    );
+    console.log(`[Identity] 手动合并: ${unified_id_from} → ${unified_id_to}`);
+    res.json({ ok: true, merged_from: unified_id_from, merged_to: unified_id_to });
+  } catch (err: any) {
+    console.error('[IdentityMerge] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
