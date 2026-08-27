@@ -397,7 +397,7 @@ agentRouter.post('/ingest', async (req, res) => {
         let existingPrefilled: Record<string, any> = {};
         try { if (recentWaitingTicket.prefilled_values) existingPrefilled = JSON.parse(recentWaitingTicket.prefilled_values); } catch { /* ignore */ }
 
-        // 更新附件列表
+        // 更新附件列表（带去重：按 URL 和文件名去重）
         const existingFiles = existingPrefilled.prefilled_files || [];
         const newFiles = filesToSave.map((f: any) => ({
           name: f.fileName || '附件',
@@ -405,7 +405,20 @@ agentRouter.post('/ingest', async (req, res) => {
           type: f.fileType || 'file',
           summary: f.summary || '',
         }));
-        existingPrefilled.prefilled_files = [...existingFiles, ...newFiles];
+        // 去重：已有的 URL 集合 + 已有的文件名集合
+        const existingUrls = new Set(existingFiles.map((f: any) => f.url));
+        const existingNames = new Set(existingFiles.map((f: any) => (f.name || '').toLowerCase()));
+        const dedupedNew = newFiles.filter((f: any) => {
+          const url = f.url || '';
+          const name = (f.name || '').toLowerCase();
+          // 同 URL 或同文件名的都跳过
+          if (existingUrls.has(url)) return false;
+          if (name && existingNames.has(name)) return false;
+          existingUrls.add(url);
+          existingNames.add(name);
+          return true;
+        });
+        existingPrefilled.prefilled_files = [...existingFiles, ...dedupedNew];
 
         if (isSamePatient) {
           // 本人：补充缺失字段
@@ -420,6 +433,36 @@ agentRouter.post('/ingest', async (req, res) => {
           console.log(`[Orch/Ingest] 👥 代问检测：工单患者=${ticketPatientName}，报告患者=${reportName}，default_is_self=false`);
         }
 
+        // ── OCR 智能预填：报告类型 + 补充信息（与 agentService 保持一致）────────
+        const allIngestSummary = existingPrefilled.prefilled_files.map((f: any) => f.summary || '').join('\n');
+        if (allIngestSummary) {
+          if (!existingPrefilled.reportType) {
+            if (/检验|化验|血常规|尿常规|生化|血液/.test(allIngestSummary)) {
+              existingPrefilled.reportType = '检验报告';
+            } else if (/影像|CT|MRI|X[光线]|超声|B超|彩超|胸片|磁共振/.test(allIngestSummary)) {
+              existingPrefilled.reportType = '影像报告';
+            } else if (/体检|健康检查|体格检查/.test(allIngestSummary)) {
+              existingPrefilled.reportType = '体检报告';
+            } else {
+              existingPrefilled.reportType = '其他';
+            }
+          }
+          if (!existingPrefilled.extraInfo) {
+            const ocrExtracts = existingPrefilled.prefilled_files
+              .filter((f: any) => f.summary)
+              .map((f: any) => {
+                let text = f.summary;
+                const innerMatch = text.match(/\[图片内容[：:]\s*([\s\S]*)\]/);
+                if (innerMatch) text = innerMatch[1];
+                return text.trim();
+              })
+              .filter(Boolean);
+            if (ocrExtracts.length > 0) {
+              existingPrefilled.extraInfo = ocrExtracts.join('\n\n').slice(0, 2000);
+            }
+          }
+        }
+
         const updatedPrefilledJson = JSON.stringify(existingPrefilled);
 
         // ⑥ 只更新 notes + prefilled_values，不改 status
@@ -428,7 +471,7 @@ agentRouter.post('/ingest', async (req, res) => {
           [updatedNotes, updatedPrefilledJson, now, recentWaitingTicket.id]
         );
 
-        console.log(`[Orch/Ingest] 📋 工单 ${recentWaitingTicket.id} 预填更新完成（状态保持 waiting_input），isSamePatient=${isSamePatient}，reportName=${reportName || '(未提取到)'}`);
+        console.log(`[Orch/Ingest] 📋 工单 ${recentWaitingTicket.id} 预填更新完成（状态保持 waiting_input），isSamePatient=${isSamePatient}，reportName=${reportName || '(未提取到)'}，files=${existingPrefilled.prefilled_files.length}`);
       }
     }
 
