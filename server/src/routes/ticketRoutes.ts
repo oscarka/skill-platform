@@ -110,16 +110,17 @@ ticketRouter.post('/', async (req, res) => {
     const expiresAt = (now + (await EXPIRY_DAYS()) * 24 * 60 * 60 * 1000);
 
     const agentId = req.body.agent_id || 'default';
+    const prefilledValues = req.body.prefilled_values || null;
 
     await db.runAsync(
       `INSERT INTO tickets
         (id, skill_id, token, title, patient_name, patient_phone, notes,
-         created_by, status, return_count, expires_at, created_at, updated_at, agent_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         created_by, status, return_count, expires_at, created_at, updated_at, agent_id, prefilled_values)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, skill_id, token,
        title || `${skill.name} — ${new Date(now).toLocaleDateString('zh-CN')}`,
        patient_name || null, patient_phone || null, notes || null,
-       created_by || null, 'created', 0, expiresAt, now, now, agentId]
+       created_by || null, 'created', 0, expiresAt, now, now, agentId, prefilledValues]
     );
 
     const ticket = await db.getAsync<TicketRecord>('SELECT * FROM tickets WHERE id=?', [id]);
