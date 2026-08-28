@@ -202,6 +202,9 @@ export function initDb(): void {
     // ── Multi-Agent 改造 v1：agent_profiles 新增分诊示例与知识库工具配置字段 ──
     `ALTER TABLE agent_profiles ADD COLUMN routing_examples TEXT DEFAULT NULL`,
     `ALTER TABLE agent_profiles ADD COLUMN knowledge_config TEXT DEFAULT NULL`,
+    // ── 新用户欢迎语：welcome_msg 欢迎语文本（空字符串=关闭），welcome_enabled 是否启用 ──
+    `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS welcome_msg TEXT DEFAULT ''`,
+    `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS welcome_enabled INTEGER DEFAULT 0`,
     // agent_id：守卫与工单绑定到具体 Agent 实例（多 Agent 隔离用）
     `ALTER TABLE skill_confirm_guards ADD COLUMN agent_id TEXT DEFAULT 'default'`,
     `ALTER TABLE tickets ADD COLUMN agent_id TEXT DEFAULT 'default'`,

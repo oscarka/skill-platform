@@ -44,6 +44,9 @@ interface AgentProfile {
   skill_ids:        string[];
   routing_examples: RoutingExamples | null;  // null = 使用系统默认分诊提示词
   knowledge_config: KnowledgeConfig | null;  // null = 使用系统默认知识库逻辑
+  // 新用户欢迎语
+  welcome_enabled:  boolean;
+  welcome_msg:      string;
 }
 
 const DEFAULT_PROFILE: AgentProfile = {
@@ -58,6 +61,8 @@ const DEFAULT_PROFILE: AgentProfile = {
   skill_ids:        [],
   routing_examples: null,
   knowledge_config: null,
+  welcome_enabled:  false,
+  welcome_msg:      '',
 };
 
 // 新建 Agent 时的分诊配置模板（用户可在此基础上修改）
@@ -321,6 +326,71 @@ export default function AgentProfilePage() {
             onChange={e => updateField('reassurance_tpl', e.target.value)}
             placeholder="{客户姓名}您好，我正在为您分析，请稍等约2分钟～"
           />
+        )}
+      </Section>
+
+      {/* ── 👋 新用户欢迎语 ───────────────────────────────────────────────── */}
+      <Section title="👋 新用户欢迎语">
+        <p style={{ fontSize: '.82rem', color: 'var(--muted)', margin: '0 0 14px' }}>
+          客户第一次发消息时自动发送欢迎语，并收集其称呼和健康基本信息。<br />
+          <span style={{ color: '#94a3b8' }}>触发条件：开关已开启 + 客户没有任何历史对话 + LLMWiki 档案为新建状态。</span>
+        </p>
+
+        {/* 开关 */}
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14,
+          cursor: 'pointer',
+        }}>
+          <div
+            onClick={() => updateField('welcome_enabled', !profile.welcome_enabled)}
+            style={{
+              width: 40, height: 22, borderRadius: 11,
+              background: profile.welcome_enabled ? '#6366f1' : 'rgba(255,255,255,.15)',
+              position: 'relative', cursor: 'pointer', transition: 'background .2s',
+              flexShrink: 0,
+            }}
+          >
+            <div style={{
+              position: 'absolute', top: 3, left: profile.welcome_enabled ? 21 : 3,
+              width: 16, height: 16, borderRadius: '50%', background: '#fff',
+              transition: 'left .2s',
+            }} />
+          </div>
+          <span style={{ fontSize: '.9rem', fontWeight: 500 }}>
+            {profile.welcome_enabled ? '✅ 欢迎语已开启' : '⚪ 关闭（内测模式）'}
+          </span>
+        </label>
+
+        {/* 欢迎语编辑框 */}
+        <Label text="欢迎语内容">
+          <textarea
+            className="form-input"
+            rows={6}
+            value={profile.welcome_msg}
+            onChange={e => updateField('welcome_msg', e.target.value)}
+            placeholder={`您好！我是[助手名] 🌿
+
+认识您很高兴！想先问几个小问题，帮我更好地了解您：
+
+1. 怎么称呼您？
+2. 最近最想关注哪方面的健康（睡眠、饮食、血压、体重……）？
+3. 年龄和性别方便告诉我吗？
+
+期待您的回复～`}
+            style={{ fontFamily: 'inherit', lineHeight: 1.7 }}
+          />
+        </Label>
+
+        {/* 预览提示 */}
+        {profile.welcome_msg && (
+          <div style={{
+            background: 'rgba(99,102,241,.06)', border: '1px solid rgba(99,102,241,.2)',
+            borderRadius: 8, padding: '12px 14px', fontSize: '.82rem', color: '#c7d2fe',
+            marginTop: 4,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 6, color: '#a5b4fc' }}>👁️ 预览（客户将会看到）</div>
+            <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{profile.welcome_msg}</div>
+          </div>
         )}
       </Section>
 

@@ -668,6 +668,9 @@ interface AgentProfile {
   // RoutingExamples = 已配置，routeDecision 将使用动态模板
   routing_examples: RoutingExamples | null;
   knowledge_config: KnowledgeConfig | null;
+  // 新用户欢迎语
+  welcome_enabled:  boolean;
+  welcome_msg:      string;
 }
 
 // Profile 缓存：key = agentId，支持多实例并发缓存
@@ -699,6 +702,8 @@ async function loadAgentProfile(agentId?: string): Promise<AgentProfile> {
       skill_ids:        safeParseJson(src.skill_ids, []),
       routing_examples: safeParseJson(src.routing_examples, null),   // null = 未配置，使用原始提示词
       knowledge_config: safeParseJson(src.knowledge_config, null),    // null = 未配置，使用原有 WIKI 逻辑
+      welcome_enabled:  !!(src.welcome_enabled),
+      welcome_msg:      src.welcome_msg || '',
     } : defaultProfile();
     _profileCacheMap.set(id, { profile, expireAt: Date.now() + 60_000 });
     return profile;
@@ -718,7 +723,7 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
     await db.runAsync(
       `UPDATE agent_profiles SET name=?, role_desc=?, reply_style=?, service_flow=?,
        taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?,
-       routing_examples=?, knowledge_config=?, updated_at=?
+       routing_examples=?, knowledge_config=?, welcome_enabled=?, welcome_msg=?, updated_at=?
        WHERE id=?`,
       [
         data.name ?? '服务助理',
@@ -733,6 +738,8 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
         // routing_examples/knowledge_config: 若前端未传入（undefined），保持 null；若明确传入则写入
         data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
         data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
+        data.welcome_enabled ? 1 : 0,
+        data.welcome_msg ?? '',
         now,
         id,
       ]
@@ -740,8 +747,9 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
   } else {
     await db.runAsync(
       `INSERT INTO agent_profiles (id,name,role_desc,reply_style,service_flow,taboos,
-       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,routing_examples,knowledge_config,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       reassurance_mode,reassurance_tpl,skill_mode,skill_ids,routing_examples,knowledge_config,
+       welcome_enabled,welcome_msg,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
         data.name ?? '服务助理',
@@ -755,6 +763,8 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
         JSON.stringify(data.skill_ids ?? []),
         data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
         data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
+        data.welcome_enabled ? 1 : 0,
+        data.welcome_msg ?? '',
         now, now,
       ]
     );
@@ -781,6 +791,8 @@ export async function listAgentProfiles(): Promise<AgentProfile[]> {
       skill_ids:        safeParseJson(src.skill_ids, []),
       routing_examples: safeParseJson(src.routing_examples, null),
       knowledge_config: safeParseJson(src.knowledge_config, null),
+      welcome_enabled:  !!(src.welcome_enabled),
+      welcome_msg:      src.welcome_msg || '',
     }));
   } catch { return []; }
 }
@@ -807,6 +819,8 @@ function defaultProfile(): AgentProfile {
     skill_ids: [],
     routing_examples: null,   // 默认不配置，routeDecision 使用原始医疗提示词
     knowledge_config: null,    // 默认不配置，使用原有 WIKI 工具逻辑
+    welcome_enabled:  false,
+    welcome_msg:      '',
   };
 }
 
@@ -2570,6 +2584,37 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   console.log(`[AgentService] Profile: agent_id=${profile.id} name=${profile.name} skill_mode=${profile.skill_mode} reassurance=${profile.reassurance_mode}`);
   const availableSkills = await getAvailableSkills(profile);
   console.log(`[AgentService] Available skills: ${availableSkills.map(s => s.name).join(', ') || '(none)'}`);
+
+  // ── Step 1.5: 新用户欢迎语（触发条件：启用 + 零历史 + 新用户模式）────────────
+  {
+    const wikiCtxForWelcome = (req as any)._wikiContext as { mode: string } | undefined;
+    const isNewUser = wikiCtxForWelcome?.mode === 'new_user' || wikiCtxForWelcome?.mode === 'auto_created';
+    const hasNoHistory = !req.history || req.history.length === 0;
+    if (profile.welcome_enabled && profile.welcome_msg && isNewUser && hasNoHistory) {
+      const welcomeText = profile.welcome_msg;
+      console.log(`[AgentService] 🎉 新用户欢迎语触发: userId=${userId} mode=${wikiCtxForWelcome?.mode}`);
+      void appendTaskEvent(requestId, 'welcome_sent', {
+        userId,
+        wiki_mode: wikiCtxForWelcome?.mode,
+        welcome_msg_preview: welcomeText.slice(0, 100),
+        reason: '新用户首次消息，发送欢迎语',
+      });
+      void updateAgentTask(requestId, {
+        status: 'done',
+        routeType: 'welcome',
+        replyContent: welcomeText,
+        endedAt: Date.now(),
+        durationMs: Date.now() - taskStartMs,
+      });
+      return {
+        request_id: requestId,
+        status: 'done',
+        reply: welcomeText,
+        delivery,
+        skill_route: undefined,
+      };
+    }
+  }
 
   // 检查是否前端/守卫强制指定了 skill_id（守卫确认 yes 时注入，优先级最高）
   const forcedSkillId: string | null = (req as any).skill_id || null;

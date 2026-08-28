@@ -530,6 +530,9 @@ export async function initDb(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_meta_eval_runs_agent ON meta_agent_eval_runs(agent_id, round)`,
       // 代问场景：actual_patient_id 存储真实患者的 LLMWiki userId
       `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS actual_patient_id TEXT DEFAULT NULL`,
+      // ── 新用户欢迎语：welcome_msg 欢迎语文本（空字符串=关闭），welcome_enabled 是否启用 ──
+      `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS welcome_msg TEXT DEFAULT ''`,
+      `ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS welcome_enabled INTEGER DEFAULT 0`,
     ];
 
     for (const sql of migrations) {
