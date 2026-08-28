@@ -1565,7 +1565,7 @@ async function buildReassuranceMessage(
   // AI 模式：用智能模板（基于 skillName 动态生成，稳定可靠）
   // 避免直接调 Gemini 生成短句——maxTokens=100 时返回结果不稳定
   const verb = skillName ? `为您进行「${skillName}」分析` : '为您分析';
-  return `${fromName}您好，我正在${verb}，请稍等约 2 分钟，马上回复您～`;
+  return `好的，我正在${verb}，请稍等约 2 分钟，马上回复您～`;
 }
 
 // ─── 4. 普通聊天：直接 AI 回复 ────────────────────────────────────────────────
@@ -1580,6 +1580,7 @@ async function handleChatReply(
   const { content, meta, history = [], notes = '' } = req;
   const wikiCtx = (req as any)._wikiContext as { user_profile: string; health_wiki: string } | undefined;
   const fromName = resolvePreferredClientName(wikiCtx?.user_profile, meta.from_name);
+  console.log(`[GreetingDebug] handler=chat fromName=${fromName} metaName=${meta.from_name} hasProfile=${!!wikiCtx?.user_profile}`);
   const { app } = delivery;
 
   const tabooText = profile.taboos.length ? `\n\n禁忌：\n${profile.taboos.map(t => `- ${t}`).join('\n')}` : '';
@@ -1595,6 +1596,7 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
 
 任务：用自然、亲切的语气回复客户消息。
 要求：
+- 不要每条回复都以"${fromName}您好"或名字开头打招呼，像正常对话一样自然回复，名字只在必要时偶尔使用
 - 不要使用 Markdown 格式（不要**加粗**、不要#标题、不要列表符号）
 - 如客户涉及具体健康问题，结合健康档案直接给出简洁的专业建议
 - 绝对不要说"正在分析"、"请稍等"、"马上回复"等让用户等待的话，你必须直接回答
@@ -1630,6 +1632,7 @@ ${notes || '（无特殊备注）'}${profileBlock}${healthBlock}
   });
 
   // ── LLMWiki: 后台写日志 ──
+  console.log(`[GreetingDebug] chat reply_prefix=${reply.trim().slice(0,100)}`);
   backgroundPostLog(meta.user_id, content, reply.trim());
 
   return {
@@ -2089,7 +2092,7 @@ async function handleHealthSkill(
     wikiCtx?.user_profile ? `【客户画像】\n${wikiCtx.user_profile}` : '',
     wikiCtx?.health_wiki  ? `【健康档案】\n${wikiCtx.health_wiki}` : '',
     `【当前问题】\n${content}`,
-    `\n请以亲切专业的口吻回复，不要使用 Markdown 格式，称呼客户为"${fromName}"。`,
+    `\n请以亲切专业的口吻回复，不要使用 Markdown 格式，如需提到客户时可用"${fromName}"称呼，但不要每条回复都以名字开头打招呼，保持自然对话节奏。`,
   ].filter(Boolean).join('\n\n');
 
   void appendTaskEvent(requestId, 'skill_input', {
