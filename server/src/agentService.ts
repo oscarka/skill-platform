@@ -721,25 +721,40 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
   );
   if (existing) {
     await db.runAsync(
-      `UPDATE agent_profiles SET name=?, role_desc=?, reply_style=?, service_flow=?,
-       taboos=?, reassurance_mode=?, reassurance_tpl=?, skill_mode=?, skill_ids=?,
-       routing_examples=?, knowledge_config=?, welcome_enabled=?, welcome_msg=?, updated_at=?
+      `UPDATE agent_profiles SET
+         name            = COALESCE(?, name),
+         role_desc       = COALESCE(?, role_desc),
+         reply_style     = COALESCE(?, reply_style),
+         service_flow    = COALESCE(?, service_flow),
+         taboos          = COALESCE(?, taboos),
+         reassurance_mode= COALESCE(?, reassurance_mode),
+         reassurance_tpl = COALESCE(?, reassurance_tpl),
+         skill_mode      = COALESCE(?, skill_mode),
+         skill_ids       = COALESCE(?, skill_ids),
+         routing_examples= CASE WHEN ? IS NOT NULL THEN ? ELSE routing_examples END,
+         knowledge_config= CASE WHEN ? IS NOT NULL THEN ? ELSE knowledge_config END,
+         welcome_enabled = COALESCE(?, welcome_enabled),
+         welcome_msg     = COALESCE(?, welcome_msg),
+         updated_at      = ?
        WHERE id=?`,
       [
-        data.name ?? '服务助理',
-        data.role_desc ?? '',
-        data.reply_style ?? '',
-        data.service_flow ?? '',
-        JSON.stringify(data.taboos ?? []),
-        data.reassurance_mode ?? 'ai',
-        data.reassurance_tpl ?? '',
-        data.skill_mode ?? 'auto',
-        JSON.stringify(data.skill_ids ?? []),
-        // routing_examples/knowledge_config: 若前端未传入（undefined），保持 null；若明确传入则写入
+        data.name         !== undefined ? data.name             : null,
+        data.role_desc    !== undefined ? data.role_desc        : null,
+        data.reply_style  !== undefined ? data.reply_style      : null,
+        data.service_flow !== undefined ? data.service_flow     : null,
+        data.taboos       !== undefined ? JSON.stringify(data.taboos) : null,
+        data.reassurance_mode !== undefined ? data.reassurance_mode   : null,
+        data.reassurance_tpl  !== undefined ? data.reassurance_tpl    : null,
+        data.skill_mode   !== undefined ? data.skill_mode       : null,
+        data.skill_ids    !== undefined ? JSON.stringify(data.skill_ids) : null,
+        // routing_examples: CASE WHEN 需要传两次
         data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+        data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
+        // knowledge_config: 同上
         data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
-        data.welcome_enabled ? 1 : 0,
-        data.welcome_msg ?? '',
+        data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
+        data.welcome_enabled  !== undefined ? (data.welcome_enabled ? 1 : 0)         : null,
+        data.welcome_msg      !== undefined ? data.welcome_msg                        : null,
         now,
         id,
       ]
