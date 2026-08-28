@@ -1537,10 +1537,17 @@ function assembleAgentContext(params: {
 
 function resolvePreferredClientName(userProfile?: string, fallbackName?: string): string {
   if (userProfile) {
+    // ① 旧格式：称呼偏好【张先生】 或 称呼偏好：张先生
     const m1 = userProfile.match(/称呼偏好[^\n]*?【([^】]+)】/);
     if (m1 && m1[1]) return m1[1].trim();
-    const m2 = userProfile.match(/称呼偏好[：:]\s*([^\s,，\n]+)/);
-    if (m2 && m2[1]) return m2[1].replace(/^[【"“]|["”】]$/g, '').trim();
+    const m2 = userProfile.match(/称呼偏好[：:]\s*([^\s,，\n【（(]+)/);
+    if (m2 && m2[1]) return m2[1].replace(/^[【\""]|[\"\u201d】]$/g, '').trim();
+    // ② LLMWiki 实际写法：称呼其为张先生 / 可称张先生
+    const m3 = userProfile.match(/(?:称呼其为|称呼为|可称|改称)\s*[\u201c\u2018「『]?([^\s,，。；;\n）)」』\u201d]+)/);
+    if (m3 && m3[1]) return m3[1].replace(/[「』，。\u201d\u2018]$/, '').trim();
+    // ③ wiki index.md 基本信息字段：- 姓名：张先生（...）
+    const m4 = userProfile.match(/[-*]\s*姓名[：:]\s*([^\s（\(，,\n\[【]+)/);
+    if (m4 && m4[1]) return m4[1].trim();
   }
   return fallbackName || '您';
 }
