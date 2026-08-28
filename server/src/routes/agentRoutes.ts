@@ -499,6 +499,7 @@ agentRouter.post('/ingest', async (req, res) => {
         source:     channel,
         source_channel: channel,
         session_id: unified_id,
+        agent_id:   req.body.agent_id || process.env.ACTIVE_AGENT_ID || 'default',
         meta: {
           from_name:       display_name,
           user_id:         unified_id,
@@ -1004,11 +1005,12 @@ const safeParseJson = (v: any, fallback: any) => {
 
 agentRouter.get('/profile', async (_req, res) => {
   try {
-    const row = await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', ['default']);
+    const activeId = process.env.ACTIVE_AGENT_ID || 'default';
+    const row = await db.getAsync<any>('SELECT * FROM agent_profiles WHERE id = ?', [activeId]);
     if (!row) {
       // 返回默认 profile（原始内容，一字未改，仅追加新字段）
       return res.json({
-        id:               'default',
+        id:               activeId,
         name:             '服务助理',
         role_desc:        '专业健康顾问助理，协助客户了解检查报告和日常健康管理',
         reply_style:      '亲切、专业，回复简洁不超过200字',
@@ -1039,8 +1041,9 @@ agentRouter.get('/profile', async (_req, res) => {
 
 agentRouter.put('/profile', async (req, res) => {
   try {
-    const profile = await saveAgentProfile(req.body);
-    console.log(`[AgentRoute] Profile saved: skill_mode=${profile.skill_mode}`);
+    const activeId = process.env.ACTIVE_AGENT_ID || 'default';
+    const profile = await saveAgentProfile(req.body, activeId);
+    console.log(`[AgentRoute] Profile saved (${activeId}): skill_mode=${profile.skill_mode}`);
     res.json(profile);
   } catch (err: any) {
     console.error('[AgentRoute] PUT /profile error:', err.message);

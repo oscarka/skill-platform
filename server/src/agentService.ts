@@ -716,7 +716,7 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
   const id = agentId || DEFAULT_PROFILE_ID;
   const now = Date.now();
   const existing = await db.getAsync<any>(
-    'SELECT id FROM agent_profiles WHERE id = ?',
+    'SELECT * FROM agent_profiles WHERE id = ?',
     [id]
   );
   if (existing) {
@@ -726,20 +726,19 @@ export async function saveAgentProfile(data: Partial<AgentProfile>, agentId?: st
        routing_examples=?, knowledge_config=?, welcome_enabled=?, welcome_msg=?, updated_at=?
        WHERE id=?`,
       [
-        data.name ?? '服务助理',
-        data.role_desc ?? '',
-        data.reply_style ?? '',
-        data.service_flow ?? '',
-        JSON.stringify(data.taboos ?? []),
-        data.reassurance_mode ?? 'ai',
-        data.reassurance_tpl ?? '',
-        data.skill_mode ?? 'auto',
-        JSON.stringify(data.skill_ids ?? []),
-        // routing_examples/knowledge_config: 若前端未传入（undefined），保持 null；若明确传入则写入
-        data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : null,
-        data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : null,
-        data.welcome_enabled ? 1 : 0,
-        data.welcome_msg ?? '',
+        data.name !== undefined ? data.name : (existing.name ?? '服务助理'),
+        data.role_desc !== undefined ? data.role_desc : (existing.role_desc ?? ''),
+        data.reply_style !== undefined ? data.reply_style : (existing.reply_style ?? ''),
+        data.service_flow !== undefined ? data.service_flow : (existing.service_flow ?? ''),
+        data.taboos !== undefined ? JSON.stringify(data.taboos) : (existing.taboos ?? '[]'),
+        data.reassurance_mode !== undefined ? data.reassurance_mode : (existing.reassurance_mode ?? 'ai'),
+        data.reassurance_tpl !== undefined ? data.reassurance_tpl : (existing.reassurance_tpl ?? ''),
+        data.skill_mode !== undefined ? data.skill_mode : (existing.skill_mode ?? 'auto'),
+        data.skill_ids !== undefined ? JSON.stringify(data.skill_ids) : (existing.skill_ids ?? '[]'),
+        data.routing_examples !== undefined ? JSON.stringify(data.routing_examples) : (existing.routing_examples ?? null),
+        data.knowledge_config !== undefined ? JSON.stringify(data.knowledge_config) : (existing.knowledge_config ?? null),
+        data.welcome_enabled !== undefined ? (data.welcome_enabled ? 1 : 0) : (existing.welcome_enabled ?? 0),
+        data.welcome_msg !== undefined ? data.welcome_msg : (existing.welcome_msg ?? ''),
         now,
         id,
       ]
