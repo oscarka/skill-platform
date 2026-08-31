@@ -1462,13 +1462,11 @@ function assembleAgentContext(params: {
   let directive = '';
 
   if (guardStatus === 'new_created' && routeSkillName) {
-    // V3.5：信息式提示 + 括号简介 + 明确不要求确认 + 用户拒绝时的保护语
-    const shortDesc = routeSkillDesc ? `（${routeSkillDesc.slice(0, 60)}）` : '';
-    directive = `[服务匹配提示] 系统检测到用户可能对「${routeSkillName}」感兴趣（置信度：高）。`
-      + `如果当前对话场景自然合适，可顺带提及${shortDesc}；`
-      + `不必要求用户确认，感兴趣自然会主动询问。`
-      + `若用户正在聊别的事，正常回答即可。`
-      + `若用户明确表示不需要推荐、或已有专业服务，不必提及。`;
+    // V中：介绍服务 + 在回复末尾明确问一句（比 V3.5 更主动，比强版更自然）
+    const shortDesc = routeSkillDesc ? `\n服务简介：${routeSkillDesc.slice(0, 150)}` : '';
+    directive = `系统检测到用户对「${routeSkillName}」可能感兴趣（置信度：高）。${shortDesc}`
+      + `\n请向用户自然地介绍该服务，并在回复末尾询问是否想现在使用。`
+      + `（语气自然友好，不要强迫；若用户正在聊别的事，先回答后再顺带提及；若用户明确拒绝则不再推荐）`;
 
 
   } else if (guardStatus === 'confirmed_ticket' && ticketUrl) {
@@ -1485,13 +1483,13 @@ function assembleAgentContext(params: {
       directive = `用户对「${guardSkillName}」服务有意向但尚未确认。`
         + `本次消息话题指向其他方向，请先回答用户的问题，不必重复推荐服务。`;
     } else if ((params as any).isFirstClarify) {
-      // 首次模糊确认 → 软提示，不强制追问
-      directive = `[服务匹配提示] 用户此前对「${guardSkillName}」有一定意向，但尚未明确确认。`
-        + `先回答用户的问题；如果回复末尾有自然的空间，可以轻轻问一句是否想使用，不必强求。`;
+      // 首次模糊确认 → 中版：先回答，末尾明确追问一句
+      directive = `用户刚才的回复意向不明确，是否要使用「${guardSkillName}」服务尚未确认。`
+        + `\n请先简短回答用户的问题，然后**在回复末尾自然地询问**：「您是想现在使用「${guardSkillName}」服务吗？」（语气自然，不要强迫）。`;
     } else {
       // 已追问过或用户在提问 → 先回答，顺带引导
       directive = `用户对「${guardSkillName}」服务有意向但尚未明确确认。`
-        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾轻描淡写地引导用户确认是否使用该服务（不要强迫）。`;
+        + `\n请先回答用户的问题，如果对话场景合适，在回复末尾引导用户确认是否使用该服务（不要强迫）。`;
     }
 
   } else if (guardStatus === 'none' && existingTicket) {
@@ -2772,70 +2770,28 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
       }
       // currentGuardStatus 保持 'none'，允许规则 B 建新守卫
     } else {
-      // ─ 同 skill 守卫 OR 确认/拒绝消息（routing=none/low）→ 守卫 AI 判断 ────
-      console.log(`[SkillGuard] 🔍 守卫判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name} routeConf=${routeConfidence}`);
+      // ─ 同 skill 守卫 OR 确认/拒绝消息 → 纯规则判断（替代原 AI2 guardSystemPrompt）────
+      // Phase 1 改动：移除 AI2（guardSystemPrompt）判断，改为规则检测 + 交给 Main Agent 引导
+      // 原因：AI2 频繁判断错误（把「好的」判为 confirm=yes，把「帮我做」判为 unclear），
+      //       导致守卫状态错误，污染 Main Agent 的 directive，影响最终回复质量。
+      console.log(`[SkillGuard] 🔍 守卫规则判断 guardId=${activeGuardRow.id} skill=${activeGuardRow.skill_name}`);
 
-      const historyAfterSuggest = (req.history || [])
-        .filter((h: any) => !h.ts || h.ts >= activeGuardRow.suggest_ts)
-        .map((h: any) => `${h.role === 'user' ? '用户' : '助手'}：${h.content}`)
-        .join('\n');
+      const msgLower = req.content.toLowerCase();
 
-      const guardSystemPrompt = `你是一个 JSON 状态判断器。禁止输出推理过程或解释，只输出一个 JSON 对象，不包含任何其他文字。
+      // ── 明确拒绝词检测 ────────────────────────────────────────────────────────
+      const declinePatterns = [
+        '不用了', '不需要', '不要了', '算了', '不了', '暂时不', '以后再说',
+        '不感兴趣', '不想', '取消', '放弃', '不做了',
+      ];
+      const isExplicitDecline = declinePatterns.some(p => req.content.includes(p));
 
-背景：AI助手之前向用户推荐了「${activeGuardRow.skill_name}」服务。
-
-对话记录：
-${historyAfterSuggest || '（推荐后暂无其他对话）'}
-
-用户最新消息：「${req.content}」
-
-请判断：
-- interest: "yes"（未明确拒绝）或 "no"（明确说不用/算了）
-- confirm: "yes"（有启动意图：「帮我分析/做/开始」「开始吧」「确认」「我要用」，或「好的/行/可以+动词」）
-  或 "no"（明确拒绝），或 "unclear"（仅单独「好的」「嗯」等无动词，或在提问）
-
-输出示例：
-- 用户说「帮我开始分析吧」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的，帮我做」→ {"interest": "yes", "confirm": "yes"}
-- 用户说「好的」（单独）→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「这个多久出结果？」→ {"interest": "yes", "confirm": "unclear"}
-- 用户说「不用了」→ {"interest": "no", "confirm": "no"}
-
-只输出 JSON，不输出任何其他文字：`;
-
-      const guardUserMsg = `根据以上对话，输出判断结果 JSON：`;
-      let guardResult: { interest: 'yes'|'no'; confirm: 'yes'|'no'|'unclear' } = { interest: 'yes', confirm: 'unclear' };
-
-      try {
-        const t0 = Date.now();
-        const raw = await callGeminiMessages(guardSystemPrompt, [{ role: 'user', content: guardUserMsg }], apiKey, 1024);
-        const durationMs = Date.now() - t0;
-        const cleanRaw = raw.replace(/```[a-z]*\n?/gi, '').trim();
-        const jsonMatch = cleanRaw.match(/\{[\s\S]*\}/);
-        let parsed: any = {};
-        if (jsonMatch) { try { parsed = JSON.parse(jsonMatch[0]); } catch { /* keep {} */ } }
-        guardResult = {
-          interest: parsed.interest === 'no' ? 'no' : 'yes',
-          confirm:  ['yes','no','unclear'].includes(parsed.confirm) ? parsed.confirm : 'unclear',
-        };
-        console.log(`[SkillGuard] 🤔 interest=${guardResult.interest} confirm=${guardResult.confirm} (${durationMs}ms) raw="${raw.slice(0,100)}"`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
-          guardId: activeGuardRow.id,
-          skillName: activeGuardRow.skill_name,
-          interest: guardResult.interest,
-          confirm: guardResult.confirm,
-          durationMs,
-          rawResult: raw.slice(0, 300),
-        });
-      } catch (e: any) {
-        console.warn(`[SkillGuard] ⚠️ 判断失败，保持 unclear: ${e.message}`);
-        void appendTaskEvent(requestId, 'skill_guard_judgment', {
-          guardId: activeGuardRow.id,
-          error: e.message,
-          interest: 'yes',
-          confirm: 'unclear',
-        });
-      }
+      // ── 明确确认词检测（必须含动词意图，单独「好的」「嗯」不触发）────────────────
+      const confirmPatterns = [
+        '帮我分析', '帮我做', '帮我开始', '开始分析', '开始吧', '我要用', '我想用',
+        '确认', '开始吧', '现在开始', '好的，帮', '行，帮', '可以，帮',
+        '好，开始', '好的，开始', '我确认', '同意', '开始做吧', '做吧',
+      ];
+      const isExplicitConfirm = confirmPatterns.some(p => req.content.includes(p));
 
       const closeGuard = async (reason: string) => {
         await db.runAsync(
@@ -2850,27 +2806,31 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
         });
       };
 
-      if (guardResult.interest === 'no') {
+      void appendTaskEvent(requestId, 'skill_guard_judgment', {
+        guardId: activeGuardRow.id,
+        skillName: activeGuardRow.skill_name,
+        method: 'rule_based',  // 标记为规则判断（非 AI）
+        isExplicitDecline,
+        isExplicitConfirm,
+        userMsg: req.content.slice(0, 100),
+      });
+
+      if (isExplicitDecline) {
         await closeGuard('user_declined');
         currentGuardStatus    = 'declined';
         currentGuardSkillName = activeGuardRow.skill_name;
         selectedSkillId   = null;
-      } else if (guardResult.confirm === 'yes') {
+        console.log(`[SkillGuard] ❌ 规则检测：用户明确拒绝`);
+      } else if (isExplicitConfirm) {
         await closeGuard('user_confirmed');
-        console.log(`[SkillGuard] ✅ 用户确认，执行 skill ${activeGuardRow.skill_id}`);
+        console.log(`[SkillGuard] ✅ 规则检测：用户明确确认，执行 skill ${activeGuardRow.skill_id}`);
         currentGuardStatus    = 'confirmed_ticket';
         currentGuardSkillName = activeGuardRow.skill_name;
-        // 确认消息本身 routing 可能是 none → 强制注入守卫的 skill
         selectedSkillId   = activeGuardRow.skill_id;
         selectedSkillName = activeGuardRow.skill_name;
         selectedSkillDesc = availableSkills.find(s => s.id === activeGuardRow.skill_id)?.description || null;
-      } else if (guardResult.confirm === 'no') {
-        await closeGuard('user_declined_explicit');
-        currentGuardStatus    = 'declined';
-        currentGuardSkillName = activeGuardRow.skill_name;
-        selectedSkillId   = null;
       } else {
-        // unclear
+        // unclear → 交给 Main Agent 在 directive 引导下自然推进确认
         const isUserAsking = req.content.includes('？') || req.content.includes('?');
         const prevClarifyCount = await db.getAsync<any>(
           `SELECT COUNT(*) as cnt FROM agent_task_events
@@ -2883,13 +2843,14 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
           void appendTaskEvent(requestId, 'skill_guard_clarify', {
             guardId: activeGuardRow.id,
             skillName: activeGuardRow.skill_name,
-            note: '首次unclear→交给Agent引导',
+            note: '首次unclear→Agent明确追问',
           });
           isFirstClarify = true;
         }
         currentGuardStatus    = 'pending_unclear';
         currentGuardSkillName = activeGuardRow.skill_name;
         selectedSkillId   = null;
+        console.log(`[SkillGuard] 🟡 规则检测：意向不明，isFirstClarify=${isFirstClarify}，交给 Agent 引导`);
       }
     }
   }
@@ -2932,25 +2893,10 @@ ${historyAfterSuggest || '（推荐后暂无其他对话）'}
     currentGuardStatus    = 'new_created';
     currentGuardSkillName = newGuardSkillName;
 
-    // ── 快捷路径：用户已上传文件 + 明确要求分析 → 跳过介绍轮，直接建工单 ──────
-    // 场景：用户先发 PDF（ingest 暂存），再发「能做报告分析吗」
-    // routingContent 里含「用户近期上传的文件」说明文件上下文已注入，
-    // 用户明确要分析，不需要再走一轮「介绍服务→等确认」的守卫流程
-    const hasFileContext = routingContent.includes('用户近期上传的文件');
-    if (hasFileContext) {
-      console.log(`[SkillGuard] ⚡ 文件+分析意图快捷路径：跳过介绍轮，直接建工单 skill=${newGuardSkillName}`);
-      // 关闭刚建的守卫（不需要它了）
-      await db.runAsync(
-        `UPDATE skill_confirm_guards SET status='closed', close_reason='file_direct_ticket' WHERE id=?`,
-        [guardId],
-      ).catch(() => {});
-      currentGuardStatus    = 'confirmed_ticket';
-      selectedSkillId   = newGuardSkillId;
-      selectedSkillName = newGuardSkillName;
-      selectedSkillDesc = availableSkills.find(s => s.id === newGuardSkillId)?.description || null;
-    } else {
-      selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务）
-    }
+    // Phase 1 改动：移除文件快捷路径（file_direct_ticket）
+    // 原因：该路径在用户上传文件后直接跳过确认建工单，违反「用户必须明确确认」原则。
+    //       现在统一走 Agent directive 引导 → 用户确认 → 建工单，与主流程一致。
+    selectedSkillId = null;  // → handleHealthDirect（Agent 通过 directive 介绍服务，用户确认后建工单）
   }
 
 
