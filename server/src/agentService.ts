@@ -1313,48 +1313,49 @@ async function routeDecision(
   // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
   let systemPrompt: string;
   if (!routingExamples) {
-    // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
-    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，从可用服务列表中找出最相关的候选项。
+    // ── 纯语义相关性评分 prompt（不嵌入意图判断）───────────────────
+    systemPrompt = `你是语义相关性评分器。对对话内容和每个専项服务的主题、功能、覆盖范围进行语义匹配，评估内容相关程度。
 
-判断标准：
-- relevance=0.8以上：客户明确表达要使用该服务（如"帮我做营养分析""开始AI营养师"）
-- relevance=0.4~0.79：客户有相关健康问题但无明确使用意图（如"我血糖高怎么办"）
-- relevance=0.39以下：关联性较弱
+评分原则：
+- 只评估「对话内容」与「服务描述」之间的主题匹配程度，0.0=完全无关，1.0=高度匹配
+- 不判断用户意图，不判断用户是否想使用该服务，只评估内容主题相关性
+- 消息较短时，结合近期对话历史中的话题进行匹配
+- 进行“服务能力询问”（“你能做什么”“有什么功能”）时，所有 skill 评分均为 0
+- 返回相关度最高的前3个（无匹配时返回空数组）
 
-注意：
-- 消息较短时，结合近期对话历史判断真实意图
-- "能咨询血糖问题吗""你们能做什么"等询问服务能力，所有 skill relevance 均为 0
-- 返回 relevance 最高的前3个（不足3个则返回实际数量），无相关 skill 时返回空数组
-
-可用专项服务列表：
+可用服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话说明匹配理由"}`;
   } else {
     // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
     const re = routingExamples;
-    const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
-    const exLow  = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
-    const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
-    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，从可用服务列表中找出最相关的候选项。
+    // examples 作为语义话题参考（不用于嵌入意图判断逻辑）
+    const _examplesRef = [
+      ...re.examples_high.slice(0, 2).map(e => `高相关参考："${e}"`),
+      ...re.examples_low.slice(0, 2).map(e  => `中相关参考："${e}"`),
+      ...re.examples_none.slice(0, 1).map(e => `无关参考："${e}"`),
+    ].join('\n');
+    systemPrompt = `你是语义相关性评分器。对对话内容和每个専项服务的主题、功能、覆盖范围进行语义匹配，评估内容相关程度。
 
-判断标准：
-- relevance=0.8以上：${re.high_desc}（如：${exHigh}）
-- relevance=0.4~0.79：${re.low_desc}（如：${exLow}）
-- relevance=0.39以下：普通聊天/问候/询问服务范围（如：${exNone}）
+评分原则：
+- 只评估「对话内容」与「服务描述」之间的主题匹配程度，0.0=完全无关，1.0=高度匹配
+- 不判断用户意图，不判断用户是否想使用该服务，只评估内容主题相关性
+- 消息较短时，结合近期对话历史中的话题进行匹配
+- 进行服务能力询问时，所有 skill 评分均为 0
+- 返回相关度最高的前3个（无匹配时返回空数组）
 
-注意：
-- 消息较短时，结合近期对话历史判断真实意图
-- 询问服务能力/范围，所有 skill relevance 均为 0
-- 返回 relevance 最高的前3个（不足3个则返回实际数量），无相关 skill 时返回空数组
+语义话题参考（仅供范围参考）：
+${_examplesRef}
 
-可用专项服务列表：
+可用服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话说明匹配理由"}`;
   }
+
 
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
 
