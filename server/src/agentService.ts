@@ -1238,15 +1238,24 @@ ${skillList}
 
 // ─── v2 架构：Step3 — 统一路由决策（替代 routeMessage + routeSkill）──────────
 
+export interface RouteCandidate {
+  skill_id:   string;
+  skill_name: string;
+  relevance:  number;   // 0.0–1.0，由 Router LLM 估算
+  description?: string;
+}
+
 export interface RouteDecisionResult {
   skill_id:   string | null;
   skill_name: string | null;
   skill_desc: string | null;
-  confidence: 'high' | 'low' | 'none'; // high=需要推荐skill | low=健康问题直接回答 | none=普通聊天
+  confidence: 'high' | 'low' | 'none'; // 从 candidates[0].relevance 派生，保持向后兼容
   reason:     string;
   durationMs: number;
   model:      string;
   rawResult:  string;
+  // Phase 2 新增：Top-3 候选列表，供 Main Agent 参考（多 skill 时避免全量注入 context）
+  candidates: RouteCandidate[];
 }
 
 /**
@@ -1288,8 +1297,8 @@ async function routeDecision(
 
   // 无可用 skill 时降级
   if (!availableSkills.length) {
-    return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'low',
-             reason: '无可用skill，直接AI回复', durationMs: 0, model, rawResult: '' };
+    return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'none',
+             reason: '无可用skill，直接AI回复', durationMs: 0, model, rawResult: '', candidates: [] };
   }
 
   const skillList = availableSkills
@@ -1305,48 +1314,46 @@ async function routeDecision(
   let systemPrompt: string;
   if (!routingExamples) {
     // ── 原始医疗 Agent 提示词（禁止改动任何文字）──
-    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，从可用服务列表中找出最相关的候选项。
 
-1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
-2. 判断置信度（confidence）：
-   - "high"：客户明确表达了要使用某个服务（如"帮我做营养分析""开始AI营养师"），可以主动向用户推荐该服务
-   - "low"：客户有健康相关问题，但没明确要求使用某个服务（如"我血糖高怎么办"），直接用AI知识回答即可，不推销服务
-   - "none"：普通聊天/问候/询问服务范围，直接回答，不涉及健康或服务
+判断标准：
+- relevance=0.8以上：客户明确表达要使用该服务（如"帮我做营养分析""开始AI营养师"）
+- relevance=0.4~0.79：客户有相关健康问题但无明确使用意图（如"我血糖高怎么办"）
+- relevance=0.39以下：关联性较弱
 
 注意：
-- 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
-- "能咨询血糖问题吗""你们能做什么"等询问服务能力属于 none，不是 low
-- 如没有合适的 skill，skill_id 返回 null
+- 消息较短时，结合近期对话历史判断真实意图
+- "能咨询血糖问题吗""你们能做什么"等询问服务能力，所有 skill relevance 均为 0
+- 返回 relevance 最高的前3个（不足3个则返回实际数量），无相关 skill 时返回空数组
 
 可用专项服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话理由"}`;
   } else {
     // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
     const re = routingExamples;
     const exHigh = re.examples_high.slice(0, 3).map(e => `"${e}"`).join('、');
     const exLow  = re.examples_low.slice(0, 3).map(e => `"${e}"`).join('、');
     const exNone = re.examples_none.slice(0, 3).map(e => `"${e}"`).join('、');
-    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，做出以下判断：
+    systemPrompt = `你是智能路由助手。根据客户消息和对话历史，从可用服务列表中找出最相关的候选项。
 
-1. 客户的消息是否需要调用某个专项服务（skill）？如需要，选出最匹配的 skill。
-2. 判断置信度（confidence）：
-   - "high"：${re.high_desc}（如：${exHigh}）
-   - "low"：${re.low_desc}（如：${exLow}）
-   - "none"：普通聊天/问候/询问服务范围，直接回答（如：${exNone}）
+判断标准：
+- relevance=0.8以上：${re.high_desc}（如：${exHigh}）
+- relevance=0.4~0.79：${re.low_desc}（如：${exLow}）
+- relevance=0.39以下：普通聊天/问候/询问服务范围（如：${exNone}）
 
 注意：
-- 如果消息较短（补充说明、纠正）请结合近期对话历史判断真实意图
-- 询问服务能力/范围属于 none，不是 low
-- 如没有合适的 skill，skill_id 返回 null
+- 消息较短时，结合近期对话历史判断真实意图
+- 询问服务能力/范围，所有 skill relevance 均为 0
+- 返回 relevance 最高的前3个（不足3个则返回实际数量），无相关 skill 时返回空数组
 
 可用专项服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"skill_id": "xxx或null", "skill_name": "xxx或null", "confidence": "high或low或none", "reason": "一句话理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话理由"}`;
   }
 
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
@@ -1361,25 +1368,48 @@ ${skillList}
     if (jsonStart === -1 || jsonEnd <= jsonStart) throw new Error('no JSON in response');
     const parsed = JSON.parse(result.slice(jsonStart, jsonEnd + 1));
 
-    const skill_id   = parsed.skill_id   || null;
-    const skill_name = parsed.skill_name || null;
-    const confidence = (['high','low','none'] as const).includes(parsed.confidence)
-      ? parsed.confidence as 'high'|'low'|'none' : 'none';
+    // ── Phase 2：解析 candidates 数组 ─────────────────────────────────────────
+    const rawCandidates: any[] = Array.isArray(parsed.candidates) ? parsed.candidates : [];
 
-    // 验证 skill_id 真实存在
-    const validSkill = skill_id ? availableSkills.find(s => s.id === skill_id) : null;
-    const finalSkillId   = validSkill ? skill_id   : null;
-    const finalSkillName = validSkill ? skill_name : null;
-    const finalSkillDesc = validSkill ? validSkill.description : null;
+    // 验证每个候选项的 skill_id 真实存在，过滤幻觉
+    const candidates: RouteCandidate[] = rawCandidates
+      .filter((c: any) => c?.skill_id && typeof c.relevance === 'number')
+      .map((c: any) => {
+        const matched = availableSkills.find(s => s.id === c.skill_id);
+        if (!matched) {
+          console.warn(`[RouteDecision] 候选 skill_id=${c.skill_id} 不存在，过滤`);
+          return null;
+        }
+        return {
+          skill_id:    matched.id,
+          skill_name:  matched.name,
+          relevance:   Math.min(1, Math.max(0, Number(c.relevance))),
+          description: matched.description,
+        } as RouteCandidate;
+      })
+      .filter((c): c is RouteCandidate => c !== null)
+      .sort((a, b) => b.relevance - a.relevance)  // 确保降序
+      .slice(0, 3);                                 // 最多3个
 
-    if (skill_id && !validSkill) {
-      console.warn(`[RouteDecision] 路由返回了未知 skill_id=${skill_id}，降级 null`);
-    }
+    // ── 从 candidates[0].relevance 派生旧字段（下游零改动）──────────────────
+    const top = candidates[0] ?? null;
+    const finalSkillId   = top ? top.skill_id   : null;
+    const finalSkillName = top ? top.skill_name : null;
+    const finalSkillDesc = top ? (top.description ?? null) : null;
+    const confidence: 'high'|'low'|'none' =
+      top && top.relevance >= 0.8 ? 'high' :
+      top && top.relevance >= 0.4 ? 'low'  : 'none';
 
-    console.log(`[RouteDecision] skill=${finalSkillName || 'none'} confidence=${confidence} reason=${parsed.reason} (${durationMs}ms)`);
-    const rdResult = { skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
-             confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim() };
-    // 写入缓存
+    console.log(
+      `[RouteDecision] top=${finalSkillName || 'none'}(${top?.relevance ?? 0}) ` +
+      `confidence=${confidence} candidates=${candidates.length} reason=${parsed.reason} (${durationMs}ms)`
+    );
+
+    const rdResult: RouteDecisionResult = {
+      skill_id: finalSkillId, skill_name: finalSkillName, skill_desc: finalSkillDesc,
+      confidence, reason: parsed.reason || '', durationMs, model, rawResult: result.trim(),
+      candidates,
+    };
     _routeCache.set(cacheKey, { result: rdResult, expireAt: Date.now() + ROUTE_CACHE_TTL_MS });
     return rdResult;
 
@@ -1387,7 +1417,7 @@ ${skillList}
     const durationMs = Date.now() - t0;
     console.warn('[RouteDecision] 路由失败，降级 confidence=none:', err);
     return { skill_id: null, skill_name: null, skill_desc: null, confidence: 'none',
-             reason: '路由失败，降级直接回复', durationMs, model, rawResult: '(error)' };
+             reason: '路由失败，降级直接回复', durationMs, model, rawResult: '(error)', candidates: [] };
   }
 }
 
@@ -1420,6 +1450,8 @@ export interface AgentContextPackage {
   } | null;
   // 代码生成的 directive
   directive: string;
+  // Phase 2 新增：Top-3 候选列表（供日志/未来 Main Agent 参考）
+  routeCandidates: RouteCandidate[];
 }
 
 /**
@@ -1427,18 +1459,19 @@ export interface AgentContextPackage {
  * directive 由代码 if-else 生成，不依赖 AI。
  */
 function assembleAgentContext(params: {
-  req:            any;
-  routeSkillId:   string | null;
-  routeSkillName: string | null;
-  routeSkillDesc: string | null;
-  routeConf:      'high' | 'low' | 'none';
-  guardStatus:    GuardStatus;
-  guardSkillName: string | null;
-  ticketUrl:      string | null;
-  recentTicket:   any | null;
-  serviceUrl:     string;
+  req:              any;
+  routeSkillId:     string | null;
+  routeSkillName:   string | null;
+  routeSkillDesc:   string | null;
+  routeConf:        'high' | 'low' | 'none';
+  routeCandidates:  RouteCandidate[];
+  guardStatus:      GuardStatus;
+  guardSkillName:   string | null;
+  ticketUrl:        string | null;
+  recentTicket:     any | null;
+  serviceUrl:       string;
 }): AgentContextPackage {
-  const { req, routeSkillId, routeSkillName, routeSkillDesc, routeConf,
+  const { req, routeSkillId, routeSkillName, routeSkillDesc, routeConf, routeCandidates,
           guardStatus, guardSkillName, ticketUrl, recentTicket, serviceUrl } = params;
 
   // 组装 existingTicket
@@ -1539,6 +1572,7 @@ function assembleAgentContext(params: {
     ticketUrl,
     existingTicket,
     directive,
+    routeCandidates: routeCandidates ?? [],
   };
 }
 
@@ -2630,6 +2664,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
   let routingContent = req.content;  // 路由上下文（可能含近期文件摘要）
   let routeConfidence: 'high' | 'low' | 'none' = 'none';
   let routeReason = '';
+  let routeCandidates: RouteCandidate[] = [];   // Phase 2: Top-3 候选列表
 
   if (forcedSkillId) {
     // 守卫已确认 / 前端强制 → 跳过路由，直接执行
@@ -2678,6 +2713,7 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     selectedSkillDesc = rdResult.skill_desc;
     routeConfidence   = rdResult.confidence;
     routeReason       = rdResult.reason;
+    routeCandidates   = rdResult.candidates;  // Phase 2: 存储 Top-3 候选
 
     console.log(`[AgentService] → routeDecision: confidence=${rdResult.confidence} skill=${rdResult.skill_name || 'none'} (${rdResult.durationMs}ms)`);
     void appendTaskEvent(requestId, 'route_decided', {
@@ -2970,16 +3006,17 @@ export async function processAgentChat(req: AgentChatRequest): Promise<AgentResp
     //   confirmed_ticket= 用户已确认 → 走 handleHealthSkill，不到这里
     const agentCtxPkg = assembleAgentContext({
       req,
-      routeSkillId:   selectedSkillId,
-      routeSkillName: selectedSkillName,
-      routeSkillDesc: selectedSkillDesc,
-      routeConf:      routeConfidence,
-      guardStatus:    currentGuardStatus,
-      guardSkillName: currentGuardSkillName,
-      ticketUrl:      null,                    // 无工单，直接回复路径
-      recentTicket:   ctxSnapshot.recentTicket || null,
+      routeSkillId:    selectedSkillId,
+      routeSkillName:  selectedSkillName,
+      routeSkillDesc:  selectedSkillDesc,
+      routeConf:       routeConfidence,
+      routeCandidates: routeCandidates,   // Phase 2: 透传 Top-3 候选
+      guardStatus:     currentGuardStatus,
+      guardSkillName:  currentGuardSkillName,
+      ticketUrl:       null,
+      recentTicket:    ctxSnapshot.recentTicket || null,
       serviceUrl,
-      isFirstClarify,                          // Step 7fix: 首次 unclear 需要 Agent 主动引导
+      isFirstClarify,
     } as any);
 
     void appendTaskEvent(requestId, 'agent_context_assembled', {
