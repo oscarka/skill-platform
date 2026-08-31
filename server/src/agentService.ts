@@ -1313,48 +1313,61 @@ async function routeDecision(
   // 当 routing_examples 已配置时，使用动态模板（新 Agent 场景）
   let systemPrompt: string;
   if (!routingExamples) {
-    // ── 纯语义相关性评分 prompt（不嵌入意图判断）───────────────────
-    systemPrompt = `你是语义相关性评分器。对对话内容和每个専项服务的主题、功能、覆盖范围进行语义匹配，评估内容相关程度。
+    // ── 二维 prompt：话题相关性（candidates）+ 使用意图（intent）————————————————
+    systemPrompt = `你是智能路由局。对用户消息进行两项独立评估。
 
-评分原则：
-- 只评估「对话内容」与「服务描述」之间的主题匹配程度，0.0=完全无关，1.0=高度匹配
-- 不判断用户意图，不判断用户是否想使用该服务，只评估内容主题相关性
-- 消息较短时，结合近期对话历史中的话题进行匹配
-- 进行“服务能力询问”（“你能做什么”“有什么功能”）时，所有 skill 评分均为 0
+【评估A】候选服务（话题相关性）
+- 对每个服务进行 0.0～1.0 语义匹配评分，只看内容主题是否相关，不看用户意图
 - 返回相关度最高的前3个（无匹配时返回空数组）
+- 询问服务能力时（“你能做什么”）所有 skill relevance = 0
+
+【评估B】用户意图（intent）
+- 仅判断用户是否要使用服务，与内容主题无关，只看语言形式和行为模式：
+  - 「use_service」：用户用命令式/请求句式要求启动/使用服务（如「帮我做」「我要」「开始」「帮我分析」）
+  - 「ask_question」：用户在提问、咋论、咨询（如「怎么办」「吃什么」「如何」「为什么」）
+  - 「none」：普通聊天、打招呼、闲聊
+- 同时评估意图置信度 intent_conf (0.0～1.0)
+- 消息较短时，结合近期对话历史判断
 
 可用服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话说明匹配理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "intent": "use_service", "intent_conf": 0.88, "reason": "一句话"}`;
   } else {
     // ── 配置化动态提示词（新 Agent 场景，routing_examples 已在数据库中设置）──
     const re = routingExamples;
-    // examples 作为语义话题参考（不用于嵌入意图判断逻辑）
+    // 【配置化分支】加入 intent 二维，examples 作为语义范围参考
     const _examplesRef = [
-      ...re.examples_high.slice(0, 2).map(e => `高相关参考："${e}"`),
-      ...re.examples_low.slice(0, 2).map(e  => `中相关参考："${e}"`),
-      ...re.examples_none.slice(0, 1).map(e => `无关参考："${e}"`),
+      ...re.examples_high.slice(0, 2).map(e => `明确请求示例："${e}"`),
+      ...re.examples_low.slice(0, 2).map(e  => `咋论咨询示例："${e}"`),
+      ...re.examples_none.slice(0, 1).map(e => `无关示例："${e}"`),
     ].join('\n');
-    systemPrompt = `你是语义相关性评分器。对对话内容和每个専项服务的主题、功能、覆盖范围进行语义匹配，评估内容相关程度。
+    systemPrompt = `你是智能路由局。对用户消息进行两项独立评估。
 
-评分原则：
-- 只评估「对话内容」与「服务描述」之间的主题匹配程度，0.0=完全无关，1.0=高度匹配
-- 不判断用户意图，不判断用户是否想使用该服务，只评估内容主题相关性
-- 消息较短时，结合近期对话历史中的话题进行匹配
-- 进行服务能力询问时，所有 skill 评分均为 0
+【评估A】候选服务（话题相关性）
+- 对每个服务进行 0.0～1.0 语义匹配评分，只看内容主题是否相关，不看用户意图
 - 返回相关度最高的前3个（无匹配时返回空数组）
 
-语义话题参考（仅供范围参考）：
+【评估B】用户意图（intent）
+- 仅判断用户是否要使用服务，与内容主题无关，只看语言形式和行为模式：
+  - 「use_service」：命令式/请求句式要求启动/使用服务（如「帮我做」「我要」「开始」「帮我分析」）
+  - 「ask_question」：提问、咋论、咨询（如「怎么办」「如何」「为什么」）
+  - 「none」：普通聊天、打招呼、闲聊
+- 同时评估意图置信度 intent_conf (0.0～1.0)
+- 消息较短时结合近期对话历史判断
+
+语义范围参考：
 ${_examplesRef}
 
 可用服务列表：
 ${skillList}
 
 只返回 JSON，不要有其他内容：
-{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "reason": "一句话说明匹配理由"}`;
+{"candidates": [{"skill_id": "xxx", "skill_name": "xxx", "relevance": 0.91}, ...], "intent": "use_service", "intent_conf": 0.88, "reason": "一句话"}`;
   }
+
+
 
 
   const userMsg = `客户备注：${notes || '（无）'}\n${recentHistory ? `近期对话：\n${recentHistory}\n` : ''}客户最新消息：${content}`;
@@ -1392,18 +1405,30 @@ ${skillList}
       .sort((a, b) => b.relevance - a.relevance)  // 确保降序
       .slice(0, 3);                                 // 最多3个
 
-    // ── 从 candidates[0].relevance 派生旧字段（下游零改动）──────────────────
-    const top = candidates[0] ?? null;
+    // ── top candidate 及旧字段派生（下游零改动）─────────────────────────────
+    const top            = candidates[0] ?? null;
     const finalSkillId   = top ? top.skill_id   : null;
     const finalSkillName = top ? top.skill_name : null;
     const finalSkillDesc = top ? (top.description ?? null) : null;
+
+    // ── 解析 intent 二维 ───────────────────────────────────────────────────────
+    const intentRaw  = (['use_service','ask_question','none'] as const)
+      .includes(parsed.intent) ? parsed.intent as 'use_service'|'ask_question'|'none' : 'none';
+    const intentConf  = typeof parsed.intent_conf === 'number'
+      ? Math.min(1, Math.max(0, parsed.intent_conf)) : 0.5;
+
+
+    // ── 二维组合判断 confidence（代码側规则，LLM 不做决策）───────────
+    //   high = 话题高度匹配 AND 用户明确要用服务 AND 意图置信度足够
+    //   low  = 话题相关 AND （仅为咋论咨询 OR 意图不确定）
+    //   none = 话题无关或普通聊天
     const confidence: 'high'|'low'|'none' =
-      top && top.relevance >= 0.8 ? 'high' :
-      top && top.relevance >= 0.4 ? 'low'  : 'none';
+      top && top.relevance >= 0.7 && intentRaw === 'use_service' && intentConf >= 0.7 ? 'high' :
+      top && top.relevance >= 0.4                                                      ? 'low'  : 'none';
 
     console.log(
-      `[RouteDecision] top=${finalSkillName || 'none'}(${top?.relevance ?? 0}) ` +
-      `confidence=${confidence} candidates=${candidates.length} reason=${parsed.reason} (${durationMs}ms)`
+      `[RouteDecision] top=${finalSkillName || 'none'}(rel=${top?.relevance ?? 0}) ` +
+      `intent=${intentRaw}(${intentConf.toFixed(2)}) → confidence=${confidence} (${durationMs}ms)`
     );
 
     const rdResult: RouteDecisionResult = {
